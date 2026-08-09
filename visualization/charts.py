@@ -23,20 +23,40 @@ warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 
 
 def _setup_chinese_font():
-    """设置中文字体支持，按优先级尝试多个常见中文字体"""
-    font_candidates = ['Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'SimHei', 'Microsoft YaHei']
-    for font_name in font_candidates:
-        for f in fm.fontManager.ttflist:
-            if font_name in f.name:
-                plt.rcParams['font.sans-serif'] = [f.name, 'DejaVu Sans']
-                plt.rcParams['axes.unicode_minus'] = False
-                return
-    # 如果都找不到，使用默认字体（可能无法显示中文）
-    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    """通过显式文件路径创建 FontProperties，确保中文正确渲染"""
+    import os
+
+    local_font_dir = os.path.expanduser('~/.local/share/fonts/noto')
+    regular_path = os.path.join(local_font_dir, 'NotoSansCJKsc-Regular.otf')
+    bold_path = os.path.join(local_font_dir, 'NotoSansCJKsc-Bold.otf')
+
+    if not os.path.exists(regular_path):
+        # 回退：使用 DejaVu Sans（无法显示中文）
+        fp = fm.FontProperties()
+        plt.rcParams['axes.unicode_minus'] = False
+        return fp, fp
+
+    # 注册字体文件
+    for p in [regular_path, bold_path]:
+        if os.path.exists(p):
+            try:
+                fm.fontManager.addfont(p)
+            except Exception:
+                pass
+
+    fp_regular = fm.FontProperties(fname=regular_path)
+    fp_bold = fm.FontProperties(fname=bold_path if os.path.exists(bold_path) else regular_path)
     plt.rcParams['axes.unicode_minus'] = False
 
+    # 同时设置 rcParams（供 mplfinance 等不使用显式 FontProperties 的库使用）
+    font_name = fp_regular.get_name()
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = [font_name, 'DejaVu Sans']
 
-_setup_chinese_font()
+    return fp_regular, fp_bold
+
+
+FP_REGULAR, FP_BOLD = _setup_chinese_font()
 
 # ============================================================================
 # 全局配色方案
@@ -96,7 +116,7 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('kline_indicators.jpg')
+            save_path = self._get_save_path('kline_indicators.png')
 
         # 确保数据按日期排序，索引为DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -164,7 +184,11 @@ class ChartGenerator:
             gridcolor='#e0e0e0',
             facecolor=COLOR_BG,
             figcolor=COLOR_BG,
-            y_on_right=False
+            y_on_right=False,
+            rc={
+                'font.sans-serif': [FP_REGULAR.get_name(), 'DejaVu Sans'],
+                'axes.unicode_minus': False,
+            }
         )
 
         # 绘制图表
@@ -180,6 +204,19 @@ class ChartGenerator:
             returnfig=True,
             warn_too_much_data=len(df) + 1
         )
+
+        # mpf.plot 不走 FontProperties，需在画完后强制修正各轴的字体
+        for ax in axes:
+            if ax.get_title():
+                ax.set_title(ax.get_title(), fontproperties=FP_BOLD)
+            if ax.get_ylabel():
+                ax.set_ylabel(ax.get_ylabel(), fontproperties=FP_REGULAR)
+            for label in (ax.get_xticklabels() + ax.get_yticklabels()):
+                label.set_fontproperties(FP_REGULAR)
+            legend = ax.get_legend()
+            if legend is not None:
+                for text in legend.get_texts():
+                    text.set_fontproperties(FP_REGULAR)
 
         # 调整布局
         fig.tight_layout()
@@ -204,7 +241,7 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('equity_curve.jpg')
+            save_path = self._get_save_path('equity_curve.png')
 
         # 创建子图
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [2.5, 1]})
@@ -234,9 +271,9 @@ class ChartGenerator:
                 initial_value = equity[0] if len(equity) > 0 else 0
             ax1.axhline(y=initial_value, color=COLOR_DARK, linewidth=0.8, linestyle=':', alpha=0.5)
 
-        ax1.set_title(title, fontsize=14, fontweight='bold', color=COLOR_DARK)
-        ax1.set_ylabel('权益', fontsize=11, color=COLOR_DARK)
-        ax1.legend(loc='upper left', framealpha=0.9, edgecolor='#ddd')
+        ax1.set_title(title, fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax1.set_ylabel('权益', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax1.legend(loc='upper left', prop=FP_REGULAR, framealpha=0.9, edgecolor='#ddd')
         ax1.grid(True, alpha=0.3, linestyle=':')
         ax1.set_facecolor(COLOR_BG)
 
@@ -264,8 +301,8 @@ class ChartGenerator:
                     ax2.fill_between(range(len(dd)), 0, dd, color=COLOR_UP, alpha=0.3)
                     ax2.plot(dd, color=COLOR_UP, linewidth=1.2)
 
-        ax2.set_ylabel('回撤 (%)', fontsize=11, color=COLOR_DARK)
-        ax2.set_xlabel('日期', fontsize=11, color=COLOR_DARK)
+        ax2.set_ylabel('回撤 (%)', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax2.set_xlabel('日期', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
         ax2.grid(True, alpha=0.3, linestyle=':')
         ax2.set_facecolor(COLOR_BG)
         ax2.axhline(y=0, color=COLOR_DARK, linewidth=0.5, linestyle='-')
@@ -294,12 +331,13 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('trade_distribution.jpg')
+            save_path = self._get_save_path('trade_distribution.png')
 
         if trades_df is None or len(trades_df) == 0:
             # 创建空图提示
             fig, ax = plt.subplots(figsize=(12, 5))
-            ax.text(0.5, 0.5, '无交易记录', ha='center', va='center', fontsize=16, color=COLOR_GRAY)
+            ax.text(0.5, 0.5, '无交易记录', ha='center', va='center',
+                    fontproperties=FP_REGULAR, fontsize=16, color=COLOR_GRAY)
             fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
             plt.close(fig)
             return save_path
@@ -331,12 +369,12 @@ class ChartGenerator:
         wedges, texts, autotexts = ax1.pie(
             sizes, labels=labels, colors=colors_pie[:len(sizes)],
             autopct='%1.1f%%', startangle=90, explode=explode,
-            shadow=False, textprops={'fontsize': 11}
+            shadow=False, textprops={'fontsize': 11, 'fontproperties': FP_REGULAR}
         )
         for autotext in autotexts:
             autotext.set_color('white')
             autotext.set_fontweight('bold')
-        ax1.set_title('交易盈亏分布', fontsize=13, fontweight='bold', color=COLOR_DARK)
+        ax1.set_title('交易盈亏分布', fontsize=13, fontproperties=FP_BOLD, color=COLOR_DARK)
 
         # 柱状图 - 盈亏金额分布
         if len(trades) > 0:
@@ -351,10 +389,10 @@ class ChartGenerator:
 
             ax2.axvline(x=0, color=COLOR_DARK, linewidth=1, linestyle='-')
             ax2.axvline(x=trades.mean(), color=COLOR_ORANGE, linewidth=1.5, linestyle='--', label=f'均值: {trades.mean():.4f}')
-            ax2.set_title('盈亏分布直方图', fontsize=13, fontweight='bold', color=COLOR_DARK)
-            ax2.set_xlabel('盈亏金额', fontsize=11, color=COLOR_DARK)
-            ax2.set_ylabel('频次', fontsize=11, color=COLOR_DARK)
-            ax2.legend(loc='upper right', framealpha=0.9)
+            ax2.set_title('盈亏分布直方图', fontsize=13, fontproperties=FP_BOLD, color=COLOR_DARK)
+            ax2.set_xlabel('盈亏金额', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+            ax2.set_ylabel('频次', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+            ax2.legend(loc='upper right', prop=FP_REGULAR, framealpha=0.9)
             ax2.grid(True, alpha=0.3, linestyle=':')
 
         for ax in [ax2]:
@@ -384,7 +422,7 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('signal_on_price.jpg')
+            save_path = self._get_save_path('signal_on_price.png')
 
         # 确保索引为DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -421,10 +459,10 @@ class ChartGenerator:
             ax.scatter(sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
                        s=100, zorder=5, label=f'卖出 ({len(sell_signals)}次)', edgecolors='white', linewidth=0.5)
 
-        ax.set_title(title, fontsize=14, fontweight='bold', color=COLOR_DARK)
-        ax.set_ylabel('价格', fontsize=11, color=COLOR_DARK)
-        ax.set_xlabel('日期', fontsize=11, color=COLOR_DARK)
-        ax.legend(loc='upper left', framealpha=0.9, edgecolor='#ddd')
+        ax.set_title(title, fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax.set_ylabel('价格', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax.set_xlabel('日期', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax.legend(loc='upper left', prop=FP_REGULAR, framealpha=0.9, edgecolor='#ddd')
         ax.grid(True, alpha=0.3, linestyle=':')
         ax.set_facecolor(COLOR_BG)
 
@@ -450,7 +488,7 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('indicators_dashboard.jpg')
+            save_path = self._get_save_path('indicators_dashboard.png')
 
         # 确保索引为DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -487,9 +525,9 @@ class ChartGenerator:
         if 'BB_Middle' in df.columns:
             ax1.plot(df.index, df['BB_Middle'], color=COLOR_GRAY, linewidth=0.8, alpha=0.6, linestyle='--')
 
-        ax1.set_title(title, fontsize=14, fontweight='bold', color=COLOR_DARK)
-        ax1.set_ylabel('价格', fontsize=10, color=COLOR_DARK)
-        ax1.legend(loc='upper left', fontsize=8, ncol=3, framealpha=0.9, edgecolor='#ddd')
+        ax1.set_title(title, fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax1.set_ylabel('价格', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax1.legend(loc='upper left', prop=FP_REGULAR, fontsize=8, ncol=3, framealpha=0.9, edgecolor='#ddd')
         ax1.grid(True, alpha=0.3, linestyle=':')
         ax1.set_facecolor(COLOR_BG)
 
@@ -506,8 +544,8 @@ class ChartGenerator:
                     color = COLOR_UP if val >= 0 else COLOR_DOWN
                     ax2.bar(df.index[i], val, color=color, width=0.8, alpha=0.7)
             ax2.axhline(y=0, color=COLOR_DARK, linewidth=0.5, linestyle='-')
-        ax2.set_ylabel('MACD', fontsize=10, color=COLOR_DARK)
-        ax2.legend(loc='upper left', fontsize=8, framealpha=0.9, edgecolor='#ddd')
+        ax2.set_ylabel('MACD', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax2.legend(loc='upper left', prop=FP_REGULAR, fontsize=8, framealpha=0.9, edgecolor='#ddd')
         ax2.grid(True, alpha=0.3, linestyle=':')
         ax2.set_facecolor(COLOR_BG)
 
@@ -521,8 +559,8 @@ class ChartGenerator:
             ax3.axhline(y=50, color=COLOR_GRAY, linewidth=0.5, linestyle=':', alpha=0.4)
             ax3.fill_between(df.index, 30, 70, color=COLOR_GRAY, alpha=0.05)
             ax3.set_ylim(0, 100)
-        ax3.set_ylabel('RSI', fontsize=10, color=COLOR_DARK)
-        ax3.legend(loc='upper left', fontsize=8, framealpha=0.9, edgecolor='#ddd')
+        ax3.set_ylabel('RSI', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax3.legend(loc='upper left', prop=FP_REGULAR, fontsize=8, framealpha=0.9, edgecolor='#ddd')
         ax3.grid(True, alpha=0.3, linestyle=':')
         ax3.set_facecolor(COLOR_BG)
 
@@ -536,8 +574,8 @@ class ChartGenerator:
             ax4.axhline(y=80, color=COLOR_UP, linewidth=0.8, linestyle='--', alpha=0.6)
             ax4.axhline(y=20, color=COLOR_DOWN, linewidth=0.8, linestyle='--', alpha=0.6)
             ax4.set_ylim(0, 100)
-        ax4.set_ylabel('KDJ', fontsize=10, color=COLOR_DARK)
-        ax4.legend(loc='upper left', fontsize=8, framealpha=0.9, edgecolor='#ddd')
+        ax4.set_ylabel('KDJ', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax4.legend(loc='upper left', prop=FP_REGULAR, fontsize=8, framealpha=0.9, edgecolor='#ddd')
         ax4.grid(True, alpha=0.3, linestyle=':')
         ax4.set_facecolor(COLOR_BG)
 
@@ -559,9 +597,9 @@ class ChartGenerator:
             elif 'Volume_MA5' in df.columns:
                 ax5.plot(df.index, df['Volume_MA5'], color=COLOR_ORANGE, linewidth=1, label='量均线', alpha=0.8)
 
-        ax5.set_ylabel('成交量', fontsize=10, color=COLOR_DARK)
-        ax5.set_xlabel('日期', fontsize=10, color=COLOR_DARK)
-        ax5.legend(loc='upper left', fontsize=8, framealpha=0.9, edgecolor='#ddd')
+        ax5.set_ylabel('成交量', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax5.set_xlabel('日期', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax5.legend(loc='upper left', prop=FP_REGULAR, fontsize=8, framealpha=0.9, edgecolor='#ddd')
         ax5.grid(True, alpha=0.3, linestyle=':')
         ax5.set_facecolor(COLOR_BG)
 
@@ -587,11 +625,12 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('compare_strategies.jpg')
+            save_path = self._get_save_path('compare_strategies.png')
 
         if not results_dict:
             fig, ax = plt.subplots(figsize=(14, 6))
-            ax.text(0.5, 0.5, '无策略数据可比较', ha='center', va='center', fontsize=16, color=COLOR_GRAY)
+            ax.text(0.5, 0.5, '无策略数据可比较', ha='center', va='center',
+                    fontproperties=FP_REGULAR, fontsize=16, color=COLOR_GRAY)
             fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
             plt.close(fig)
             return save_path
@@ -609,10 +648,10 @@ class ChartGenerator:
                 else:
                     ax.plot(equity, color=color, linewidth=1.5, label=name, alpha=0.9)
 
-        ax.set_title('策略权益曲线对比', fontsize=14, fontweight='bold', color=COLOR_DARK)
-        ax.set_ylabel('权益', fontsize=11, color=COLOR_DARK)
-        ax.set_xlabel('时间', fontsize=11, color=COLOR_DARK)
-        ax.legend(loc='upper left', fontsize=10, framealpha=0.9, edgecolor='#ddd')
+        ax.set_title('策略权益曲线对比', fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax.set_ylabel('权益', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax.set_xlabel('时间', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax.legend(loc='upper left', prop=FP_REGULAR, fontsize=10, framealpha=0.9, edgecolor='#ddd')
         ax.grid(True, alpha=0.3, linestyle=':')
         ax.set_facecolor(COLOR_BG)
 
@@ -638,11 +677,12 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('risk_heatmap.jpg')
+            save_path = self._get_save_path('risk_heatmap.png')
 
         if not risk_metrics:
             fig, ax = plt.subplots(figsize=(10, 6))
-            ax.text(0.5, 0.5, '无风险指标数据', ha='center', va='center', fontsize=16, color=COLOR_GRAY)
+            ax.text(0.5, 0.5, '无风险指标数据', ha='center', va='center',
+                    fontproperties=FP_REGULAR, fontsize=16, color=COLOR_GRAY)
             fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
             plt.close(fig)
             return save_path
@@ -676,20 +716,21 @@ class ChartGenerator:
             for j in range(len(metric_names)):
                 val = data[i, j]
                 text_color = 'white' if abs(val) > (np.nanmax(np.abs(data)) * 0.5) else 'black'
-                ax.text(j, i, f'{val:.3f}', ha='center', va='center', fontsize=10,
+                ax.text(j, i, f'{val:.3f}', ha='center', va='center',
+                        fontproperties=FP_REGULAR, fontsize=10,
                         color=text_color, fontweight='bold')
 
         # 设置轴标签
         ax.set_xticks(range(len(metric_names)))
-        ax.set_xticklabels(metric_names, fontsize=10, rotation=30, ha='right')
+        ax.set_xticklabels(metric_names, fontsize=10, fontproperties=FP_REGULAR, rotation=30, ha='right')
         ax.set_yticks(range(len(strategies)))
-        ax.set_yticklabels(strategies, fontsize=10)
+        ax.set_yticklabels(strategies, fontsize=10, fontproperties=FP_REGULAR)
 
-        ax.set_title('风险指标热力图', fontsize=14, fontweight='bold', color=COLOR_DARK)
+        ax.set_title('风险指标热力图', fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
 
         # 添加颜色条
         cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-        cbar.set_label('数值', fontsize=10)
+        cbar.set_label('数值', fontsize=10, fontproperties=FP_REGULAR)
 
         fig.tight_layout()
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
@@ -712,11 +753,12 @@ class ChartGenerator:
         str : 保存的文件路径
         """
         if save_path is None:
-            save_path = self._get_save_path('monthly_returns_heatmap.jpg')
+            save_path = self._get_save_path('monthly_returns_heatmap.png')
 
         if daily_returns is None or len(daily_returns) == 0:
             fig, ax = plt.subplots(figsize=(12, 8))
-            ax.text(0.5, 0.5, '无收益数据', ha='center', va='center', fontsize=16, color=COLOR_GRAY)
+            ax.text(0.5, 0.5, '无收益数据', ha='center', va='center',
+                    fontproperties=FP_REGULAR, fontsize=16, color=COLOR_GRAY)
             fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
             plt.close(fig)
             return save_path
@@ -759,21 +801,22 @@ class ChartGenerator:
                 val = pivot.iloc[i, j]
                 if not np.isnan(val):
                     text_color = 'white' if abs(val * 100) > 5 else 'black'
-                    ax.text(j, i, f'{val*100:.1f}%', ha='center', va='center', fontsize=9,
+                    ax.text(j, i, f'{val*100:.1f}%', ha='center', va='center',
+                            fontproperties=FP_REGULAR, fontsize=9,
                             color=text_color, fontweight='bold')
 
         ax.set_xticks(range(12))
-        ax.set_xticklabels(month_labels, fontsize=10)
+        ax.set_xticklabels(month_labels, fontsize=10, fontproperties=FP_REGULAR)
         ax.set_yticks(range(len(pivot)))
-        ax.set_yticklabels(pivot.index.astype(int), fontsize=10)
+        ax.set_yticklabels(pivot.index.astype(int), fontsize=10, fontproperties=FP_REGULAR)
 
-        ax.set_title('月度收益率热力图', fontsize=14, fontweight='bold', color=COLOR_DARK)
-        ax.set_xlabel('月份', fontsize=11, color=COLOR_DARK)
-        ax.set_ylabel('年份', fontsize=11, color=COLOR_DARK)
+        ax.set_title('月度收益率热力图', fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax.set_xlabel('月份', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
+        ax.set_ylabel('年份', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
 
         # 颜色条
         cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-        cbar.set_label('收益率 (%)', fontsize=10)
+        cbar.set_label('收益率 (%)', fontsize=10, fontproperties=FP_REGULAR)
 
         fig.tight_layout()
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)

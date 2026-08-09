@@ -4,6 +4,7 @@
 import click
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime, timedelta
 import sys
 import os
@@ -121,7 +122,18 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', is_ind
     """运行单个策略的完整分析流程"""
     strategy_map = INDEX_STRATEGY_MAP if is_index else STRATEGY_MAP
     strategy_name, strategy_class = strategy_map[strategy_key]
-    strategy = strategy_class()
+
+    if strategy_key == 'composite':
+        from strategies.ma_cross import MACrossStrategy
+        from strategies.macd_strategy import MACDStrategy
+        from strategies.rsi_strategy import RSIStrategy
+        from strategies.bollinger_strategy import BollingerStrategy
+        strategy = strategy_class(
+            [MACrossStrategy(), MACDStrategy(), RSIStrategy(), BollingerStrategy()],
+            threshold=0.3
+        )
+    else:
+        strategy = strategy_class()
 
     # 生成交易信号
     signals = strategy.generate_signals(df)
@@ -157,7 +169,7 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', is_ind
     except Exception:
         pass
 
-    return result, chart_paths, strategy_name
+    return result, chart_paths, strategy_name, signals
 
 
 def _parse_dates(start, end):
@@ -198,6 +210,168 @@ def _format_risk_report_rows(risk):
     return rows
 
 
+def _get_signal_text(sig_series):
+    """从信号序列中提取最新信号文本"""
+    if sig_series is None or len(sig_series) == 0:
+        return 'N/A'
+    last_sig = sig_series.iloc[-1] if hasattr(sig_series, 'iloc') else sig_series[-1]
+    sig_map = {1: '买入', -1: '卖出', 0: '观望'}
+    return sig_map.get(int(last_sig), str(last_sig))
+
+
+def _get_signal_color(sig_text):
+    """获取信号对应的颜色"""
+    return {'买入': 'green', '卖出': 'red', '观望': 'yellow'}.get(sig_text, 'white')
+
+
+def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index,
+                          strategy_map, strategies_to_run, all_results, all_risks, all_charts,
+                          compare_chart_path='', all_signals=None):
+    """生成 HTML 分析报告"""
+    import base64
+    from datetime import datetime as dt
+
+    if all_signals is None:
+        all_signals = {}
+
+    def _safe_pct_html(v):
+        if v is None:
+            return 'N/A'
+        return f'{v * 100:.2f}%'
+
+    def _safe_float_html(v, fmt='.2f'):
+        if v is None:
+            return 'N/A'
+        return f'{v:{fmt}}'
+
+    def _img_to_b64(path):
+        if not path or not os.path.exists(path):
+            return ''
+        with open(path, 'rb') as f:
+            return base64.b64encode(f.read()).decode()
+
+    mode_label = '指数专属' if is_index else '个股通用'
+    report_time = dt.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # 拼排名表
+    rankings = []
+    for sk in strategies_to_run:
+        r = all_risks.get(sk, {})
+        sig_text = _get_signal_text(all_signals.get(sk))
+        rankings.append((
+            strategy_map[sk][0],
+            r.get('total_return'),
+            r.get('sharpe_ratio'),
+            r.get('max_drawdown'),
+            r.get('total_trades'),
+            r.get('annual_return'),
+            r.get('win_rate'),
+            r.get('profit_factor'),
+            sig_text,
+        ))
+    rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
+
+    rank_rows_html = ''
+    for i, (name, tr, sh, dd, nt, ar, wr, pf, sig) in enumerate(rankings, 1):
+        rank_rows_html += f'''<tr>
+            <td>{i}</td><td>{name}</td>
+            <td>{_safe_pct_html(tr)}</td><td>{_safe_float_html(sh)}</td>
+            <td>{_safe_pct_html(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
+            <td>{_safe_pct_html(ar)}</td><td>{_safe_pct_html(wr)}</td>
+            <td>{_safe_float_html(pf)}</td>
+            <td style="font-weight:bold;color:{'#27ae60' if sig == '买入' else '#e74c3c' if sig == '卖出' else '#f39c12'}">{sig}</td>
+        </tr>'''
+
+    # 各策略详情
+    detail_html = ''
+    for sk in strategies_to_run:
+        name = strategy_map[sk][0]
+        risk = all_risks.get(sk, {})
+        charts = all_charts.get(sk, {})
+
+        detail_html += f'<h3>{name}</h3>'
+
+        # 最新信号
+        sig_text = _get_signal_text(all_signals.get(sk))
+        sig_color_html = {'买入': '#27ae60', '卖出': '#e74c3c', '观望': '#f39c12'}.get(sig_text, '#2c3e50')
+        detail_html += f'<div class="signal" style="color:{sig_color_html};font-weight:bold;font-size:16px;margin:10px 0;">最新信号: {sig_text}</div>'
+
+        detail_html += '<table class="detail"><tr><th>指标</th><th>数值</th></tr>'
+        for label, func in [
+            ('总收益率', lambda: _safe_pct_html(risk.get('total_return'))),
+            ('年化收益率', lambda: _safe_pct_html(risk.get('annual_return'))),
+            ('最大回撤', lambda: _safe_pct_html(risk.get('max_drawdown'))),
+            ('夏普比率', lambda: _safe_float_html(risk.get('sharpe_ratio'))),
+            ('胜率', lambda: _safe_pct_html(risk.get('win_rate'))),
+            ('总交易次数', lambda: str(risk.get('total_trades', 'N/A'))),
+            ('盈利因子', lambda: _safe_float_html(risk.get('profit_factor'))),
+        ]:
+            detail_html += f'<tr><td>{label}</td><td>{func()}</td></tr>'
+        detail_html += '</table>'
+
+        for cname, cpath in charts.items():
+            b64 = _img_to_b64(cpath)
+            if b64:
+                ext = os.path.splitext(cpath)[1].lstrip('.')
+                detail_html += f'<div class="chart"><img src="data:image/{ext};base64,{b64}" alt="{cname}"></div>'
+
+    compare_b64 = _img_to_b64(compare_chart_path) if compare_chart_path else ''
+    compare_ext = os.path.splitext(compare_chart_path)[1].lstrip('.') if compare_chart_path else ''
+    compare_chart_html = ''
+    if compare_b64:
+        compare_chart_html = f'<div class="chart"><img src="data:image/{compare_ext};base64,{compare_b64}" alt="策略对比图"></div>'
+
+    html = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>量化分析报告 - {symbol} {sname}</title>
+<style>
+body {{ font-family: 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #fafafa; color: #2c3e50; }}
+h1 {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+h2 {{ border-bottom: 2px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
+h3 {{ color: #2980b9; }}
+table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: center; }}
+th {{ background: #3498db; color: white; }}
+tr:nth-child(even) {{ background: #f2f2f2; }}
+.info {{ background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 15px 0; }}
+.info span {{ margin-right: 30px; }}
+.chart {{ margin: 20px 0; text-align: center; }}
+.chart img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
+.footer {{ text-align: center; color: #95a5a6; margin-top: 40px; font-size: 12px; }}
+</style>
+</head>
+<body>
+<h1>股票量化分析报告</h1>
+<div class="info">
+    <span><strong>股票:</strong> {symbol} {sname}</span>
+    <span><strong>区间:</strong> {start_date} ~ {end_date}</span>
+    <span><strong>初始资金:</strong> {capital:,.0f}</span>
+    <span><strong>模式:</strong> {mode_label}</span>
+    <span><strong>生成时间:</strong> {report_time}</span>
+</div>
+
+<h2>策略对比排名</h2>
+<table class="rank">
+<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th></tr>
+{rank_rows_html}
+</table>
+{compare_chart_html}
+
+<h2>各策略详情</h2>
+{detail_html}
+
+<div class="footer"><p>报告由 stock-quant 自动生成 | {report_time}</p></div>
+</body>
+</html>'''
+
+    report_path = os.path.join('charts', 'report.html')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    return report_path
+
+
 # ============================================================================
 # CLI 命令组
 # ============================================================================
@@ -213,13 +387,72 @@ def cli():
     pass
 
 
+def _resolve_symbol(input_str):
+    """将股票代码或名称解析为 (纯数字代码, 股票名称)
+
+    Args:
+        input_str: 股票代码或名称（如 '000725'、'京东方A'）
+
+    Returns:
+        (code, name) 或 (None, None)
+    """
+    import re as _re
+
+    input_str = input_str.strip()
+    # 去除可能的前缀
+    for prefix in ('sh', 'sz', 'SH', 'SZ'):
+        if input_str.startswith(prefix):
+            input_str = input_str[len(prefix):]
+            break
+
+    # 通过 Sina 搜索 API 解析
+    try:
+        url = f'https://suggest3.sinajs.cn/suggest/type=11&key={input_str}'
+        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn/'}
+        resp = requests.get(url, timeout=10, headers=headers)
+        text = resp.text
+        match = _re.search(r'"([^"]*)"', text)
+        if match:
+            items = match.group(1).split(';')
+            for item in items:
+                fields = item.split(',')
+                if len(fields) >= 4 and fields[2].isdigit():
+                    code = fields[2]
+                    name = fields[4] if len(fields) > 4 and fields[4] else fields[0]
+                    return code, name
+    except Exception:
+        pass
+
+    # 如果是纯数字，至少返回代码
+    if input_str.isdigit():
+        return input_str, ''
+
+    # 备选：akshare 全量股票列表
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        matches = df[df['名称'].str.contains(input_str, na=False)]
+        if matches.empty:
+            return None, None
+        exact = matches[matches['名称'] == input_str]
+        if not exact.empty:
+            code = str(exact.iloc[0]['代码'])
+            name = str(exact.iloc[0]['名称'])
+            return code, name
+        code = str(matches.iloc[0]['代码'])
+        name = str(matches.iloc[0]['名称'])
+        return code, name
+    except Exception:
+        return None, None
+
+
 # ============================================================================
-# analyze 命令 - 单只股票分析
+# analyze 命令 - 单只股票综合分析
 # ============================================================================
 
 
 @cli.command('analyze')
-@click.option('--symbol', '-s', required=True, help='股票代码（必需）')
+@click.option('--symbol', '-s', required=True, help='股票代码或名称（如 000725 或 京东方A）')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
 @click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|rsi|bollinger|composite|all]')
@@ -234,11 +467,39 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
     使用 --index/-i 参数可切换到指数专属策略模式，适用于分析大盘指数。
     """
     try:
+        # 股票代码/名称解析
+        stock_name = ''
+        # 先统一解析为纯数字代码
+        raw_input = symbol
+        symbol = symbol.strip()
+        for prefix in ('sh', 'sz', 'SH', 'SZ'):
+            if symbol.startswith(prefix):
+                symbol = symbol[len(prefix):]
+                break
+        if not symbol.isdigit():
+            # 名称输入 -> 搜索代码
+            click.echo(click.style(f'\n  正在搜索股票: {raw_input}...', fg='blue'))
+            code, name = _resolve_symbol(raw_input)
+            if code is None:
+                click.echo(click.style(f'  错误: 未找到匹配 "{raw_input}" 的股票', fg='red'))
+                return
+            symbol = code
+            stock_name = name
+            click.echo(click.style(f'  找到: {symbol} {stock_name}', fg='green'))
+        else:
+            # 代码输入 -> 查找名称
+            click.echo(click.style(f'\n  正在查找股票名称: {symbol}...', fg='blue'))
+            _, name = _resolve_symbol(symbol)
+            if name:
+                stock_name = name
+                click.echo(click.style(f'  找到: {symbol} {stock_name}', fg='green'))
+
         # 解析日期
         start_date, end_date = _parse_dates(start, end)
 
         # 打印头部
-        _print_header('股票量化分析报告' if not is_index else '指数量化分析报告', symbol)
+        header_display = f'{symbol} {stock_name}'.strip()
+        _print_header('股票量化分析报告' if not is_index else '指数量化分析报告', header_display)
 
         click.echo(click.style(f'  分析区间: {start_date} ~ {end_date}', fg='white'))
         click.echo(click.style(f'  初始资金: {capital:,.0f}', fg='white'))
@@ -284,23 +545,32 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
         all_results = {}
         all_risks = {}
         all_charts = {}
+        all_signals = {}
 
         for sk in strategies_to_run:
             click.echo(click.style(f'  正在运行策略: {strategy_map[sk][0]}...', fg='blue'))
-            result, chart_paths, sname = _run_single_analysis(
+            result, chart_paths, sname, signals = _run_single_analysis(
                 df, sk, capital, chart_gen, is_index=is_index
             )
             all_results[sk] = result
             all_risks[sk] = result
             all_charts[sk] = chart_paths
+            all_signals[sk] = signals
 
         # 输出每个策略的回测结果
         for sk in strategies_to_run:
             sname = strategy_map[sk][0]
             risk = all_risks[sk]
             charts = all_charts[sk]
+            sig = all_signals[sk]
 
             _print_section(f'策略: {sname}')
+
+            # 最新信号
+            sig_text = _get_signal_text(sig)
+            sig_color = _get_signal_color(sig_text)
+            click.echo(click.style(f'    最新信号: ', fg='white', bold=True) +
+                       click.style(sig_text, fg=sig_color, bold=True))
 
             headers = ['指标', '数值']
             rows = _format_risk_report_rows(risk)
@@ -312,31 +582,51 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
                     click.echo(click.style(f'      - {chart_name}: {chart_path}', fg='green'))
 
         # 如果运行了多个策略，输出对比
+        compare_path = ''
         if len(strategies_to_run) > 1:
             _print_section('策略对比排名')
             rankings = []
             for sk in strategies_to_run:
-                rank_total_return = all_risks[sk].get('total_return', -999)
-                rank_sharpe = all_risks[sk].get('sharpe_ratio', -999)
-                rankings.append((strategy_map[sk][0], rank_total_return, rank_sharpe))
+                rank_total_return = all_risks[sk].get('total_return')
+                rank_sharpe = all_risks[sk].get('sharpe_ratio')
+                rank_drawdown = all_risks[sk].get('max_drawdown')
+                rank_trades = all_risks[sk].get('total_trades')
+                rank_signal = _get_signal_text(all_signals.get(sk))
+                rankings.append((strategy_map[sk][0], rank_total_return, rank_sharpe,
+                                 rank_drawdown, rank_trades, rank_signal))
             rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
-            headers = ['排名', '策略', '总收益率', '夏普比率']
+            headers = ['排名', '策略', '总收益率', '夏普比率', '最大回撤', '交易次数', '最新信号']
             table_rows = []
-            for i, (name, total_ret, sharpe) in enumerate(rankings, 1):
+            for i, (name, total_ret, sharpe, drawdown, trades, signal) in enumerate(rankings, 1):
                 ret_str = f'{total_ret * 100:.2f}%' if total_ret is not None else 'N/A'
                 shp_str = f'{sharpe:.2f}' if sharpe is not None else 'N/A'
-                table_rows.append([i, name, ret_str, shp_str])
+                dd_str = f'{drawdown * 100:.2f}%' if drawdown is not None else 'N/A'
+                tr_str = str(int(trades)) if trades is not None else 'N/A'
+                table_rows.append([i, name, ret_str, shp_str, dd_str, tr_str, signal])
             _print_table(headers, table_rows)
 
             # 生成策略对比图表
             click.echo(click.style('\n  正在生成策略对比图表...', fg='blue'))
             try:
                 compare_result = {strategy_map[sk][0]: all_results[sk] for sk in strategies_to_run}
-                compare_path = chart_gen.plot_compare_strategies(compare_result)
+                compare_path = chart_gen.plot_compare_strategies(compare_result) or ''
                 click.echo(click.style(f'    策略对比图: {compare_path}', fg='green'))
             except Exception as e:
                 click.echo(click.style(f'    对比图生成失败: {e}', fg='yellow'))
+
+        # 生成 HTML 报告
+        try:
+            html_path = _generate_html_report(
+                symbol, stock_name, start_date, end_date, capital,
+                is_index, strategy_map, strategies_to_run,
+                all_results, all_risks, all_charts,
+                compare_chart_path=compare_path,
+                all_signals=all_signals
+            )
+            click.echo(click.style(f'\n  HTML报告: {html_path}', fg='green'))
+        except Exception as e:
+            click.echo(click.style(f'\n  HTML报告生成失败: {e}', fg='yellow'))
 
         click.echo()
         click.echo(click.style('  分析完成!', fg='green', bold=True))
@@ -624,16 +914,20 @@ def compare_cmd(symbol, start, end, capital):
         # 排名
         _print_section('综合排名（按夏普比率）')
 
-        rankings = [(STRATEGY_MAP[sk][0], all_risks[sk].get('sharpe_ratio', -999),
-                     all_risks[sk].get('total_return', -999)) for sk in ALL_STRATEGIES]
+        rankings = [(STRATEGY_MAP[sk][0], all_risks[sk].get('sharpe_ratio'),
+                     all_risks[sk].get('total_return'),
+                     all_risks[sk].get('max_drawdown'),
+                     all_risks[sk].get('total_trades')) for sk in ALL_STRATEGIES]
         rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
-        headers = ['排名', '策略', '夏普比率', '总收益率']
+        headers = ['排名', '策略', '夏普比率', '总收益率', '最大回撤', '交易次数']
         rank_rows = []
-        for i, (name, sharpe, total_ret) in enumerate(rankings, 1):
+        for i, (name, sharpe, total_ret, drawdown, trades) in enumerate(rankings, 1):
             shp_str = f'{sharpe:.2f}' if sharpe is not None else 'N/A'
             ret_str = f'{total_ret * 100:.2f}%' if total_ret is not None else 'N/A'
-            rank_rows.append([i, name, shp_str, ret_str])
+            dd_str = f'{drawdown * 100:.2f}%' if drawdown is not None else 'N/A'
+            tr_str = str(int(trades)) if trades is not None else 'N/A'
+            rank_rows.append([i, name, shp_str, ret_str, dd_str, tr_str])
         _print_table(headers, rank_rows)
 
         # 生成对比图表

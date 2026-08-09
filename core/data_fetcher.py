@@ -247,6 +247,57 @@ class DataFetcher:
             logger.error("获取 %s 数据失败: %s", symbol, str(e))
             return pd.DataFrame()
 
+        # 确保每个 df 都有标准化的日期列用于合并
+        processed = []
+        date_col_names = ['日期', 'date', 'Date']
+
+        for df in df_list:
+            d = df.copy()
+            # 找到日期列并统一名称
+            found_date_col = None
+            for col in date_col_names:
+                if col in d.columns:
+                    found_date_col = col
+                    break
+            if found_date_col is None and d.index.name in date_col_names:
+                d = d.reset_index()
+                found_date_col = d.index.name
+            if found_date_col is None:
+                # 尝试将 index 作为日期
+                d = d.reset_index()
+                for col in date_col_names:
+                    if col in d.columns:
+                        found_date_col = col
+                        break
+
+            if found_date_col is None:
+                continue
+
+            d['_date_merge'] = pd.to_datetime(d[found_date_col], errors='coerce')
+            d = d.dropna(subset=['_date_merge'])
+            d = d.drop(columns=[found_date_col], errors='ignore')
+            processed.append(d)
+
+        if not processed:
+            return pd.DataFrame()
+
+        # 合并：按 _date_merge 去重，保留靠前的数据源
+        merged = processed[0]
+        for next_df in processed[1:]:
+            # 找出 next_df 中 merged 没有的日期
+            existing_dates = set(merged['_date_merge'])
+            new_rows = next_df[~next_df['_date_merge'].isin(existing_dates)]
+            if not new_rows.empty:
+                merged = pd.concat([merged, new_rows], ignore_index=True)
+
+        # 按日期排序
+        merged = merged.sort_values('_date_merge').reset_index(drop=True)
+
+        # 将 _date_merge 重命名为 日期
+        merged = merged.rename(columns={'_date_merge': '日期'})
+
+        return merged
+
     def _get_us_stock_data(
         self,
         symbol: str,
