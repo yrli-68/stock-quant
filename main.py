@@ -8,6 +8,7 @@ import requests
 from datetime import datetime, timedelta
 import sys
 import os
+import json
 import warnings
 
 # 将项目根目录加入 Python 路径
@@ -59,6 +60,25 @@ INDEX_STRATEGY_MAP = {
 
 ALL_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'composite']
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
+
+# ETF/指数基金专用策略（适配低波动、趋势跟随特性）
+ETF_STRATEGY_MAP = {
+    'ma_cross': ('ETF均线交叉策略', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
+    'macd': ('ETF MACD策略', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
+    'rsi': ('ETF RSI策略', lambda: RSIStrategy(period=14, oversold=35, overbought=65, name='ETF RSI')),
+    'bollinger': ('ETF布林带策略', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
+    'composite': ('ETF综合策略', lambda: CompositeStrategy(
+        [MACrossStrategy(fast_period=10, slow_period=40),
+         MACDStrategy(fast=16, slow=32, signal=12),
+         RSIStrategy(period=14, oversold=35, overbought=65),
+         BollingerStrategy(period=20, std=2.5)],
+        threshold=0.4, name='ETF Composite')),
+}
+ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'composite']
+
+# 判断是否为 ETF/指数基金（5开头上海ETF / 159开头深圳ETF / 16开头LOF等）
+def _is_etf(symbol):
+    return symbol.startswith(('5', '15', '16', '51', '58', '588')) or symbol[:3] == '159'
 
 # ============================================================================
 # 辅助函数
@@ -118,9 +138,10 @@ def _run_strategy(strategy_key, df, capital=100000, is_index=False):
     return result
 
 
-def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', is_index=False):
+def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strategy_map=None):
     """运行单个策略的完整分析流程"""
-    strategy_map = INDEX_STRATEGY_MAP if is_index else STRATEGY_MAP
+    if strategy_map is None:
+        strategy_map = STRATEGY_MAP
     strategy_name, strategy_class = strategy_map[strategy_key]
 
     if strategy_key == 'composite':
@@ -128,10 +149,14 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', is_ind
         from strategies.macd_strategy import MACDStrategy
         from strategies.rsi_strategy import RSIStrategy
         from strategies.bollinger_strategy import BollingerStrategy
-        strategy = strategy_class(
-            [MACrossStrategy(), MACDStrategy(), RSIStrategy(), BollingerStrategy()],
-            threshold=0.3
-        )
+        # ETF 模式下 strategy_class 已是 lambda，直接调用即可
+        if callable(strategy_class) and not isinstance(strategy_class, type):
+            strategy = strategy_class()
+        else:
+            strategy = strategy_class(
+                [MACrossStrategy(), MACDStrategy(), RSIStrategy(), BollingerStrategy()],
+                threshold=0.3
+            )
     else:
         strategy = strategy_class()
 
@@ -147,23 +172,24 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', is_ind
     # 合并风险指标
     result.update(risk)
 
-    # 生成图表
+    # 生成图表（为每个策略创建独立 ChartGenerator，避免图表互相覆盖）
+    sk_chart_gen = ChartGenerator(output_dir=chart_gen.output_dir, prefix=f'{chart_gen.prefix.rstrip("_")}_{strategy_key}')
     chart_paths = {}
     title = f'{prefix} {strategy_name}'
     try:
-        chart_paths['kline'] = chart_gen.plot_kline_with_indicators(
+        chart_paths['kline'] = sk_chart_gen.plot_kline_with_indicators(
             df, title=f'{title} - K线图与技术指标'
         )
     except Exception:
         pass
     try:
-        chart_paths['equity'] = chart_gen.plot_equity_curve(
+        chart_paths['equity'] = sk_chart_gen.plot_equity_curve(
             result, title=f'{title} - 权益曲线'
         )
     except Exception:
         pass
     try:
-        chart_paths['signals'] = chart_gen.plot_signal_on_price(
+        chart_paths['signals'] = sk_chart_gen.plot_signal_on_price(
             df, signals, title=f'{title} - 买卖信号'
         )
     except Exception:
@@ -366,7 +392,152 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </body>
 </html>'''
 
-    report_path = os.path.join('charts', 'report.html')
+    report_path = os.path.join('output', f'{symbol}_report.html')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    return report_path
+
+
+def _generate_multi_html_report(all_stock_data, strategy, is_index, capital):
+    """生成多股票汇总 HTML 报告"""
+    import base64
+    from datetime import datetime as dt
+
+    report_time = dt.now().strftime('%Y-%m-%d %H:%M:%S')
+    mode_label = '指数专属' if is_index else '个股通用'
+
+    def _safe_pct(v):
+        return f'{v * 100:.2f}%' if v is not None else 'N/A'
+
+    def _safe_float(v, fmt='.2f'):
+        return f'{v:{fmt}}' if v is not None else 'N/A'
+
+    def _img_to_b64(path):
+        if not path or not os.path.exists(path):
+            return ''
+        with open(path, 'rb') as f:
+            return base64.b64encode(f.read()).decode()
+
+    # 汇总表：每只股票各策略的排名（取每只股票的最佳策略）
+    summary_rows = ''
+    for d in all_stock_data:
+        s = d['symbol']
+        sn = d['stock_name']
+        label = f'{s} {sn}'.strip()
+        smap = d['strategy_map']
+        risks = d.get('all_risks', {})
+        sigs = d.get('all_signals', {})
+
+        # 找最佳策略
+        best_sk = None
+        best_ret = -999
+        for sk in smap:
+            r = risks.get(sk, {}).get('total_return')
+            if r is not None and (r or 0) > best_ret:
+                best_ret = r or 0
+                best_sk = sk
+        if best_sk:
+            r = risks[best_sk] if best_sk in risks else {}
+            sig_text = _get_signal_text(sigs.get(best_sk))
+            sig_color = {'买入': '#27ae60', '卖出': '#e74c3c', '观望': '#f39c12'}.get(sig_text, '#2c3e50')
+            summary_rows += f'''<tr>
+                <td>{label}</td><td>{smap[best_sk][0]}</td>
+                <td>{_safe_pct(r.get('total_return'))}</td>
+                <td>{_safe_float(r.get('sharpe_ratio'))}</td>
+                <td>{_safe_pct(r.get('max_drawdown'))}</td>
+                <td>{r.get('total_trades', 'N/A')}</td>
+                <td style="font-weight:bold;color:{sig_color}">{sig_text}</td>
+            </tr>'''
+
+    # 各股票详情
+    detail_sections = ''
+    for d in all_stock_data:
+        s = d['symbol']
+        sn = d['stock_name']
+        label = f'{s} {sn}'.strip()
+        smap = d['strategy_map']
+        risks = d.get('all_risks', {})
+        sigs = d.get('all_signals', {})
+        charts = d.get('all_charts', {})
+
+        detail_sections += f'<h2>{label}</h2>'
+
+        # 排名表
+        rankings = []
+        for sk in d['strategies_to_run']:
+            r = risks.get(sk, {})
+            rankings.append((
+                smap[sk][0], r.get('total_return'), r.get('sharpe_ratio'),
+                r.get('max_drawdown'), r.get('total_trades'),
+                _get_signal_text(sigs.get(sk)),
+            ))
+        rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
+
+        rank_rows = ''
+        for i, (name, tr, sh, dd, nt, sg) in enumerate(rankings, 1):
+            rank_rows += f'''<tr>
+                <td>{i}</td><td>{name}</td>
+                <td>{_safe_pct(tr)}</td><td>{_safe_float(sh)}</td>
+                <td>{_safe_pct(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
+                <td style="font-weight:bold;color:{'#27ae60' if sg == '买入' else '#e74c3c' if sg == '卖出' else '#f39c12'}">{sg}</td>
+            </tr>'''
+        detail_sections += f'''<table>
+            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th></tr>
+            {rank_rows}
+        </table>'''
+
+        # 嵌入图表
+        for sk in d['strategies_to_run']:
+            ch = charts.get(sk, {})
+            for cname, cpath in ch.items():
+                b64 = _img_to_b64(cpath)
+                if b64:
+                    ext = os.path.splitext(cpath)[1].lstrip('.')
+                    detail_sections += f'<div class="chart"><img src="data:image/{ext};base64,{b64}" alt="{cname}"></div>'
+
+    html = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>量化分析报告 - 批量汇总</title>
+<style>
+body {{ font-family: 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #fafafa; color: #2c3e50; }}
+h1 {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+h2 {{ border-bottom: 2px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
+h3 {{ color: #2980b9; }}
+table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: center; }}
+th {{ background: #3498db; color: white; }}
+tr:nth-child(even) {{ background: #f2f2f2; }}
+.info {{ background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 15px 0; }}
+.info span {{ margin-right: 30px; }}
+.chart {{ margin: 20px 0; text-align: center; }}
+.chart img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
+.footer {{ text-align: center; color: #95a5a6; margin-top: 40px; font-size: 12px; }}
+</style>
+</head>
+<body>
+<h1>股票量化分析报告（批量）</h1>
+<div class="info">
+    <span><strong>股票数:</strong> {len(all_stock_data)}</span>
+    <span><strong>初始资金:</strong> {capital:,.0f}</span>
+    <span><strong>模式:</strong> {mode_label}</span>
+    <span><strong>生成时间:</strong> {report_time}</span>
+</div>
+
+<h2>汇总排名（各股票最佳策略）</h2>
+<table>
+<tr><th>股票</th><th>最佳策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th></tr>
+{summary_rows}
+</table>
+
+{detail_sections}
+
+<div class="footer"><p>报告由 stock-quant 自动生成 | {report_time}</p></div>
+</body>
+</html>'''
+
+    report_path = os.path.join('output', 'report.html')
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(html)
     return report_path
@@ -452,42 +623,81 @@ def _resolve_symbol(input_str):
 
 
 @cli.command('analyze')
-@click.option('--symbol', '-s', required=True, help='股票代码或名称（如 000725 或 京东方A）')
+@click.option('--symbol', '-s', default=None, help='股票代码或名称（如 000725 或 京东方A），不指定则从 favs.json 读取')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
 @click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|rsi|bollinger|composite|all]')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
-@click.option('--output', '-o', default='./charts', help='图表输出目录（默认./charts）')
+@click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
-    """单只股票综合分析
+    """单只/批量股票综合分析
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
 
     使用 --index/-i 参数可切换到指数专属策略模式，适用于分析大盘指数。
+    不指定 -s 时从 favs.json 读取股票列表进行批量分析。
     """
+    # 确定要分析的股票列表
+    if symbol:
+        symbols = [symbol]
+    else:
+        favs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'favs.json')
+        if not os.path.exists(favs_path):
+            click.echo(click.style(f'  错误: favs.json 不存在 ({favs_path})', fg='red'))
+            return
+        try:
+            with open(favs_path, 'r', encoding='utf-8') as f:
+                symbols = json.load(f)
+        except Exception as e:
+            click.echo(click.style(f'  错误: 无法读取 favs.json: {e}', fg='red'))
+            return
+        if not symbols:
+            click.echo(click.style('  错误: favs.json 中没有股票', fg='red'))
+            return
+        click.echo(click.style(f'\n  从 favs.json 加载 {len(symbols)} 只股票', fg='blue'))
+
+    all_stock_data = []
+    for idx, raw_symbol in enumerate(symbols):
+        if len(symbols) > 1:
+            click.echo(click.style(f'\n  ── [{idx+1}/{len(symbols)}] ──', fg='cyan', bold=True))
+        data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, batch_mode=len(symbols) > 1)
+        if data is not None:
+            all_stock_data.append(data)
+
+    if len(symbols) > 1:
+        click.echo(click.style(f'\n  批量分析完成，共 {len(symbols)} 只股票', fg='green', bold=True))
+
+    # 生成汇总 HTML 报告
+    if all_stock_data:
+        try:
+            html_path = _generate_multi_html_report(all_stock_data, strategy, is_index, capital)
+            click.echo(click.style(f'\n  汇总报告: {html_path}', fg='green'))
+        except Exception as e:
+            click.echo(click.style(f'\n  汇总报告生成失败: {e}', fg='yellow'))
+
+
+def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, batch_mode=False):
+    """分析单只股票"""
+    symbol = raw_symbol.strip()
+    for prefix in ('sh', 'sz', 'SH', 'SZ'):
+        if symbol.startswith(prefix):
+            symbol = symbol[len(prefix):]
+            break
+
     try:
         # 股票代码/名称解析
         stock_name = ''
-        # 先统一解析为纯数字代码
-        raw_input = symbol
-        symbol = symbol.strip()
-        for prefix in ('sh', 'sz', 'SH', 'SZ'):
-            if symbol.startswith(prefix):
-                symbol = symbol[len(prefix):]
-                break
         if not symbol.isdigit():
-            # 名称输入 -> 搜索代码
-            click.echo(click.style(f'\n  正在搜索股票: {raw_input}...', fg='blue'))
-            code, name = _resolve_symbol(raw_input)
+            click.echo(click.style(f'\n  正在搜索股票: {raw_symbol}...', fg='blue'))
+            code, name = _resolve_symbol(raw_symbol)
             if code is None:
-                click.echo(click.style(f'  错误: 未找到匹配 "{raw_input}" 的股票', fg='red'))
+                click.echo(click.style(f'  错误: 未找到匹配 "{raw_symbol}" 的股票', fg='red'))
                 return
             symbol = code
             stock_name = name
             click.echo(click.style(f'  找到: {symbol} {stock_name}', fg='green'))
         else:
-            # 代码输入 -> 查找名称
             click.echo(click.style(f'\n  正在查找股票名称: {symbol}...', fg='blue'))
             _, name = _resolve_symbol(symbol)
             if name:
@@ -503,11 +713,6 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
 
         click.echo(click.style(f'  分析区间: {start_date} ~ {end_date}', fg='white'))
         click.echo(click.style(f'  初始资金: {capital:,.0f}', fg='white'))
-        click.echo(click.style(f'  策略模式: {"指数专属" if is_index else "个股通用"}', fg='white'))
-        if is_index:
-            click.echo(click.style(f'  策略选择: {strategy} (动量分层/波动率择时/涨跌比确认)', fg='white'))
-        else:
-            click.echo(click.style(f'  策略选择: {strategy}', fg='white'))
 
         # 获取数据
         click.echo(click.style('\n  正在获取股票数据...', fg='blue'))
@@ -520,17 +725,32 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
 
         click.echo(click.style(f'  获取到 {len(df)} 条数据记录', fg='green'))
 
+        # 判断 ETF/指数基金
+        is_etf = not is_index and _is_etf(symbol)
+
         # 计算技术指标
         click.echo(click.style('  正在计算技术指标...', fg='blue'))
         df = add_all_indicators(df)
         click.echo(click.style(f'  已计算 {len(df.columns)} 项指标', fg='green'))
 
         # 初始化图表生成器
-        chart_gen = ChartGenerator(output_dir=output)
+        chart_gen = ChartGenerator(output_dir=output, prefix=symbol)
 
-        # 确定要运行的策略列表
-        strategy_map = INDEX_STRATEGY_MAP if is_index else STRATEGY_MAP
-        all_strategies_list = ALL_INDEX_STRATEGIES if is_index else ALL_STRATEGIES
+        # 确定要运行的策略列表和模式标签
+        if is_index:
+            strategy_map = INDEX_STRATEGY_MAP
+            all_strategies_list = ALL_INDEX_STRATEGIES
+            mode_label = '指数专属'
+        elif is_etf:
+            strategy_map = ETF_STRATEGY_MAP
+            all_strategies_list = ALL_ETF_STRATEGIES
+            mode_label = 'ETF专用'
+        else:
+            strategy_map = STRATEGY_MAP
+            all_strategies_list = ALL_STRATEGIES
+            mode_label = '个股通用'
+
+        click.echo(click.style(f'  策略模式: {mode_label}', fg='white'))
 
         if strategy == 'all':
             strategies_to_run = all_strategies_list
@@ -550,7 +770,7 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
         for sk in strategies_to_run:
             click.echo(click.style(f'  正在运行策略: {strategy_map[sk][0]}...', fg='blue'))
             result, chart_paths, sname, signals = _run_single_analysis(
-                df, sk, capital, chart_gen, is_index=is_index
+                df, sk, capital, chart_gen, strategy_map=strategy_map
             )
             all_results[sk] = result
             all_risks[sk] = result
@@ -615,22 +835,40 @@ def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
             except Exception as e:
                 click.echo(click.style(f'    对比图生成失败: {e}', fg='yellow'))
 
-        # 生成 HTML 报告
-        try:
-            html_path = _generate_html_report(
-                symbol, stock_name, start_date, end_date, capital,
-                is_index, strategy_map, strategies_to_run,
-                all_results, all_risks, all_charts,
-                compare_chart_path=compare_path,
-                all_signals=all_signals
-            )
-            click.echo(click.style(f'\n  HTML报告: {html_path}', fg='green'))
-        except Exception as e:
-            click.echo(click.style(f'\n  HTML报告生成失败: {e}', fg='yellow'))
+        # 生成 HTML 报告（单只股票时）
+        if not batch_mode:
+            try:
+                html_path = _generate_html_report(
+                    symbol, stock_name, start_date, end_date, capital,
+                    is_index, strategy_map, strategies_to_run,
+                    all_results, all_risks, all_charts,
+                    compare_chart_path=compare_path,
+                    all_signals=all_signals
+                )
+                click.echo(click.style(f'\n  HTML报告: {html_path}', fg='green'))
+            except Exception as e:
+                click.echo(click.style(f'\n  HTML报告生成失败: {e}', fg='yellow'))
 
         click.echo()
         click.echo(click.style('  分析完成!', fg='green', bold=True))
         click.echo()
+
+        # 返回数据供批量报告使用
+        return {
+            'symbol': symbol,
+            'stock_name': stock_name,
+            'start_date': start_date,
+            'end_date': end_date,
+            'capital': capital,
+            'is_index': is_index,
+            'strategy_map': strategy_map,
+            'strategies_to_run': strategies_to_run,
+            'all_results': all_results,
+            'all_risks': all_risks,
+            'all_charts': all_charts,
+            'all_signals': all_signals,
+            'compare_path': compare_path,
+        }
 
     except Exception as e:
         click.echo(click.style(f'\n  错误: {e}', fg='red', bold=True))
@@ -763,7 +1001,7 @@ def scan_cmd(strategy, top, min_volume):
 @click.option('--start', '-st', default=None, help='开始日期，格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期，格式: YYYY-MM-DD')
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
-@click.option('--output', '-o', default='./charts', help='图表输出目录（默认./charts）')
+@click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 def backtest_cmd(symbol, strategy, start, end, capital, output):
     """回测指定策略
 
@@ -932,7 +1170,7 @@ def compare_cmd(symbol, start, end, capital):
 
         # 生成对比图表
         click.echo(click.style('\n  正在生成策略对比图表...', fg='blue'))
-        chart_gen = ChartGenerator(output_dir='./charts')
+        chart_gen = ChartGenerator(output_dir='./output')
         try:
             compare_data = {STRATEGY_MAP[sk][0]: all_results[sk] for sk in ALL_STRATEGIES}
             compare_path = chart_gen.plot_compare_strategies(compare_data)

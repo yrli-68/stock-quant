@@ -85,20 +85,22 @@ STRATEGY_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#e67e22', '#9b59b6', '#1abc
 class ChartGenerator:
     """图表生成器，用于生成各类量化分析图表"""
 
-    def __init__(self, output_dir='./charts'):
+    def __init__(self, output_dir='./output', prefix=''):
         """
         初始化图表生成器
 
         Parameters
         ----------
         output_dir : str, 图表输出目录
+        prefix : str, 文件名前缀（如股票代码），避免批量分析时互相覆盖
         """
         self.output_dir = output_dir
+        self.prefix = (prefix + '_') if prefix else ''
         os.makedirs(output_dir, exist_ok=True)
 
     def _get_save_path(self, filename):
-        """获取完整的保存路径"""
-        return os.path.join(self.output_dir, filename)
+        """获取完整的保存路径（自动加前缀）"""
+        return os.path.join(self.output_dir, self.prefix + filename)
 
     def plot_kline_with_indicators(self, df, title='K线图与技术指标', save_path=None):
         """
