@@ -6,8 +6,8 @@ __pycache__/
 dist/
 build/
 
-# Charts & generated images
-charts/
+# Output
+output/
 *.jpg
 *.zip
 
