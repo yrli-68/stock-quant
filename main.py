@@ -28,6 +28,7 @@ from strategies.composite_strategy import CompositeStrategy
 from strategies.momentum_tiered import MomentumTieredStrategy
 from strategies.volatility_timing import VolatilityTimingStrategy
 from strategies.breadth_confirmation import BreadthConfirmationStrategy
+from strategies.value_factor import ValueFactorStrategy
 from visualization.charts import ChartGenerator
 
 # 导入表格格式化库
@@ -49,6 +50,7 @@ STRATEGY_MAP = {
     'macd': ('MACD策略', MACDStrategy),
     'rsi': ('RSI策略', RSIStrategy),
     'bollinger': ('布林带策略', BollingerStrategy),
+    'value_factor': ('价值因子策略', ValueFactorStrategy),
     'composite': ('综合策略', CompositeStrategy),
 }
 
@@ -58,7 +60,7 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'composite']
+ALL_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'value_factor', 'composite']
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 
 # ETF/指数基金专用策略（适配低波动、趋势跟随特性）
@@ -67,6 +69,7 @@ ETF_STRATEGY_MAP = {
     'macd': ('ETF MACD策略', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
     'rsi': ('ETF RSI策略', lambda: RSIStrategy(period=14, oversold=35, overbought=65, name='ETF RSI')),
     'bollinger': ('ETF布林带策略', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
+    'value_factor': ('ETF价值因子策略', lambda: ValueFactorStrategy(stock_type='auto', name='ETF ValueFactor')),
     'composite': ('ETF综合策略', lambda: CompositeStrategy(
         [MACrossStrategy(fast_period=10, slow_period=40),
          MACDStrategy(fast=16, slow=32, signal=12),
@@ -74,7 +77,7 @@ ETF_STRATEGY_MAP = {
          BollingerStrategy(period=20, std=2.5)],
         threshold=0.4, name='ETF Composite')),
 }
-ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'composite']
+ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'value_factor', 'composite']
 
 # 判断是否为 ETF/指数基金（5开头上海ETF / 159开头深圳ETF / 16开头LOF等）
 def _is_etf(symbol):
@@ -735,6 +738,9 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
         # 初始化图表生成器
         chart_gen = ChartGenerator(output_dir=output, prefix=symbol)
+
+        # 注入股票代码供策略使用
+        df.attrs['symbol'] = symbol
 
         # 确定要运行的策略列表和模式标签
         if is_index:
