@@ -716,13 +716,14 @@ def _resolve_symbol(input_str):
 @cli.command('analyze')
 @click.option('--symbol', '-s', default=None, help='股票代码或名称（如 000725 或 京东方A）')
 @click.option('--symbol-file', '-sf', default=None, help='从指定文件读取自选股列表（JSON数组），与 -s 同时使用时合并')
+@click.option('--strategy-rank', '-gr', is_flag=True, default=False, help='生成报告后对策略进行收益率排名')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
 @click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|rsi|bollinger|composite|all]')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
-def analyze_cmd(symbol, symbol_file, start, end, strategy, is_index, capital, output):
+def analyze_cmd(symbol, symbol_file, strategy_rank, start, end, strategy, is_index, capital, output):
     """单只/批量股票综合分析
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
@@ -803,6 +804,11 @@ def analyze_cmd(symbol, symbol_file, start, end, strategy, is_index, capital, ou
             click.echo(click.style(f'\n  汇总报告: {html_path}', fg='green'))
         except Exception as e:
             click.echo(click.style(f'\n  汇总报告生成失败: {e}', fg='yellow'))
+
+    # 策略排名分析
+    if strategy_rank and all_stock_data:
+        html_path = os.path.join('output', 'report.html')
+        _rank_strategies_from_report(html_path)
 
 
 def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, batch_mode=False):
@@ -1140,6 +1146,80 @@ def scan_cmd(strategy, top, min_volume):
         click.echo(click.style(f'\n  错误: {e}', fg='red', bold=True))
         import traceback
         click.echo(click.style(traceback.format_exc(), fg='red'))
+
+
+def _rank_strategies_from_report(html_path):
+    """解析 HTML 报告，计算每种策略的平均收益率并排名打印"""
+    import re
+    from collections import defaultdict
+
+    if not os.path.exists(html_path):
+        click.echo(click.style(f'  报告文件不存在: {html_path}', fg='red'))
+        return
+
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html = f.read()
+
+    blocks = re.split(r'<h2>', html)[1:]
+    strategy_returns = defaultdict(list)
+    stock_count = 0
+
+    for block in blocks:
+        stock_match = re.match(r'([^<]+)', block)
+        if not stock_match:
+            continue
+        stock_count += 1
+
+        table_match = re.search(r'<table>(.*?)</table>', block, re.DOTALL)
+        if not table_match:
+            continue
+        table_html = table_match.group(1)
+
+        rows = re.findall(r'<tr>(.*?)</tr>', table_html, re.DOTALL)
+        for row in rows:
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+            if len(cells) >= 3:
+                strategy_name = cells[1].strip()
+                ret_str = cells[2].strip().rstrip('%')
+                try:
+                    ret_val = float(ret_str)
+                except ValueError:
+                    continue
+                strategy_returns[strategy_name].append(ret_val)
+
+    if not strategy_returns:
+        click.echo(click.style('  报告中没有策略数据', fg='yellow'))
+        return
+
+    avg_returns = {}
+    for name, returns in strategy_returns.items():
+        avg = sum(returns) / len(returns)
+        win_rate = sum(1 for r in returns if r > 0) / len(returns) * 100
+        avg_returns[name] = (avg, win_rate, len(returns), max(returns), min(returns))
+
+    ranked = sorted(avg_returns.items(), key=lambda x: x[1][0], reverse=True)
+
+    click.echo()
+    click.echo(click.style('=' * 78, fg='cyan', bold=True))
+    click.echo(click.style('  策略收益率排名（基于报告统计）', fg='cyan', bold=True))
+    click.echo(click.style(f'  股票数: {stock_count}  策略数: {len(strategy_returns)}', fg='cyan'))
+    click.echo(click.style('=' * 78, fg='cyan', bold=True))
+    click.echo()
+
+    headers = ['排名', '策略', '平均收益率', '正收益占比', '样本', '最高', '最低']
+    table_rows = []
+    for i, (name, (avg, wr, n, mx, mn)) in enumerate(ranked, 1):
+        table_rows.append([
+            i, name,
+            f'{avg:+.2f}%',
+            f'{wr:.0f}%',
+            n,
+            f'{mx:+.2f}%',
+            f'{mn:+.2f}%',
+        ])
+    _print_table(headers, table_rows)
+
+    click.echo()
 
 
 # ============================================================================

@@ -14,11 +14,11 @@
         "threshold": 0.25,
         "strategies": {
             "ma_cross": 0.18,
-            "macd": 0.18,
-            "rsi": 0.18,
-            "bollinger": 0.18,
+            "macd": 0.20,
+            "rsi": 0.17,
+            "bollinger": 0.20,
             "value_factor": 0.08,
-            "quality_factor": 0.08,
+            "quality_factor": 0.05,
             "momentum": 0.04,
             "volatility": 0.04,
             "breadth": 0.04
