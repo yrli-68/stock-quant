@@ -1,0 +1,27 @@
+{
+    "favorites": [
+        "002920",
+        "300726",
+        "002008",
+        "000049",
+        "000725",
+        "300763",
+        "000021",
+        "300496",
+        "601138"
+    ],
+    "composite": {
+        "threshold": 0.25,
+        "strategies": {
+            "ma_cross": 0.18,
+            "macd": 0.18,
+            "rsi": 0.18,
+            "bollinger": 0.18,
+            "value_factor": 0.08,
+            "quality_factor": 0.08,
+            "momentum": 0.04,
+            "volatility": 0.04,
+            "breadth": 0.04
+        }
+    }
+}

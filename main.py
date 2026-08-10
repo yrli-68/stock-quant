@@ -29,6 +29,7 @@ from strategies.momentum_tiered import MomentumTieredStrategy
 from strategies.volatility_timing import VolatilityTimingStrategy
 from strategies.breadth_confirmation import BreadthConfirmationStrategy
 from strategies.value_factor import ValueFactorStrategy
+from strategies.quality_factor import QualityFactorStrategy
 from visualization.charts import ChartGenerator
 
 # 导入表格格式化库
@@ -51,6 +52,7 @@ STRATEGY_MAP = {
     'rsi': ('RSI策略', RSIStrategy),
     'bollinger': ('布林带策略', BollingerStrategy),
     'value_factor': ('价值因子策略', ValueFactorStrategy),
+    'quality_factor': ('质量因子策略', QualityFactorStrategy),
     'composite': ('综合策略', CompositeStrategy),
 }
 
@@ -60,7 +62,7 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'value_factor', 'composite']
+ALL_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'value_factor', 'quality_factor', 'composite']
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 
 # ETF/指数基金专用策略（适配低波动、趋势跟随特性）
@@ -70,6 +72,7 @@ ETF_STRATEGY_MAP = {
     'rsi': ('ETF RSI策略', lambda: RSIStrategy(period=14, oversold=35, overbought=65, name='ETF RSI')),
     'bollinger': ('ETF布林带策略', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
     'value_factor': ('ETF价值因子策略', lambda: ValueFactorStrategy(stock_type='auto', name='ETF ValueFactor')),
+    'quality_factor': ('ETF质量因子策略', lambda: QualityFactorStrategy(name='ETF QualityFactor')),
     'composite': ('ETF综合策略', lambda: CompositeStrategy(
         [MACrossStrategy(fast_period=10, slow_period=40),
          MACDStrategy(fast=16, slow=32, signal=12),
@@ -77,11 +80,90 @@ ETF_STRATEGY_MAP = {
          BollingerStrategy(period=20, std=2.5)],
         threshold=0.4, name='ETF Composite')),
 }
-ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'value_factor', 'composite']
+ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'value_factor', 'quality_factor', 'composite']
+
+# 策略 key 到类的映射（不含 composite，composite 由配置动态构建）
+_STRATEGY_CLASS_MAP = {
+    'ma_cross': MACrossStrategy,
+    'macd': MACDStrategy,
+    'rsi': RSIStrategy,
+    'bollinger': BollingerStrategy,
+    'value_factor': ValueFactorStrategy,
+    'quality_factor': QualityFactorStrategy,
+    'momentum': MomentumTieredStrategy,
+    'volatility': VolatilityTimingStrategy,
+    'breadth': BreadthConfirmationStrategy,
+}
+
+# 综合策略默认权重（stock-quant.json 不存在时的回退值）
+_DEFAULT_COMPOSITE_WEIGHTS = {
+    'ma_cross': 0.18,
+    'macd': 0.18,
+    'rsi': 0.18,
+    'bollinger': 0.18,
+    'value_factor': 0.08,
+    'quality_factor': 0.08,
+    'momentum': 0.04,
+    'volatility': 0.04,
+    'breadth': 0.04,
+}
+_DEFAULT_COMPOSITE_THRESHOLD = 0.25
+
+_quant_config = None
+
+
+def _load_quant_config():
+    """加载 stock-quant.json 配置文件，失败时返回空字典"""
+    global _quant_config
+    if _quant_config is not None:
+        return _quant_config
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'stock-quant.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            _quant_config = json.load(f)
+    except Exception:
+        _quant_config = {}
+    return _quant_config
+
+
+def _build_composite_from_config():
+    """根据 stock-quant.json 配置构建 CompositeStrategy 实例"""
+    config = _load_quant_config()
+    composite_cfg = config.get('composite', {})
+    weights_dict = composite_cfg.get('strategies', _DEFAULT_COMPOSITE_WEIGHTS)
+    threshold = composite_cfg.get('threshold', _DEFAULT_COMPOSITE_THRESHOLD)
+
+    strategies = []
+    weights = []
+    for key, weight in weights_dict.items():
+        cls = _STRATEGY_CLASS_MAP.get(key)
+        if cls is not None:
+            strategies.append(cls())
+            weights.append(weight)
+
+    if not strategies:
+        strategies = [MACrossStrategy(), MACDStrategy(), RSIStrategy(), BollingerStrategy()]
+        weights = [0.25, 0.25, 0.25, 0.25]
+
+    return CompositeStrategy(strategies, weights=weights, threshold=threshold, name='Composite')
+
 
 # 判断是否为 ETF/指数基金（5开头上海ETF / 159开头深圳ETF / 16开头LOF等）
 def _is_etf(symbol):
     return symbol.startswith(('5', '15', '16', '51', '58', '588')) or symbol[:3] == '159'
+
+
+def _is_market_open():
+    """判断当前是否处于 A 股交易时段（9:30-11:30, 13:00-15:00，周一至周五）"""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    morning_start = datetime.strptime('09:30', '%H:%M').time()
+    morning_end = datetime.strptime('11:30', '%H:%M').time()
+    afternoon_start = datetime.strptime('13:00', '%H:%M').time()
+    afternoon_end = datetime.strptime('15:00', '%H:%M').time()
+    return (morning_start <= t <= morning_end) or (afternoon_start <= t <= afternoon_end)
 
 # ============================================================================
 # 辅助函数
@@ -126,7 +208,10 @@ def _run_strategy(strategy_key, df, capital=100000, is_index=False):
     """运行单个策略并返回回测结果"""
     strategy_map = INDEX_STRATEGY_MAP if is_index else STRATEGY_MAP
     strategy_name, strategy_class = strategy_map[strategy_key]
-    strategy = strategy_class()
+    if strategy_key == 'composite':
+        strategy = _build_composite_from_config()
+    else:
+        strategy = strategy_class()
     signals = strategy.generate_signals(df)
     engine = BacktestEngine(initial_capital=capital)
     result = engine.run(df, signals)
@@ -148,18 +233,11 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strate
     strategy_name, strategy_class = strategy_map[strategy_key]
 
     if strategy_key == 'composite':
-        from strategies.ma_cross import MACrossStrategy
-        from strategies.macd_strategy import MACDStrategy
-        from strategies.rsi_strategy import RSIStrategy
-        from strategies.bollinger_strategy import BollingerStrategy
         # ETF 模式下 strategy_class 已是 lambda，直接调用即可
         if callable(strategy_class) and not isinstance(strategy_class, type):
             strategy = strategy_class()
         else:
-            strategy = strategy_class(
-                [MACrossStrategy(), MACDStrategy(), RSIStrategy(), BollingerStrategy()],
-                threshold=0.3
-            )
+            strategy = _build_composite_from_config()
     else:
         strategy = strategy_class()
 
@@ -255,7 +333,7 @@ def _get_signal_color(sig_text):
 
 def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index,
                           strategy_map, strategies_to_run, all_results, all_risks, all_charts,
-                          compare_chart_path='', all_signals=None):
+                          compare_chart_path='', all_signals=None, latest_close=None, latest_date=None):
     """生成 HTML 分析报告"""
     import base64
     from datetime import datetime as dt
@@ -380,6 +458,9 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
     <span><strong>模式:</strong> {mode_label}</span>
     <span><strong>生成时间:</strong> {report_time}</span>
 </div>
+<div class="info">
+    <span><strong>最新价格:</strong> {f'{latest_close:.2f}' if latest_close is not None else 'N/A'} <small>({str(latest_date.date()) if latest_date is not None else 'N/A'})</small></span>
+</div>
 
 <h2>策略对比排名</h2>
 <table class="rank">
@@ -426,6 +507,9 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital):
     for d in all_stock_data:
         s = d['symbol']
         sn = d['stock_name']
+        lc = d.get('latest_close')
+        ldt = d.get('latest_date')
+        price_str = f'{lc:.2f}' if lc is not None else 'N/A'
         label = f'{s} {sn}'.strip()
         smap = d['strategy_map']
         risks = d.get('all_risks', {})
@@ -444,7 +528,7 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital):
             sig_text = _get_signal_text(sigs.get(best_sk))
             sig_color = {'买入': '#27ae60', '卖出': '#e74c3c', '观望': '#f39c12'}.get(sig_text, '#2c3e50')
             summary_rows += f'''<tr>
-                <td>{label}</td><td>{smap[best_sk][0]}</td>
+                <td>{label}</td><td>{price_str}</td><td>{smap[best_sk][0]}</td>
                 <td>{_safe_pct(r.get('total_return'))}</td>
                 <td>{_safe_float(r.get('sharpe_ratio'))}</td>
                 <td>{_safe_pct(r.get('max_drawdown'))}</td>
@@ -457,13 +541,17 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital):
     for d in all_stock_data:
         s = d['symbol']
         sn = d['stock_name']
+        lc = d.get('latest_close')
+        ldt = d.get('latest_date')
+        price_str = f'{lc:.2f}' if lc is not None else ''
+        date_str = f'({ldt.date()})' if ldt is not None else ''
         label = f'{s} {sn}'.strip()
         smap = d['strategy_map']
         risks = d.get('all_risks', {})
         sigs = d.get('all_signals', {})
         charts = d.get('all_charts', {})
 
-        detail_sections += f'<h2>{label}</h2>'
+        detail_sections += f'<h2>{label} <small style="color:#666;font-weight:normal">{price_str} {date_str}</small></h2>'
 
         # 排名表
         rankings = []
@@ -530,7 +618,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 
 <h2>汇总排名（各股票最佳策略）</h2>
 <table>
-<tr><th>股票</th><th>最佳策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th></tr>
+<tr><th>股票</th><th>最新价格</th><th>最佳策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th></tr>
 {summary_rows}
 </table>
 
@@ -626,39 +714,76 @@ def _resolve_symbol(input_str):
 
 
 @cli.command('analyze')
-@click.option('--symbol', '-s', default=None, help='股票代码或名称（如 000725 或 京东方A），不指定则从 favs.json 读取')
+@click.option('--symbol', '-s', default=None, help='股票代码或名称（如 000725 或 京东方A）')
+@click.option('--symbol-file', '-sf', default=None, help='从指定文件读取自选股列表（JSON数组），与 -s 同时使用时合并')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
 @click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|rsi|bollinger|composite|all]')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
-def analyze_cmd(symbol, start, end, strategy, is_index, capital, output):
+def analyze_cmd(symbol, symbol_file, start, end, strategy, is_index, capital, output):
     """单只/批量股票综合分析
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
 
     使用 --index/-i 参数可切换到指数专属策略模式，适用于分析大盘指数。
-    不指定 -s 时从 favs.json 读取股票列表进行批量分析。
+    -s 和 -sf 可同时使用，股票列表会自动合并去重。
+    都不指定时从 stock-quant.json 读取自选股。
     """
     # 确定要分析的股票列表
+    def _read_symbols_file(path):
+        if not os.path.exists(path):
+            click.echo(click.style(f'  错误: 文件不存在 ({path})', fg='red'))
+            return []
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(s).strip() for s in data if str(s).strip()]
+            click.echo(click.style(f'  错误: {path} 内容不是 JSON 数组', fg='red'))
+            return []
+        except Exception as e:
+            click.echo(click.style(f'  错误: 无法读取 {path}: {e}', fg='red'))
+            return []
+
+    symbols = []
+    sources = []
+
     if symbol:
         symbols = [symbol]
-    else:
-        favs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'favs.json')
-        if not os.path.exists(favs_path):
-            click.echo(click.style(f'  错误: favs.json 不存在 ({favs_path})', fg='red'))
-            return
-        try:
-            with open(favs_path, 'r', encoding='utf-8') as f:
-                symbols = json.load(f)
-        except Exception as e:
-            click.echo(click.style(f'  错误: 无法读取 favs.json: {e}', fg='red'))
-            return
-        if not symbols:
-            click.echo(click.style('  错误: favs.json 中没有股票', fg='red'))
-            return
-        click.echo(click.style(f'\n  从 favs.json 加载 {len(symbols)} 只股票', fg='blue'))
+        sources.append(f'-s ({symbol})')
+
+    if symbol_file:
+        file_symbols = _read_symbols_file(symbol_file)
+        if file_symbols:
+            symbols.extend(file_symbols)
+            sources.append(f'-sf ({len(file_symbols)}只)')
+
+    if not symbols:
+        config = _load_quant_config()
+        if 'favorites' in config and config['favorites']:
+            symbols = config['favorites']
+            sources.append('stock-quant.json')
+        else:
+            favs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'favs.json')
+            file_symbols = _read_symbols_file(favs_path)
+            if not file_symbols:
+                click.echo(click.style('  错误: 没有可用的自选股来源', fg='red'))
+                return
+            symbols = file_symbols
+            sources.append('favs.json')
+
+    # 去重并保持顺序
+    seen = set()
+    deduped = []
+    for s in symbols:
+        if s not in seen:
+            seen.add(s)
+            deduped.append(s)
+    symbols = deduped
+
+    click.echo(click.style(f'\n  股票来源: {", ".join(sources)} → 共 {len(symbols)} 只（已去重）', fg='blue'))
 
     all_stock_data = []
     for idx, raw_symbol in enumerate(symbols):
@@ -727,6 +852,23 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             return
 
         click.echo(click.style(f'  获取到 {len(df)} 条数据记录', fg='green'))
+
+        # 最新价格：开盘时间内尝试获取实时价格，否则取上一日收盘价
+        latest_close = df['close'].iloc[-1]
+        latest_date = df.index[-1]
+        is_realtime = False
+        if _is_market_open():
+            try:
+                rt = fetcher.get_realtime_quote(symbol)
+                if rt and rt.get('price') and rt['price'] > 0:
+                    latest_close = rt['price']
+                    latest_date = datetime.now()
+                    is_realtime = True
+                    click.echo(click.style(f'  实时价格: {latest_close:.2f}', fg='yellow'))
+            except Exception:
+                pass
+        if not is_realtime:
+            click.echo(click.style(f'  最新价格: {latest_close:.2f} ({latest_date.date()})', fg='green'))
 
         # 判断 ETF/指数基金
         is_etf = not is_index and _is_etf(symbol)
@@ -849,7 +991,9 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                     is_index, strategy_map, strategies_to_run,
                     all_results, all_risks, all_charts,
                     compare_chart_path=compare_path,
-                    all_signals=all_signals
+                    all_signals=all_signals,
+                    latest_close=latest_close,
+                    latest_date=latest_date
                 )
                 click.echo(click.style(f'\n  HTML报告: {html_path}', fg='green'))
             except Exception as e:
@@ -863,6 +1007,8 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
         return {
             'symbol': symbol,
             'stock_name': stock_name,
+            'latest_close': latest_close,
+            'latest_date': latest_date,
             'start_date': start_date,
             'end_date': end_date,
             'capital': capital,
