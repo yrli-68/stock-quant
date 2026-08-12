@@ -6,6 +6,8 @@ __pycache__/
 dist/
 build/
 
+venv/
+
 # Output
 output/
 *.jpg

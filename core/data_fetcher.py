@@ -177,23 +177,45 @@ class DataFetcher:
         获取A股历史数据，支持复权
 
         数据流程:
-        1. 从新浪财经获取不复权K线数据
-        2. 如果需要复权，从新浪获取复权因子并计算复权价格
-
-        Args:
-            symbol: A股代码
-            start_date: 起始日期 YYYYMMDD
-            end_date: 结束日期 YYYYMMDD
-            adjust: 复权类型
-
-        Returns:
-            pd.DataFrame: 原始数据（未标准化）
+        1. 先尝试从 MySQL 数据库读取
+        2. 数据缺失或不足时，从新浪获取并回写数据库
+        3. 如需要，从新浪获取复权因子并计算复权价格
         """
         raw_symbol = self._normalize_a_stock_symbol(symbol)
         sina_code = self._get_sina_prefix(raw_symbol)
 
+        # ============================================================
+        # 第一步：尝试从 MySQL 读取
+        # ============================================================
         try:
-            # 第一步：获取不复权K线数据
+            from core.db import fetch_kline
+            db_start = start_date[:4] + '-' + start_date[4:6] + '-' + start_date[6:8]
+            db_end   = end_date[:4]   + '-' + end_date[4:6]   + '-' + end_date[6:8]
+            db_rows = fetch_kline(raw_symbol, db_start, db_end)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'date', 'open', 'high', 'low', 'close', 'volume',
+                    'amount', 'amplitude', 'change_pct', 'change_val', 'turnover_rate'
+                ])
+                df_db['date'] = pd.to_datetime(df_db['date'])
+                df_db = df_db.dropna(axis=1, how='all')
+
+                # 若 DB 最晚日期 < 请求终点，从网络补全最新数据
+                db_last = df_db['date'].max()
+                end_dt  = pd.to_datetime(db_end)
+                if db_last >= end_dt - pd.Timedelta(days=1):
+                    logger.info("从数据库读取 %d 条 K 线记录: %s", len(df_db), raw_symbol)
+                    return df_db
+                else:
+                    logger.info("数据库 K 线不完整 (末条 %s, 需要 %s)，从网络补全",
+                                db_last.date(), db_end)
+        except Exception as e:
+            logger.debug("数据库读取 K 线跳过: %s", e)
+
+        # ============================================================
+        # 第二步：从新浪 API 获取
+        # ============================================================
+        try:
             datalen = 1000  # 最多获取1000条
             url = (
                 f'https://quotes.sina.com.cn/cn/api/json_v2.php/'
@@ -217,7 +239,7 @@ class DataFetcher:
             df['low'] = pd.to_numeric(df['low'], errors='coerce')
             df['close'] = pd.to_numeric(df['close'], errors='coerce')
             df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-            df = df.drop(columns=['day'])  # 移除原始day列，避免与date冲突
+            df = df.drop(columns=['day'])
 
             # 过滤日期范围
             start_dt = pd.to_datetime(start_date)
@@ -230,13 +252,34 @@ class DataFetcher:
 
             logger.info("新浪返回 %d 条原始K线记录 (不复权)", len(df))
 
-            # 第二步：如果需要复权，获取复权因子并计算
+            # 复权
             adjust_type = adjust if adjust != 'None' else ''
             if adjust_type in ('qfq', 'hfq'):
                 factor_df = self._get_sina_adjust_factor(raw_symbol, adjust_type)
                 if not factor_df.empty:
                     df = self._apply_adjust_factor(df, factor_df, adjust_type)
                     logger.info("已应用 %s 复权因子，共 %d 条记录", adjust_type, len(df))
+
+            # 回写数据库
+            try:
+                from core.db import store_kline
+                rows = []
+                for _, row in df.iterrows():
+                    rows.append((
+                        raw_symbol,
+                        row['date'].strftime('%Y-%m-%d'),
+                        float(row['open']), float(row['high']), float(row['low']),
+                        float(row['close']), float(row['volume']),
+                        float(row.get('amount', 0)) if pd.notna(row.get('amount')) else None,
+                        float(row.get('amplitude', 0)) if pd.notna(row.get('amplitude')) else None,
+                        float(row.get('change_pct', 0)) if pd.notna(row.get('change_pct')) else None,
+                        float(row.get('change_val', 0)) if pd.notna(row.get('change_val')) else None,
+                        float(row.get('turnover_rate', 0)) if pd.notna(row.get('turnover_rate')) else None,
+                    ))
+                if rows:
+                    store_kline(raw_symbol, rows)
+            except Exception as e:
+                logger.debug("K 线回写数据库跳过: %s", e)
 
             return df
 
@@ -246,57 +289,6 @@ class DataFetcher:
         except Exception as e:
             logger.error("获取 %s 数据失败: %s", symbol, str(e))
             return pd.DataFrame()
-
-        # 确保每个 df 都有标准化的日期列用于合并
-        processed = []
-        date_col_names = ['日期', 'date', 'Date']
-
-        for df in df_list:
-            d = df.copy()
-            # 找到日期列并统一名称
-            found_date_col = None
-            for col in date_col_names:
-                if col in d.columns:
-                    found_date_col = col
-                    break
-            if found_date_col is None and d.index.name in date_col_names:
-                d = d.reset_index()
-                found_date_col = d.index.name
-            if found_date_col is None:
-                # 尝试将 index 作为日期
-                d = d.reset_index()
-                for col in date_col_names:
-                    if col in d.columns:
-                        found_date_col = col
-                        break
-
-            if found_date_col is None:
-                continue
-
-            d['_date_merge'] = pd.to_datetime(d[found_date_col], errors='coerce')
-            d = d.dropna(subset=['_date_merge'])
-            d = d.drop(columns=[found_date_col], errors='ignore')
-            processed.append(d)
-
-        if not processed:
-            return pd.DataFrame()
-
-        # 合并：按 _date_merge 去重，保留靠前的数据源
-        merged = processed[0]
-        for next_df in processed[1:]:
-            # 找出 next_df 中 merged 没有的日期
-            existing_dates = set(merged['_date_merge'])
-            new_rows = next_df[~next_df['_date_merge'].isin(existing_dates)]
-            if not new_rows.empty:
-                merged = pd.concat([merged, new_rows], ignore_index=True)
-
-        # 按日期排序
-        merged = merged.sort_values('_date_merge').reset_index(drop=True)
-
-        # 将 _date_merge 重命名为 日期
-        merged = merged.rename(columns={'_date_merge': '日期'})
-
-        return merged
 
     def _get_us_stock_data(
         self,
@@ -340,8 +332,8 @@ class DataFetcher:
         新浪复权因子接口返回累乘因子，格式:
         var sh600036qfq = {"total":32, "data": [{"d":"2026-07-10", "f":"1.0000"}, ...]}
 
-        前复权: 最新因子=1.0，历史因子逐渐增大
-        后复权: 最早因子=1.0，最新因子逐渐增大
+         前复权: 最新因子=1.0，历史因子逐渐增大，用于 price/factor 向下折算历史价格
+         后复权: 最早因子=1.0，最新因子逐渐增大，用于 price*factor 向上折算后续价格
 
         Args:
             symbol: 纯数字股票代码
@@ -394,8 +386,8 @@ class DataFetcher:
         将复权因子应用到K线数据
 
         复权逻辑:
-        - 前复权(qfq): 复权价格 = 原始价格 × 前复权因子
-          前复权因子在最新日期为1.0，历史值逐渐增大
+        - 前复权(qfq): 复权价格 = 原始价格 / 前复权因子
+          前复权因子在最新日期为1.0，历史值逐渐增大，历史价格向下折算
         - 后复权(hfq): 复权价格 = 原始价格 × 后复权因子
           后复权因子在最早日期为1.0，最新值逐渐增大
 
@@ -434,7 +426,10 @@ class DataFetcher:
         price_cols = ['open', 'high', 'low', 'close']
         for col in price_cols:
             if col in df_sorted.columns:
-                df_sorted[col] = (df_sorted[col] * df_sorted['factor']).round(3)
+                if adjust_type == 'qfq':
+                    df_sorted[col] = (df_sorted[col] / df_sorted['factor']).round(3)
+                else:
+                    df_sorted[col] = (df_sorted[col] * df_sorted['factor']).round(3)
 
         # 清理临时列
         df_sorted = df_sorted.drop(columns=['factor_date', 'factor', 'day'], errors='ignore')
@@ -501,6 +496,22 @@ class DataFetcher:
         """
         logger.info("获取除权除息数据: %s", symbol)
 
+        raw_symbol = self._normalize_a_stock_symbol(symbol)
+
+        # 优先从数据库读取
+        try:
+            from core.db import fetch_dividend_events
+            db_rows = fetch_dividend_events(raw_symbol)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'ex_date', 'cash_per_share', 'stock_per_share', 'plan'
+                ])
+                df_db['ex_date'] = pd.to_datetime(df_db['ex_date'])
+                logger.info("从数据库读取 %d 条除权事件: %s", len(df_db), symbol)
+                return df_db
+        except Exception:
+            pass
+
         try:
             raw_symbol = self._normalize_a_stock_symbol(symbol)
             sina_code = self._get_sina_prefix(raw_symbol)
@@ -558,6 +569,12 @@ class DataFetcher:
             df = pd.DataFrame(rows)
             df = df.sort_values('ex_date', ascending=False)
             logger.info("成功获取 %s 除权除息数据，共 %d 条记录", symbol, len(df))
+            # 回写数据库
+            try:
+                from core.db import store_dividend_events
+                store_dividend_events(raw_symbol, df)
+            except Exception:
+                pass
             return df
 
         except requests.RequestException as e:

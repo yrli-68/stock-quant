@@ -157,6 +157,21 @@ class QualityValueFactorStrategy(Strategy):
             return None
 
     def _fetch_index_valuation(self, symbol):
+        # 先尝试从数据库读取
+        try:
+            from core.db import fetch_valuation
+            db_rows = fetch_valuation(symbol)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'date', 'pe_ttm', 'pb', 'ps', 'pcf', 'ey', 'dividend_yield'
+                ])
+                df_db['date'] = pd.to_datetime(df_db['date'])
+                df_db = df_db.set_index('date')
+                logger.info("从数据库读取 %d 条指数估值: %s", len(df_db), symbol)
+                return df_db
+        except Exception:
+            pass
+
         import akshare as ak
 
         index_name_map = {
@@ -195,9 +210,25 @@ class QualityValueFactorStrategy(Strategy):
         if 'pe_ttm' in df.columns:
             df['ey'] = 1.0 / df['pe_ttm'].replace(0, np.nan)
             df['dividend_yield'] = np.nan
+        self._save_valuation_to_db(symbol, df)
         return df
 
     def _fetch_stock_valuation(self, symbol):
+        # 先尝试从数据库读取
+        try:
+            from core.db import fetch_valuation
+            db_rows = fetch_valuation(symbol)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'date', 'pe_ttm', 'pb', 'ps', 'pcf', 'ey', 'dividend_yield'
+                ])
+                df_db['date'] = pd.to_datetime(df_db['date'])
+                df_db = df_db.set_index('date')
+                logger.info("从数据库读取 %d 条估值记录: %s", len(df_db), symbol)
+                return df_db
+        except Exception:
+            pass
+
         import akshare as ak
 
         try:
@@ -216,6 +247,8 @@ class QualityValueFactorStrategy(Strategy):
                 if 'pe_ttm' in df.columns:
                     df['ey'] = 1.0 / df['pe_ttm'].replace(0, np.nan)
                 df['dividend_yield'] = np.nan
+                # 回写数据库
+                self._save_valuation_to_db(symbol, df)
                 return df
         except Exception:
             pass
@@ -242,9 +275,39 @@ class QualityValueFactorStrategy(Strategy):
             if 'pe_ttm' in df.columns:
                 df['ey'] = 1.0 / df['pe_ttm'].replace(0, np.nan)
             df['dividend_yield'] = np.nan
+            self._save_valuation_to_db(symbol, df)
             return df
         except Exception:
             return None
+
+    def _save_valuation_to_db(self, symbol, df):
+        """回写估值数据到数据库"""
+        try:
+            from core.db import store_valuation
+            rows = []
+            for idx, row in df.iterrows():
+                rows.append((
+                    symbol,
+                    idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)[:10],
+                    float(row['pe_ttm']) if pd.notna(row.get('pe_ttm')) else None,
+                    float(row['pb']) if pd.notna(row.get('pb')) else None,
+                    float(row['ps']) if pd.notna(row.get('ps')) else None,
+                    float(row['pcf']) if pd.notna(row.get('pcf')) else None,
+                    float(row['ey']) if pd.notna(row.get('ey')) else None,
+                    float(row['dividend_yield']) if pd.notna(row.get('dividend_yield')) else None,
+                ))
+            if rows:
+                store_valuation(symbol, rows)
+        except Exception:
+            pass
+
+    def _save_financials_to_db(self, symbol, df):
+        """回写财务数据到数据库"""
+        try:
+            from core.db import store_financials
+            store_financials(symbol, df)
+        except Exception:
+            pass
 
     # =========================================================================
     # 价值因子分位数打分
@@ -304,10 +367,31 @@ class QualityValueFactorStrategy(Strategy):
         if symbol in self._financials_cache:
             return self._financials_cache[symbol]
 
+        # 先尝试从数据库读取
+        try:
+            from core.db import fetch_financials
+            db_rows = fetch_financials(symbol)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'report_date', 'roe', 'cashflow_net_profit_ratio',
+                    'net_margin', 'debt_ratio', 'profit_growth'
+                ])
+                df_db['日期'] = pd.to_datetime(df_db['report_date'])
+                logger.info("从数据库读取 %d 条财务记录: %s", len(df_db), symbol)
+                self._financials_cache[symbol] = df_db
+                return df_db
+        except Exception:
+            pass
+
         try:
             import akshare as ak
             df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2016')
             self._financials_cache[symbol] = df
+            # 回写数据库
+            try:
+                self._save_financials_to_db(symbol, df)
+            except Exception:
+                pass
             return df
         except Exception as e:
             logger.warning("获取 %s 财务数据失败: %s", symbol, str(e))
@@ -387,9 +471,35 @@ class QualityValueFactorStrategy(Strategy):
     # =========================================================================
 
     def _fetch_shareholder_count(self, symbol):
-        """获取股东人数历史数据（使用类级缓存避免重复拉取全量）"""
+        """获取股东人数历史数据（DB 优先，类级缓存避免重复拉取全量）"""
         if symbol in self._shareholder_cache:
             return self._shareholder_cache[symbol]
+
+        # 先尝试从数据库读取
+        try:
+            from core.db import fetch_shareholder
+            db_rows = fetch_shareholder(symbol)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'change_date', 'holder_count', 'prev_holder_count',
+                    'holder_change_pct', 'avg_holding', 'prev_avg_holding',
+                    'avg_holding_change_pct'
+                ])
+                df_db['变动日期'] = pd.to_datetime(df_db['change_date'])
+                keep_cols = {}
+                for c, dbc in [('本期股东人数', 'holder_count'), ('上期股东人数', 'prev_holder_count'),
+                                 ('股东人数增幅', 'holder_change_pct'), ('本期人均持股数量', 'avg_holding'),
+                                 ('上期人均持股数量', 'prev_avg_holding'), ('人均持股数量增幅', 'avg_holding_change_pct')]:
+                    if df_db[dbc].notna().any():
+                        keep_cols[c] = dbc
+                hist = df_db.rename(columns={v: k for k, v in keep_cols.items()})
+                hist = hist[list(keep_cols.keys())]
+                hist = hist.set_index('变动日期').sort_index()
+                logger.info("从数据库读取 %d 条股东数据: %s", len(hist), symbol)
+                self._shareholder_cache[symbol] = hist
+                return hist
+        except Exception:
+            pass
 
         # 类级缓存：按日期缓存全量数据，同一日期只需拉取一次
         if not hasattr(QualityValueFactorStrategy, '_holder_date_cache'):
@@ -431,7 +541,6 @@ class QualityValueFactorStrategy(Strategy):
                 hist['变动日期'] = pd.to_datetime(hist['变动日期'])
                 hist = hist.set_index('变动日期').sort_index()
 
-            # 只保留关键列
             keep_cols = []
             for c in ['本期股东人数', '上期股东人数', '股东人数增幅',
                        '本期人均持股数量', '上期人均持股数量', '人均持股数量增幅']:
@@ -440,6 +549,12 @@ class QualityValueFactorStrategy(Strategy):
             hist = hist[keep_cols]
 
             self._shareholder_cache[symbol] = hist
+            # 回写数据库
+            try:
+                from core.db import store_shareholder
+                store_shareholder(symbol, hist.reset_index())
+            except Exception:
+                pass
             return hist
         except Exception as e:
             logger.warning("获取 %s 股东人数失败: %s", symbol, str(e))
@@ -499,14 +614,38 @@ class QualityValueFactorStrategy(Strategy):
     # =========================================================================
 
     def _fetch_insider_trades(self, symbol):
-        """获取大股东及高管增减持历史"""
+        """获取大股东及高管增减持历史 (DB 优先)"""
         if symbol in self._insider_cache:
             return self._insider_cache[symbol]
+
+        # 先尝试从数据库读取
+        try:
+            from core.db import fetch_insider_trades
+            db_rows = fetch_insider_trades(symbol)
+            if db_rows:
+                df_db = pd.DataFrame(db_rows, columns=[
+                    'announce_date', 'shareholder', 'change_amount',
+                    'change_text', 'trade_price', 'remaining',
+                    'trade_period', 'trade_method'
+                ])
+                df_db['公告日期'] = pd.to_datetime(df_db['announce_date'])
+                for c in ['变动数量', '交易均价', '变动期间', '变动途径']:
+                    if c not in df_db.columns:
+                        df_db[c] = None
+                df_db['变动数量'] = df_db['change_text']
+                df_db['交易均价'] = df_db['trade_price']
+                df_db['变动期间'] = df_db['trade_period']
+                df_db['变动途径'] = df_db['trade_method']
+                df_db['变动股东'] = df_db['shareholder']
+                logger.info("从数据库读取 %d 条增减持: %s", len(df_db), symbol)
+                self._insider_cache[symbol] = df_db
+                return df_db
+        except Exception:
+            pass
 
         try:
             import akshare as ak
 
-            # 大股东增减持（同花顺）
             df_ths = None
             try:
                 df_ths = ak.stock_shareholder_change_ths(symbol=symbol)
@@ -514,6 +653,13 @@ class QualityValueFactorStrategy(Strategy):
                 pass
 
             self._insider_cache[symbol] = df_ths
+            # 回写数据库
+            if df_ths is not None and not df_ths.empty:
+                try:
+                    from core.db import store_insider_trades
+                    store_insider_trades(symbol, df_ths)
+                except Exception:
+                    pass
             return df_ths
         except Exception as e:
             logger.warning("获取 %s 增减持数据失败: %s", symbol, str(e))

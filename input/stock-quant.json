@@ -1,27 +1,23 @@
 {
-    "favorites": [
-        "002920",
-        "300726",
-        "002008",
-        "000049",
-        "000725",
-        "300763",
-        "000021",
-        "300496",
-        "601138"
-    ],
+    "database": {
+        "host": "localhost",
+        "port": 3306,
+        "user": "smit",
+        "password": "smit2024",
+        "database": "stock_quant",
+        "charset": "utf8mb4"
+    },
     "composite": {
         "threshold": 0.25,
         "strategies": {
             "ma_cross": 0.18,
             "macd": 0.20,
-            "rsi": 0.17,
-            "bollinger": 0.20,
-            "value_factor": 0.08,
-            "quality_factor": 0.05,
-            "momentum": 0.04,
-            "volatility": 0.04,
-            "breadth": 0.04
+            "rsi": 0.18,
+            "bollinger": 0.18,
+            "quality_value": 0.12,
+            "momentum": 0.05,
+            "volatility": 0.05,
+            "breadth": 0.05
         }
     }
 }

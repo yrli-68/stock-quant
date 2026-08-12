@@ -136,7 +136,8 @@ class ChartGenerator:
             if old_col in df.columns and new_col not in df.columns:
                 rename_map[old_col] = new_col
         # 指标列名映射
-        indi_map = {'MACD_DIF': 'MACD', 'MACD_DEA': 'MACD_Signal', 'MACD_BAR': 'MACD_Hist', 'RSI14': 'RSI'}
+        indi_map = {'MACD_DIF': 'MACD', 'MACD_DEA': 'MACD_Signal', 'MACD_BAR': 'MACD_Hist', 'RSI14': 'RSI',
+                     'BOLL_UPPER': 'BOLL_UPPER', 'BOLL_MIDDLE': 'BOLL_MIDDLE', 'BOLL_LOWER': 'BOLL_LOWER'}
         for old_col, new_col in indi_map.items():
             if old_col in df.columns and new_col not in df.columns:
                 rename_map[old_col] = new_col
@@ -168,8 +169,23 @@ class ChartGenerator:
             add_plots.append(mpf.make_addplot(pd.Series(70, index=df.index), panel=3, color=COLOR_GRAY, width=0.8, linestyle='--'))
             add_plots.append(mpf.make_addplot(pd.Series(30, index=df.index), panel=3, color=COLOR_GRAY, width=0.8, linestyle='--'))
 
+        # 布林带指标
+        has_boll = 'BOLL_UPPER' in df.columns and 'BOLL_MIDDLE' in df.columns and 'BOLL_LOWER' in df.columns
+        boll_panel = 4 if 'RSI' in df.columns else 3
+        if has_boll:
+            add_plots.append(mpf.make_addplot(df['BOLL_UPPER'], panel=boll_panel, color=COLOR_UP, width=1.0, alpha=0.7, ylabel='BOLL'))
+            add_plots.append(mpf.make_addplot(df['BOLL_MIDDLE'], panel=boll_panel, color=COLOR_GRAY, width=1.0, alpha=0.8, linestyle='--'))
+            add_plots.append(mpf.make_addplot(df['BOLL_LOWER'], panel=boll_panel, color=COLOR_DOWN, width=1.0, alpha=0.7))
+
         # 设置面板比例
-        panel_ratios = (3, 1, 1.5, 1.5) if 'RSI' in df.columns else (3, 1, 1.5)
+        if has_boll and 'RSI' in df.columns:
+            panel_ratios = (3, 1, 1.2, 1.2, 1.2)
+        elif has_boll:
+            panel_ratios = (3, 1, 1.2, 1.2)
+        elif 'RSI' in df.columns:
+            panel_ratios = (3, 1, 1.2, 1.2)
+        else:
+            panel_ratios = (3, 1, 1.2)
 
         # 自定义样式
         mc = mpf.make_marketcolors(
@@ -202,10 +218,13 @@ class ChartGenerator:
             addplot=add_plots if add_plots else None,
             title=title,
             panel_ratios=panel_ratios,
-            figsize=(16, 10),
+            figsize=(16, 9.5),
             returnfig=True,
             warn_too_much_data=len(df) + 1
         )
+
+        # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
+        fig.suptitle(title, y=0.91, fontsize=12)
 
         # mpf.plot 不走 FontProperties，需在画完后强制修正各轴的字体
         for ax in axes:
@@ -220,8 +239,8 @@ class ChartGenerator:
                 for text in legend.get_texts():
                     text.set_fontproperties(FP_REGULAR)
 
-        # 调整布局
-        fig.tight_layout()
+        # 调整布局（收紧标题间距）
+        fig.tight_layout(pad=0.1)
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)
 
@@ -246,7 +265,7 @@ class ChartGenerator:
             save_path = self._get_save_path('equity_curve.png')
 
         # 创建子图
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [2.5, 1]})
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 4.5), gridspec_kw={'height_ratios': [2.5, 1]})
         fig.patch.set_facecolor(COLOR_BG)
 
         # 权益曲线
@@ -406,18 +425,20 @@ class ChartGenerator:
 
         return save_path
 
-    def plot_signal_on_price(self, df, signals, title='买卖信号标注', save_path=None):
+    def plot_signal_on_price(self, df, signals, title='买卖信号标注', save_path=None, other_signals=None):
         """
         在价格图上标注买卖信号
 
         Parameters
         ----------
         df : pd.DataFrame
-            包含 'Close' 列的 OHLC 数据
+            包含 'close' 列的 OHLC 数据
         signals : pd.Series
             信号序列，1表示买入，-1表示卖出，0表示无信号
         title : str, 图表标题
         save_path : str, 保存路径
+        other_signals : dict, optional
+            其他策略的信号 {策略名: pd.Series}，作为浅色背景标记
 
         Returns
         -------
@@ -426,7 +447,6 @@ class ChartGenerator:
         if save_path is None:
             save_path = self._get_save_path('signal_on_price.png')
 
-        # 确保索引为DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):
             if 'date' in df.columns:
                 df = df.set_index('date')
@@ -436,13 +456,34 @@ class ChartGenerator:
         if not isinstance(signals.index, pd.DatetimeIndex):
             signals.index = pd.to_datetime(signals.index)
 
-        # 对齐信号和数据
         common_idx = df.index.intersection(signals.index)
         df_aligned = df.loc[common_idx]
         signals_aligned = signals.loc[common_idx]
 
-        fig, ax = plt.subplots(figsize=(16, 7))
+        fig, ax = plt.subplots(figsize=(16, 4))
         fig.patch.set_facecolor(COLOR_BG)
+
+        # 绘制其他策略信号作为浅色背景
+        if other_signals:
+            for name, other_sig in other_signals.items():
+                if other_sig is None or len(other_sig) == 0:
+                    continue
+                if not isinstance(other_sig.index, pd.DatetimeIndex):
+                    other_sig.index = pd.to_datetime(other_sig.index)
+                other_aligned = other_sig.loc[other_sig.index.intersection(df_aligned.index)]
+
+                buy_sig = other_aligned[other_aligned == 1]
+                sell_sig = other_aligned[other_aligned == -1]
+
+                if len(buy_sig) > 0:
+                    buy_prices = df_aligned.loc[buy_sig.index, 'close']
+                    ax.scatter(buy_sig.index, buy_prices, color='#999999', marker='o',
+                               s=40, zorder=2, alpha=0.6, edgecolors='#999999', linewidth=0.5, facecolors='white')
+
+                if len(sell_sig) > 0:
+                    sell_prices = df_aligned.loc[sell_sig.index, 'close']
+                    ax.scatter(sell_sig.index, sell_prices, color='#999999', marker='o',
+                               s=40, zorder=2, alpha=0.6, edgecolors='#999999', linewidth=0.5, facecolors='white')
 
         # 绘制收盘价
         ax.plot(df_aligned.index, df_aligned['close'], color=COLOR_BLUE, linewidth=1.2, label='收盘价', alpha=0.8)
@@ -461,7 +502,7 @@ class ChartGenerator:
             ax.scatter(sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
                        s=100, zorder=5, label=f'卖出 ({len(sell_signals)}次)', edgecolors='white', linewidth=0.5)
 
-        ax.set_title(title, fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax.set_title(" ", fontsize=11, fontproperties=FP_BOLD, color=COLOR_DARK)
         ax.set_ylabel('价格', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
         ax.set_xlabel('日期', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
         ax.legend(loc='upper left', prop=FP_REGULAR, framealpha=0.9, edgecolor='#ddd')
@@ -469,6 +510,10 @@ class ChartGenerator:
         ax.set_facecolor(COLOR_BG)
 
         fig.tight_layout()
+
+        # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
+        fig.suptitle(title, y=1, fontsize=16)
+    
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)
 
@@ -527,7 +572,7 @@ class ChartGenerator:
         if 'BB_Middle' in df.columns:
             ax1.plot(df.index, df['BB_Middle'], color=COLOR_GRAY, linewidth=0.8, alpha=0.6, linestyle='--')
 
-        ax1.set_title(title, fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax1.set_title(" ", fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
         ax1.set_ylabel('价格', fontsize=10, fontproperties=FP_REGULAR, color=COLOR_DARK)
         ax1.legend(loc='upper left', prop=FP_REGULAR, fontsize=8, ncol=3, framealpha=0.9, edgecolor='#ddd')
         ax1.grid(True, alpha=0.3, linestyle=':')
@@ -606,6 +651,10 @@ class ChartGenerator:
         ax5.set_facecolor(COLOR_BG)
 
         fig.tight_layout()
+
+        # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
+        fig.suptitle(title, y=1, fontsize=16)
+    
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)
 
@@ -630,14 +679,14 @@ class ChartGenerator:
             save_path = self._get_save_path('compare_strategies.png')
 
         if not results_dict:
-            fig, ax = plt.subplots(figsize=(14, 6))
+            fig, ax = plt.subplots(figsize=(16, 5.5))
             ax.text(0.5, 0.5, '无策略数据可比较', ha='center', va='center',
                     fontproperties=FP_REGULAR, fontsize=16, color=COLOR_GRAY)
             fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
             plt.close(fig)
             return save_path
 
-        fig, ax = plt.subplots(figsize=(14, 7))
+        fig, ax = plt.subplots(figsize=(16, 5.5))
         fig.patch.set_facecolor(COLOR_BG)
 
         # 绘制每个策略的权益曲线
@@ -650,7 +699,7 @@ class ChartGenerator:
                 else:
                     ax.plot(equity, color=color, linewidth=1.5, label=name, alpha=0.9)
 
-        ax.set_title('策略权益曲线对比', fontsize=14, fontproperties=FP_BOLD, color=COLOR_DARK)
+        ax.set_title(' ', fontsize=16, fontproperties=FP_BOLD, color=COLOR_DARK)
         ax.set_ylabel('权益', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
         ax.set_xlabel('时间', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
         ax.legend(loc='upper left', prop=FP_REGULAR, fontsize=10, framealpha=0.9, edgecolor='#ddd')
@@ -658,6 +707,10 @@ class ChartGenerator:
         ax.set_facecolor(COLOR_BG)
 
         fig.tight_layout()
+
+        # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
+        fig.suptitle('策略权益曲线对比', y=1, fontsize=16)
+    
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)
 
