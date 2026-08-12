@@ -200,15 +200,22 @@ class DataFetcher:
                 df_db['date'] = pd.to_datetime(df_db['date'])
                 df_db = df_db.dropna(axis=1, how='all')
 
-                # 若 DB 最晚日期 < 请求终点，从网络补全最新数据
-                db_last = df_db['date'].max()
-                end_dt  = pd.to_datetime(db_end)
-                if db_last >= end_dt - pd.Timedelta(days=1):
-                    logger.info("从数据库读取 %d 条 K 线记录: %s", len(df_db), raw_symbol)
-                    return df_db
-                else:
+                # 若 DB 最早日期 > 请求起点+5天，或最晚日期 < 请求终点，从网络补全
+                db_first = df_db['date'].min()
+                db_last  = df_db['date'].max()
+                start_dt = pd.to_datetime(db_start)
+                end_dt   = pd.to_datetime(db_end)
+                margin = pd.Timedelta(days=5)
+
+                if db_first > start_dt + margin:
+                    logger.info("数据库 K 线不完整 (首条 %s, 需要 %s)，从网络补全",
+                                db_first.date(), db_start)
+                elif db_last < end_dt:
                     logger.info("数据库 K 线不完整 (末条 %s, 需要 %s)，从网络补全",
                                 db_last.date(), db_end)
+                else:
+                    logger.info("从数据库读取 %d 条 K 线记录: %s", len(df_db), raw_symbol)
+                    return df_db
         except Exception as e:
             logger.debug("数据库读取 K 线跳过: %s", e)
 

@@ -114,6 +114,69 @@ def store_kline(code: str, rows: list):
         logger.warning("写入 K 线数据失败: %s", e)
 
 
+def fetch_indicators(code: str, start_date: str, end_date: str) -> list:
+    """从 daily_indicators 读取技术指标"""
+    try:
+        with get_connection() as conn:
+            if conn is None:
+                return []
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT trade_date, ma5, ma10, ma20, ma60,
+                       ema12, ema26, macd_dif, macd_dea, macd_bar,
+                       rsi14, boll_upper, boll_middle, boll_lower,
+                       kdj_k, kdj_d, kdj_j, atr14, obv, cci20, wr14,
+                       vol_ma5, vwap, hv20, mom60
+                FROM daily_indicators
+                WHERE code = %s AND trade_date >= %s AND trade_date <= %s
+                ORDER BY trade_date
+            """, (code, start_date, end_date))
+            return cursor.fetchall()
+    except Exception as e:
+        logger.warning("读取技术指标失败: %s", e)
+        return []
+
+
+def store_indicators(code: str, df):
+    """写入技术指标到 daily_indicators (REPLACE)"""
+    import pandas as pd
+    if df is None or df.empty:
+        return
+    col_map = {
+        'MA5': 'ma5', 'MA10': 'ma10', 'MA20': 'ma20', 'MA60': 'ma60',
+        'EMA12': 'ema12', 'EMA26': 'ema26',
+        'MACD_DIF': 'macd_dif', 'MACD_DEA': 'macd_dea', 'MACD_BAR': 'macd_bar',
+        'RSI14': 'rsi14',
+        'BOLL_UPPER': 'boll_upper', 'BOLL_MIDDLE': 'boll_middle', 'BOLL_LOWER': 'boll_lower',
+        'KDJ_K': 'kdj_k', 'KDJ_D': 'kdj_d', 'KDJ_J': 'kdj_j',
+        'ATR14': 'atr14', 'OBV': 'obv', 'CCI20': 'cci20', 'WR14': 'wr14',
+        'VOL_MA5': 'vol_ma5', 'VWAP': 'vwap',
+        'HV20': 'hv20', 'MOM60': 'mom60',
+    }
+    try:
+        rows = []
+        for idx in df.index:
+            date_str = idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)[:10]
+            row_data = [code, date_str]
+            for src_col, db_col in col_map.items():
+                val = df.loc[idx, src_col] if src_col in df.columns else None
+                row_data.append(float(val) if pd.notna(val) else None)
+            rows.append(tuple(row_data))
+        if rows:
+            cols = ['code', 'trade_date'] + list(col_map.values())
+            placeholders = ', '.join(['%s'] * len(cols))
+            sql = f"REPLACE INTO daily_indicators ({', '.join(cols)}) VALUES ({placeholders})"
+            with get_connection() as conn:
+                if conn is None:
+                    return
+                cursor = conn.cursor()
+                cursor.executemany(sql, rows)
+                conn.commit()
+                logger.info("写入 %d 条技术指标: %s", len(rows), code)
+    except Exception as e:
+        logger.warning("写入技术指标失败: %s", e)
+
+
 def fetch_valuation(code: str, start_date: str = '2010-01-01') -> list:
     """读取估值历史数据"""
     try:

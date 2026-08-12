@@ -460,7 +460,7 @@ class ChartGenerator:
         df_aligned = df.loc[common_idx]
         signals_aligned = signals.loc[common_idx]
 
-        fig, ax = plt.subplots(figsize=(16, 4))
+        fig, ax = plt.subplots(figsize=(16, 3.5))
         fig.patch.set_facecolor(COLOR_BG)
 
         # 绘制其他策略信号作为浅色背景
