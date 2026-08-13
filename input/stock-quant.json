@@ -10,14 +10,14 @@
     "composite": {
         "threshold": 0.25,
         "strategies": {
-            "ma_cross": 0.18,
-            "macd": 0.20,
+            "ma_cross": 0.21,
+            "macd": 0.21,
             "rsi": 0.18,
             "bollinger": 0.18,
-            "quality_value": 0.12,
+            "quality_value": 0.10,
             "momentum": 0.05,
             "volatility": 0.05,
-            "breadth": 0.05
+            "breadth": 0.02
         }
     }
 }

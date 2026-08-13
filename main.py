@@ -543,14 +543,16 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
                 else:
                     hold_count += 1
 
-        best_sig_val = None
-        if best_sk and best_sk in sigs:
-            sig_series = sigs[best_sk]
+        # 最新信号栏加粗基准：优先综合策略，其次最佳策略
+        bold_sk = 'composite' if 'composite' in sigs else best_sk
+        bold_sig_val = None
+        if bold_sk and bold_sk in sigs:
+            sig_series = sigs[bold_sk]
             if sig_series is not None and len(sig_series) > 0:
-                best_sig_val = int(sig_series.iloc[-1])
+                bold_sig_val = int(sig_series.iloc[-1])
 
-        # 构建信号数量显示，最佳策略对应的数字加粗
-        bs = {1: 0, -1: 1, 0: 2}.get(best_sig_val, -1)
+        # 构建信号数量显示，综合策略对应的数字加粗
+        bs = {1: 0, -1: 1, 0: 2}.get(bold_sig_val, -1)
         parts = []
         for idx, (cnt, _) in enumerate([(buy_count, '买'), (sell_count, '卖'), (hold_count, '观')]):
             if idx == bs:
@@ -643,24 +645,32 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
     # 计算各策略收益率排名
     from collections import defaultdict
     strategy_all_returns = defaultdict(list)
+    strategy_all_drawdowns = defaultdict(list)
     for d in all_stock_data:
         smap = d['strategy_map']
         risks = d.get('all_risks', {})
         for sk in d.get('strategies_to_run', []):
-            r = risks.get(sk, {}).get('total_return')
-            if r is not None:
-                strategy_all_returns[smap[sk][0]].append(r)
+            r = risks.get(sk, {})
+            name = smap[sk][0]
+            tr = r.get('total_return')
+            dd = r.get('max_drawdown')
+            if tr is not None:
+                strategy_all_returns[name].append(tr)
+            if dd is not None:
+                strategy_all_drawdowns[name].append(dd)
 
     strategy_avg = []
     for name, rets in strategy_all_returns.items():
         avg = sum(rets) / len(rets)
         wr = sum(1 for r in rets if r > 0) / len(rets) * 100
-        strategy_avg.append((name, avg, wr, len(rets), max(rets), min(rets)))
+        dds = strategy_all_drawdowns.get(name, [])
+        avg_dd = sum(dds) / len(dds) if dds else None
+        strategy_avg.append((name, avg, wr, max(rets), min(rets), avg_dd))
     strategy_avg.sort(key=lambda x: x[1], reverse=True)
 
-    strategy_rank_html = '<table><tr><th>排名</th><th>策略</th><th>平均收益率</th><th>正收益占比</th><th>样本</th><th>最高</th><th>最低</th></tr>'
-    for i, (name, avg, wr, n, mx, mn) in enumerate(strategy_avg, 1):
-        strategy_rank_html += f'<tr><td>{i}</td><td>{name}</td><td>{_safe_pct(avg)}</td><td>{wr:.0f}%</td><td>{n}</td><td>{_safe_pct(mx)}</td><td>{_safe_pct(mn)}</td></tr>'
+    strategy_rank_html = '<table><tr><th>排名</th><th>策略</th><th>平均收益率</th><th>正收益占比</th><th>最高</th><th>最低</th><th>最大回撤</th></tr>'
+    for i, (name, avg, wr, mx, mn, avg_dd) in enumerate(strategy_avg, 1):
+        strategy_rank_html += f'<tr><td>{i}</td><td>{name}</td><td>{_safe_pct(avg)}</td><td>{wr:.0f}%</td><td>{_safe_pct(mx)}</td><td>{_safe_pct(mn)}</td><td>{_safe_pct(avg_dd)}</td></tr>'
     strategy_rank_html += '</table>'
 
     html = f'''<!DOCTYPE html>
@@ -829,8 +839,9 @@ def _resolve_symbol(input_str):
 
 
 @cli.command('analyze')
-@click.option('--symbol', '-s', default=None, help='股票代码或名称（如 000725 或 京东方A）')
+@click.option('--symbol', '-s', default=None, help='股票代码或名称，可多个，以空格分隔（如 "000725 京东方A 000021"）')
 @click.option('--symbol-file', '-sf', default=None, help='从指定文件读取自选股列表（JSON数组），与 -s 同时使用时合并')
+@click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
 @click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|rsi|bollinger|quality_value|composite|all]，多个以|分隔')
@@ -838,14 +849,16 @@ def _resolve_symbol(input_str):
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--output-file', '-of', default=None, help='指定HTML报告文件名，默认自动生成')
-def analyze_cmd(symbol, symbol_file, start, end, strategy, is_index, capital, output, output_file):
+def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file):
     """单只/批量股票综合分析
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
 
     使用 --index/-i 参数可切换到指数专属策略模式，适用于分析大盘指数。
+    -s 支持多个股票代码或名称，以空格分隔；多个股票时输出报告名称为 multi_日期.html。
     -s 和 -sf 可同时使用，股票列表会自动合并去重。
     都不指定时从 stock-quant.json 读取自选股。
+    使用 -h 指定数量时，忽略 -s/-sf，从网络获取最热门股票。
     """
     # 确定要分析的股票列表
     time_start = datetime.now()
@@ -866,30 +879,45 @@ def analyze_cmd(symbol, symbol_file, start, end, strategy, is_index, capital, ou
 
     symbols = []
     sources = []
+    s_multi = False
 
-    if symbol:
-        symbols = [symbol]
-        sources.append(f'-s ({symbol})')
+    if hot:
+        # 热门股票模式：忽略 -s 和 -sf
+        click.echo(click.style(f'\n  正在获取热门股票列表 ({hot} 只)...', fg='blue'))
+        fetcher = DataFetcher()
+        hot_df = fetcher.get_hot_stocks(count=hot)
+        if hot_df.empty:
+            click.echo(click.style('  错误: 获取热门股票失败', fg='red'))
+            return
+        for _, row in hot_df.iterrows():
+            symbols.append(row['symbol'])
+        sources.append(f'-h 热门股 ({len(symbols)}只, 按热度分排序)')
+    else:
+        if symbol:
+            symbol_list = [s.strip() for s in symbol.split() if s.strip()]
+            symbols = symbol_list
+            s_multi = len(symbol_list) > 1
+            sources.append(f'-s ({len(symbol_list)}只)')
 
-    if symbol_file:
-        file_symbols = _read_symbols_file(symbol_file)
-        if file_symbols:
-            symbols.extend(file_symbols)
-            sources.append(f'-sf ({len(file_symbols)}只)')
+        if symbol_file:
+            file_symbols = _read_symbols_file(symbol_file)
+            if file_symbols:
+                symbols.extend(file_symbols)
+                sources.append(f'-sf ({len(file_symbols)}只)')
 
-    if not symbols:
-        config = _load_quant_config()
-        if 'favorites' in config and config['favorites']:
-            symbols = config['favorites']
-            sources.append('stock-quant.json')
-        else:
-            favs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'favs.json')
-            file_symbols = _read_symbols_file(favs_path)
-            if not file_symbols:
-                click.echo(click.style('  错误: 没有可用的自选股来源', fg='red'))
-                return
-            symbols = file_symbols
-            sources.append('favs.json')
+        if not symbols:
+            config = _load_quant_config()
+            if 'favorites' in config and config['favorites']:
+                symbols = config['favorites']
+                sources.append('stock-quant.json')
+            else:
+                favs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'favs.json')
+                file_symbols = _read_symbols_file(favs_path)
+                if not file_symbols:
+                    click.echo(click.style('  错误: 没有可用的自选股来源', fg='red'))
+                    return
+                symbols = file_symbols
+                sources.append('favs.json')
 
     # 去重并保持顺序
     seen = set()
@@ -906,11 +934,15 @@ def analyze_cmd(symbol, symbol_file, start, end, strategy, is_index, capital, ou
     _, end_date_str = _parse_dates(start, end)
     date_tag = end_date_str.replace('-', '')
     if not output_file:
-        if symbol and symbol_file:
+        if hot:
+            output_file = f'hot{hot}_{date_tag}.html'
+        elif s_multi:
+            output_file = f'multi_{date_tag}.html'
+        elif symbol and symbol_file:
             sf_basename = os.path.splitext(os.path.basename(symbol_file))[0]
-            output_file = f'{symbol}_{sf_basename}_{date_tag}.html'
+            output_file = f'{symbols[0]}_{sf_basename}_{date_tag}.html'
         elif symbol:
-            output_file = f'{symbol}_{date_tag}.html'
+            output_file = f'{symbols[0]}_{date_tag}.html'
         elif symbol_file:
             sf_basename = os.path.splitext(os.path.basename(symbol_file))[0]
             output_file = f'{sf_basename}_{date_tag}.html'
@@ -1000,9 +1032,16 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
         click.echo(click.style(f'  获取到 {len(df)} 条数据记录', fg='green'))
 
-        # 同步缓存除权除息数据到数据库
+        # 异步缓存除权除息数据到数据库（不阻塞主流程）
+        def _cache_dividend():
+            try:
+                fetcher.get_dividend_data(symbol)
+            except Exception:
+                pass
         try:
-            fetcher.get_dividend_data(symbol)
+            import threading
+            t = threading.Thread(target=_cache_dividend, daemon=True)
+            t.start()
         except Exception:
             pass
 
@@ -1124,6 +1163,13 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 if s not in strategies_to_run:
                     strategies_to_run.append(s)
 
+        # 报告展示用策略列表：-g all 时隐藏质量价值融合策略的独立报告，
+        # 但其仍参与内部计算（综合策略需要用到）
+        if strategy == 'all' and 'quality_value' in strategies_to_run:
+            strategies_to_report = [sk for sk in strategies_to_run if sk != 'quality_value']
+        else:
+            strategies_to_report = strategies_to_run
+
         # 运行策略
         all_results = {}
         all_risks = {}
@@ -1163,7 +1209,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 all_charts[sk]['signals'] = ''
 
         # 输出每个策略的回测结果
-        for sk in strategies_to_run:
+        for sk in strategies_to_report:
             sname = strategy_map[sk][0]
             risk = all_risks[sk]
             charts = all_charts[sk]
@@ -1188,10 +1234,10 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
         # 如果运行了多个策略，输出对比
         compare_path = ''
-        if len(strategies_to_run) > 1:
+        if len(strategies_to_report) > 1:
             _print_section('策略对比排名')
             rankings = []
-            for sk in strategies_to_run:
+            for sk in strategies_to_report:
                 rank_total_return = all_risks[sk].get('total_return')
                 rank_sharpe = all_risks[sk].get('sharpe_ratio')
                 rank_drawdown = all_risks[sk].get('max_drawdown')
@@ -1214,7 +1260,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             # 生成策略对比图表
             click.echo(click.style('\n  正在生成策略对比图表...', fg='blue'))
             try:
-                compare_result = {strategy_map[sk][0]: all_results[sk] for sk in strategies_to_run}
+                compare_result = {strategy_map[sk][0]: all_results[sk] for sk in strategies_to_report}
                 compare_path = chart_gen.plot_compare_strategies(compare_result) or ''
                 click.echo(click.style(f'    策略对比图: {compare_path}', fg='green'))
             except Exception as e:
@@ -1225,7 +1271,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             try:
                 html_path = _generate_html_report(
                     symbol, stock_name, start_date, end_date, capital,
-                    is_index, strategy_map, strategies_to_run,
+                    is_index, strategy_map, strategies_to_report,
                     all_results, all_risks, all_charts,
                     compare_chart_path=compare_path,
                     all_signals=all_signals,
@@ -1252,7 +1298,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             'capital': capital,
             'is_index': is_index,
             'strategy_map': strategy_map,
-            'strategies_to_run': strategies_to_run,
+            'strategies_to_run': strategies_to_report,
             'all_results': all_results,
             'all_risks': all_risks,
             'all_charts': all_charts,

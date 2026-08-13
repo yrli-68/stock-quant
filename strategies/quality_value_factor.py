@@ -95,6 +95,13 @@ class QualityValueFactorStrategy(Strategy):
     }
     GROWTH_PREFIXES = ('300', '301', '688')
 
+    # ETF 代码 → 跟踪指数名称（用于估值因子）
+    ETF_INDEX_MAP = {
+        '510300': '沪深300', '510050': '上证50', '510500': '中证500',
+        '512100': '中证1000', '588000': '科创50', '159915': '创业板指',
+        '510180': '上证180', '159901': '深证100',
+    }
+
     # ---- 质量因子配置 ----
     QUALITY_FACTOR_CONFIG = [
         ('净资产收益率', 0.30, 'positive', 'ROE'),
@@ -131,9 +138,15 @@ class QualityValueFactorStrategy(Strategy):
     def _classify_stock(self, symbol):
         if symbol in self.BROAD_INDEX_CODES:
             return 'broad_index'
+        if self._is_etf(symbol):
+            return 'broad_index'
         if symbol.startswith(self.GROWTH_PREFIXES):
             return 'growth'
         return 'dividend'
+
+    @staticmethod
+    def _is_etf(symbol):
+        return symbol.startswith(('5', '15', '16', '51', '58', '588')) or symbol[:3] == '159'
 
     # =========================================================================
     # 估值数据获取（价值维度）
@@ -179,16 +192,18 @@ class QualityValueFactorStrategy(Strategy):
             '399006': '创业板指', '000688': '科创50', '000852': '中证1000',
             '000001': '上证指数', '399005': '中小100',
         }
+        index_name_map.update(self.ETF_INDEX_MAP)
         index_name = index_name_map.get(symbol, '沪深300')
 
         df_pe, df_pb = None, None
         try:
             df_pe = ak.stock_index_pe_lg(symbol=index_name)
-            df_pe = df_pe.rename(columns={'日期': 'date', '滚动市盈率(TTM)': 'pe_ttm'})
+            pe_col = '滚动市盈率(TTM)' if '滚动市盈率(TTM)' in df_pe.columns else '滚动市盈率'
+            df_pe = df_pe.rename(columns={'日期': 'date', pe_col: 'pe_ttm'})
             df_pe['date'] = pd.to_datetime(df_pe['date'])
             df_pe = df_pe.set_index('date')[['pe_ttm']]
         except Exception:
-            pass
+            df_pe = None
 
         try:
             df_pb = ak.stock_index_pb_lg(symbol=index_name)
@@ -196,7 +211,7 @@ class QualityValueFactorStrategy(Strategy):
             df_pb['date'] = pd.to_datetime(df_pb['date'])
             df_pb = df_pb.set_index('date')[['pb']]
         except Exception:
-            pass
+            df_pb = None
 
         if df_pe is not None and df_pb is not None:
             df = df_pe.join(df_pb, how='outer')
@@ -286,9 +301,13 @@ class QualityValueFactorStrategy(Strategy):
             from core.db import store_valuation
             rows = []
             for idx, row in df.iterrows():
+                if hasattr(idx, 'strftime'):
+                    date_str = idx.strftime('%Y-%m-%d')
+                else:
+                    continue
                 rows.append((
                     symbol,
-                    idx.strftime('%Y-%m-%d') if hasattr(idx, 'strftime') else str(idx)[:10],
+                    date_str,
                     float(row['pe_ttm']) if pd.notna(row.get('pe_ttm')) else None,
                     float(row['pb']) if pd.notna(row.get('pb')) else None,
                     float(row['ps']) if pd.notna(row.get('ps')) else None,

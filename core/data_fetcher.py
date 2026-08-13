@@ -16,6 +16,7 @@ import re
 from datetime import datetime
 from typing import Optional, List
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -787,6 +788,262 @@ class DataFetcher:
         return pd.DataFrame()
 
     # ==================== 股票列表 ====================
+
+    # ---- 热门股 HotScore 热度分 ----
+
+    # 五大维度权重
+    HOT_SCORE_WEIGHTS = {
+        'activity': 0.5,      # 交易活跃度
+        'capital': 0.3,       # 资金异动
+        'strength': 0.1,      # 价格强势
+        'attention': 0.08,    # 平台关注度
+        'sentiment': 0.02,    # 舆情热度
+    }
+
+    def _fetch_sina_rank(self, sort_key: str, count: int = 50) -> pd.DataFrame:
+        """从新浪行情中心获取按指定字段降序的前 count 只股票"""
+        stocks = []
+        try:
+            pages = (count // 100) + 1
+            for page in range(1, pages + 1):
+                url = (
+                    f'http://vip.stock.finance.sina.com.cn/quotes_service/'
+                    f'api/json_v2.php/Market_Center.getHQNodeData?'
+                    f'page={page}&num=100&sort={sort_key}&asc=0&'
+                    f'node=hs_a&symbol=&_s_r_a=auto'
+                )
+                resp = self._session.get(url, timeout=15)
+                data = json.loads(resp.text)
+                for item in data:
+                    code = item.get('code', '')
+                    if not code:
+                        continue
+                    stocks.append({
+                        'symbol': code,
+                        'name': item.get('name', ''),
+                        'price': float(item.get('trade', 0) or 0),
+                        'change_pct': float(item.get('changepercent', 0) or 0),
+                        'volume': float(item.get('volume', 0) or 0),
+                        'amount': float(item.get('amount', 0) or 0),
+                        'turnover_rate': float(item.get('turnoverratio', 0) or 0),
+                        'high': float(item.get('high', 0) or 0),
+                        'low': float(item.get('low', 0) or 0),
+                        'settlement': float(item.get('settlement', 0) or 0),
+                    })
+        except Exception as e:
+            logger.warning("获取新浪排行(%s)失败: %s", sort_key, e)
+        df = pd.DataFrame(stocks)
+        if not df.empty:
+            df = df.drop_duplicates(subset=['symbol']).head(count).reset_index(drop=True)
+        return df
+
+    def _run_with_timeout(self, fn, timeout: int = 30):
+        """在守护线程中运行函数，超时返回 None，避免 akshare 接口卡死"""
+        import threading
+        result = {}
+
+        def _runner():
+            try:
+                result['value'] = fn()
+            except Exception as e:
+                result['error'] = e
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            logger.warning("数据获取超时(>%ds)，已跳过", timeout)
+            return None
+        return result.get('value')
+
+    def _enrich_hot_data(self, symbols: List[str]) -> pd.DataFrame:
+        """
+        通过 akshare 补抓额外数据，返回以 symbol 为索引的富集 DataFrame。
+
+        返回列: lhb_count(龙虎榜上榜次数), lhb_net_buy(龙虎榜净买额),
+               lhb_inst_net(机构净买入), main_inflow_1d(今日主力净流入),
+               main_inflow_3d(3日主力净流入), hot_rank(东财人气排名),
+               volume_ratio(量比)
+        """
+        import akshare as ak
+        syms = set(str(s) for s in symbols)
+        enrich = pd.DataFrame(index=list(syms))
+        for col in ['lhb_count', 'lhb_net_buy', 'lhb_inst_net',
+                    'main_inflow_1d', 'main_inflow_3d', 'hot_rank', 'volume_ratio']:
+            enrich[col] = np.nan
+
+        # 1. 龙虎榜统计（近一月）—— 资金异动
+        lhb = self._run_with_timeout(lambda: ak.stock_lhb_stock_statistic_em(symbol='近一月'), timeout=30)
+        if lhb is not None and not lhb.empty and '代码' in lhb.columns:
+            sub = lhb[lhb['代码'].astype(str).isin(syms)]
+            if not sub.empty:
+                for _, r in sub.iterrows():
+                    code = str(r['代码']).zfill(6)
+                    enrich.at[code, 'lhb_count'] = float(r.get('上榜次数', 0) or 0)
+                    enrich.at[code, 'lhb_net_buy'] = float(r.get('龙虎榜净买额', 0) or 0)
+                    enrich.at[code, 'lhb_inst_net'] = float(r.get('机构买入净额', 0) or 0)
+
+        # 2. 主力资金流排名（今日 / 3日）—— 资金异动
+        for indicator, col, field in [
+            ('今日', 'main_inflow_1d', '今日主力净流入-净额'),
+            ('3日', 'main_inflow_3d', '3日主力净流入-净额'),
+        ]:
+            ff = self._run_with_timeout(
+                lambda ind=indicator: ak.stock_individual_fund_flow_rank(indicator=ind), timeout=40)
+            if ff is not None and not ff.empty and '代码' in ff.columns and field in ff.columns:
+                sub = ff[ff['代码'].astype(str).isin(syms)]
+                if not sub.empty:
+                    for _, r in sub.iterrows():
+                        code = str(r['代码']).zfill(6)
+                        enrich.at[code, col] = float(r.get(field, 0) or 0)
+
+        # 3. 东财人气榜 —— 平台关注度 / 舆情
+        hr = self._run_with_timeout(ak.stock_hot_rank_em, timeout=30)
+        if hr is not None and not hr.empty and '代码' in hr.columns:
+            sub = hr[hr['代码'].astype(str).isin(syms)]
+            if not sub.empty:
+                for _, r in sub.iterrows():
+                    code = str(r['代码']).zfill(6)
+                    enrich.at[code, 'hot_rank'] = float(r.get('当前排名', 0) or 0)
+
+        # 4. 全市场快照（量比）—— 交易活跃度
+        spot = self._run_with_timeout(ak.stock_zh_a_spot_em, timeout=60)
+        if spot is not None and not spot.empty and '代码' in spot.columns and '量比' in spot.columns:
+            sub = spot[spot['代码'].astype(str).isin(syms)]
+            if not sub.empty:
+                for _, r in sub.iterrows():
+                    code = str(r['代码']).zfill(6)
+                    enrich.at[code, 'volume_ratio'] = float(r.get('量比', 0) or 0)
+
+        return enrich
+
+    def _limit_up_flag(self, cand: pd.DataFrame) -> pd.Series:
+        """涨停标记（近似），创业板/科创板 20%，其余 10%"""
+        flag = []
+        for code, chg in zip(cand['symbol'], cand['change_pct']):
+            th = 19.5 if str(code).startswith(('300', '301', '688')) else 9.5
+            flag.append(1.0 if chg >= th else 0.0)
+        return pd.Series(flag, index=cand.index)
+
+    def _compute_hot_score(self, cand: pd.DataFrame) -> pd.Series:
+        """计算 HotScore 热度分（0~100）"""
+        def pct(series):
+            return series.rank(pct=True)
+
+        scores = pd.DataFrame(index=cand.index)
+
+        # 1. 交易活跃度：成交额 / 换手率 / 振幅 / 量比
+        activity_parts = [pct(cand['amount']), pct(cand['turnover_rate'])]
+        if cand['amplitude'].notna().any():
+            activity_parts.append(pct(cand['amplitude']))
+        if 'volume_ratio' in cand.columns and cand['volume_ratio'].notna().any():
+            activity_parts.append(pct(cand['volume_ratio'].fillna(1.0)))
+        scores['activity'] = pd.concat(activity_parts, axis=1).mean(axis=1)
+
+        # 2. 资金异动：主力净流入(3日优先) / 龙虎榜上榜次数 / 龙虎榜净买额
+        capital_parts = []
+        for col in ['main_inflow_3d', 'main_inflow_1d']:
+            if col in cand.columns and cand[col].notna().any():
+                capital_parts.append(pct(cand[col].fillna(0.0)))
+                break
+        for col in ['lhb_count', 'lhb_net_buy']:
+            if col in cand.columns and cand[col].notna().any():
+                capital_parts.append(pct(cand[col].fillna(0.0)))
+        if capital_parts:
+            scores['capital'] = pd.concat(capital_parts, axis=1).mean(axis=1)
+        else:
+            scores['capital'] = np.nan
+
+        # 3. 价格强势：今日涨幅 / 涨停标记
+        scores['strength'] = pd.concat([pct(cand['change_pct']), self._limit_up_flag(cand)], axis=1).mean(axis=1)
+
+        # 4. 平台关注度：东财人气排名（越低越热；未上榜按 0 处理）
+        if 'hot_rank' in cand.columns and cand['hot_rank'].notna().any():
+            scores['attention'] = cand['hot_rank'].apply(
+                lambda r: max(0.0, 1.0 - (r - 1) / 100.0) if pd.notna(r) else 0.0)
+        else:
+            scores['attention'] = np.nan
+
+        # 5. 舆情热度：以人气排名为代理（数据源有限），缺失时回退换手率
+        if scores['attention'].notna().any():
+            scores['sentiment'] = scores['attention']
+        else:
+            scores['sentiment'] = pct(cand['turnover_rate'])
+
+        # 加权融合，缺失维度权重重新归一化
+        weights = self.HOT_SCORE_WEIGHTS
+        total = np.zeros(len(cand))
+        wsum = np.zeros(len(cand))
+        for dim, w in weights.items():
+            s = scores[dim]
+            has = s.notna().to_numpy()
+            wsum += has * w
+            total += s.fillna(0.0).to_numpy() * w
+        hot_score = np.where(wsum > 0, total / np.where(wsum > 0, wsum, 1.0), 0.0)
+        return pd.Series(hot_score * 100, index=cand.index)
+
+    def get_hot_stocks(self, count: int = 20, sort_by: str = 'hotscore') -> pd.DataFrame:
+        """
+        获取热门股票列表（按 HotScore 热度分排序）
+
+        流程：
+        1. 分别按成交额、涨幅、换手率各取前 50，合并去重作为候选池
+        2. 通过 akshare 补抓龙虎榜/主力资金/人气榜等数据
+        3. 计算 HotScore 热度分（交易活跃度/资金异动/价格强势/平台关注度/舆情）
+        4. 按热度分降序返回前 count 只
+
+        Args:
+            count: 返回数量
+            sort_by: 排序依据，'hotscore'(热度分) 或 'amount'/'changepercent'/'turnoverratio'
+
+        Returns:
+            pd.DataFrame: 包含 symbol/name/hot_score/price/change_pct/amount 等列
+        """
+        logger.info("获取热门股票列表: count=%d, sort_by=%s", count, sort_by)
+
+        # 1. 候选池：三项指标各取前 50 合并去重
+        try:
+            candidates = pd.concat([
+                self._fetch_sina_rank('amount', 50),
+                self._fetch_sina_rank('changepercent', 50),
+                self._fetch_sina_rank('turnoverratio', 50),
+            ], ignore_index=True)
+            candidates = candidates.drop_duplicates(subset=['symbol']).reset_index(drop=True)
+        except Exception as e:
+            logger.error("构建热门候选池失败: %s", str(e))
+            return pd.DataFrame()
+
+        if candidates.empty:
+            logger.warning("候选池为空")
+            return candidates
+
+        # 振幅 (振幅 = (最高-最低)/昨收 * 100)
+        candidates['amplitude'] = np.where(
+            candidates['settlement'] > 0,
+            (candidates['high'] - candidates['low']) / candidates['settlement'] * 100,
+            0.0,
+        )
+
+        # 2. 富集额外数据
+        if sort_by == 'hotscore':
+            try:
+                enrich = self._enrich_hot_data(candidates['symbol'].tolist())
+                for col in enrich.columns:
+                    candidates[col] = candidates['symbol'].map(enrich[col])
+                # 3. 计算热度分
+                candidates['hot_score'] = self._compute_hot_score(candidates)
+                candidates = candidates.sort_values('hot_score', ascending=False).head(count).reset_index(drop=True)
+            except Exception as e:
+                logger.error("计算热度分失败，回退到成交额排序: %s", str(e))
+                candidates = candidates.sort_values('amount', ascending=False).head(count).reset_index(drop=True)
+        else:
+            sort_key = {'amount': 'amount', 'changepercent': 'change_pct',
+                        'turnoverratio': 'turnover_rate'}.get(sort_by, 'amount')
+            candidates = candidates.sort_values(sort_key, ascending=False).head(count).reset_index(drop=True)
+
+        logger.info("获取到 %d 只热门股票", len(candidates))
+        return candidates
+
 
     def get_stock_list(self) -> pd.DataFrame:
         """

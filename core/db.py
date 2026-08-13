@@ -54,18 +54,24 @@ def get_connection():
 
     try:
         import pymysql
-        conn = pymysql.connect(**cfg, connect_timeout=5)
-        yield conn
     except ImportError:
         logger.warning("pymysql 未安装, 将跳过数据库读写")
         yield None
+        return
+
+    conn = None
+    try:
+        conn = pymysql.connect(**cfg, connect_timeout=5, read_timeout=10, write_timeout=10)
     except Exception as e:
         logger.warning("数据库连接失败: %s", e)
         yield None
+        return
+
+    try:
+        yield conn
     finally:
         try:
-            if 'conn' in dir() and conn is not None:
-                conn.close()
+            conn.close()
         except Exception:
             pass
 

@@ -349,4 +349,6 @@ def add_all_indicators(df):
     df['WR14'] = calc_wr(df, 14)
     df['VOL_MA5'] = calc_volume_ma(df, 5)
     df['VWAP'] = calc_vwap(df)
+    df['HV20'] = calc_historical_volatility(df, 20)
+    df['MOM60'] = calc_momentum_return(df, 60)
     return df
