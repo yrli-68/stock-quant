@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import sys
 import os
 import json
+import io
+import contextlib
 import warnings
 
 # 将项目根目录加入 Python 路径
@@ -564,7 +566,7 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
         if best_sk:
             r = risks[best_sk] if best_sk in risks else {}
             summary_rows += f'''<tr>
-                <td>{label}</td><td>{price_str}</td><td>{smap[best_sk][0]}</td>
+                <td>{label}</td><td>{price_str}</td><td>{smap[best_sk]}</td>
                 <td>{_safe_pct(r.get('total_return'))}</td>
                 <td>{_safe_float(r.get('sharpe_ratio'))}</td>
                 <td>{_safe_pct(r.get('max_drawdown'))}</td>
@@ -594,7 +596,7 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
         for sk in d['strategies_to_run']:
             r = risks.get(sk, {})
             rankings.append((
-                smap[sk][0], r.get('total_return'), r.get('sharpe_ratio'),
+                smap[sk], r.get('total_return'), r.get('sharpe_ratio'),
                 r.get('max_drawdown'), r.get('total_trades'),
                 _get_signal_text(sigs.get(sk)),
             ))
@@ -651,7 +653,7 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
         risks = d.get('all_risks', {})
         for sk in d.get('strategies_to_run', []):
             r = risks.get(sk, {})
-            name = smap[sk][0]
+            name = smap[sk]
             tr = r.get('total_return')
             dd = r.get('max_drawdown')
             if tr is not None:
@@ -849,7 +851,8 @@ def _resolve_symbol(input_str):
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--output-file', '-of', default=None, help='指定HTML报告文件名，默认自动生成')
-def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file):
+@click.option('--threads', '-t', default=1, type=int, help='并行进程数（默认1，多股票时可设为4等以加速）')
+def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file, threads):
     """单只/批量股票综合分析
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
@@ -950,13 +953,37 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
             output_file = f'report_{date_tag}.html'
 
     all_stock_data = []
-    for idx, raw_symbol in enumerate(symbols):
-        if len(symbols) > 1:
-            click.echo(click.style(f'\n  ── [{idx+1}/{len(symbols)}] ──', fg='cyan', bold=True))
-        data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file,
-                               batch_mode=len(symbols) > 1)
-        if data is not None:
-            all_stock_data.append(data)
+    if len(symbols) > 1 and threads > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        n_workers = min(threads, len(symbols))
+        click.echo(click.style(f'\n  使用 {n_workers} 个进程并行分析...', fg='blue'))
+
+        tasks = [(s, start, end, strategy, is_index, capital, output, output_file, True) for s in symbols]
+        results = [None] * len(symbols)
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_analyze_single_worker, task): i for i, task in enumerate(tasks)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    _, data, out = fut.result()
+                except Exception as e:
+                    data, out = None, f'  异常: {e}'
+                results[idx] = data
+                if data is None:
+                    click.echo(click.style(f'\n  [{idx+1}/{len(symbols)}] {symbols[idx]} 分析失败', fg='red'))
+                    if out.strip():
+                        click.echo(out)
+                else:
+                    click.echo(click.style(f'  [{idx+1}/{len(symbols)}] {symbols[idx]} 完成', fg='cyan'))
+        all_stock_data = [d for d in results if d is not None]
+    else:
+        for idx, raw_symbol in enumerate(symbols):
+            if len(symbols) > 1:
+                click.echo(click.style(f'\n  ── [{idx+1}/{len(symbols)}] ──', fg='cyan', bold=True))
+            data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file,
+                                   batch_mode=len(symbols) > 1)
+            if data is not None:
+                all_stock_data.append(data)
 
     if len(symbols) > 1:
         click.echo(click.style(f'\n  批量分析完成，共 {len(symbols)} 只股票', fg='green', bold=True))
@@ -1297,7 +1324,8 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             'end_date': end_date,
             'capital': capital,
             'is_index': is_index,
-            'strategy_map': strategy_map,
+            # 仅保留策略名（类/闭包不可跨进程 pickle）
+            'strategy_map': {k: v[0] for k, v in strategy_map.items()},
             'strategies_to_run': strategies_to_report,
             'all_results': all_results,
             'all_risks': all_risks,
@@ -1310,6 +1338,20 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
         click.echo(click.style(f'\n  错误: {e}', fg='red', bold=True))
         import traceback
         click.echo(click.style(traceback.format_exc(), fg='red'))
+
+
+def _analyze_single_worker(args):
+    """多进程 worker：分析单只股票，捕获其控制台输出，返回 (raw_symbol, data, 输出文本)"""
+    raw_symbol, start, end, strategy, is_index, capital, output, output_file, batch_mode = args
+    buf = io.StringIO()
+    data = None
+    try:
+        with contextlib.redirect_stdout(buf):
+            data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital,
+                                   output, output_file, batch_mode=batch_mode)
+    except Exception as e:
+        buf.write(f'\n  异常: {e}\n')
+    return raw_symbol, data, buf.getvalue()
 
 
 # ============================================================================

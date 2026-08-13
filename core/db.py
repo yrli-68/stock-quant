@@ -7,12 +7,24 @@
 import json
 import os
 import logging
+import threading
+import tempfile
 from contextlib import contextmanager
 from typing import Optional, List, Tuple
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 
 _DB_CONFIG = None
+
+# 写操作锁：多线程/多进程并发 REPLACE INTO 时 InnoDB 容易死锁（1213）。
+# 优先用 fcntl 文件锁（跨进程，适用于多进程并行），不支持时回退线程锁。
+_WRITE_LOCK = threading.Lock()
+_LOCK_FILE_PATH = os.path.join(tempfile.gettempdir(), 'stock_quant_db_write.lock')
 
 
 def _load_db_config():
@@ -76,6 +88,32 @@ def get_connection():
             pass
 
 
+@contextmanager
+def _db_write_lock():
+    """跨进程写锁：优先 fcntl 文件锁，回退线程锁"""
+    if fcntl is not None:
+        f = open(_LOCK_FILE_PATH, 'a')
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            finally:
+                f.close()
+    else:
+        with _WRITE_LOCK:
+            yield
+
+
+@contextmanager
+def get_write_connection():
+    """获取写数据库连接（带跨进程写锁，串行化写事务，避免死锁）"""
+    with _db_write_lock():
+        with get_connection() as conn:
+            yield conn
+
+
 def fetch_kline(code: str, start_date: str, end_date: str) -> list:
     """从 daily_kline 表读取 K 线数据"""
     try:
@@ -102,7 +140,7 @@ def store_kline(code: str, rows: list):
     if not rows:
         return
     try:
-        with get_connection() as conn:
+        with get_write_connection() as conn:
             if conn is None:
                 return
 
@@ -172,7 +210,7 @@ def store_indicators(code: str, df):
             cols = ['code', 'trade_date'] + list(col_map.values())
             placeholders = ', '.join(['%s'] * len(cols))
             sql = f"REPLACE INTO daily_indicators ({', '.join(cols)}) VALUES ({placeholders})"
-            with get_connection() as conn:
+            with get_write_connection() as conn:
                 if conn is None:
                     return
                 cursor = conn.cursor()
@@ -207,7 +245,7 @@ def store_valuation(code: str, rows: list):
     if not rows:
         return
     try:
-        with get_connection() as conn:
+        with get_write_connection() as conn:
             if conn is None:
                 return
             cursor = conn.cursor()
@@ -278,7 +316,7 @@ def store_financial_rows(rows: list):
     if not rows:
         return
     try:
-        with get_connection() as conn:
+        with get_write_connection() as conn:
             if conn is None:
                 return
             cursor = conn.cursor()
@@ -348,7 +386,7 @@ def store_shareholder(code: str, df):
                 _safe_float(row.get('人均持股数量增幅')) if pd.notna(row.get('人均持股数量增幅', None)) else None,
             ))
         if rows:
-            with get_connection() as conn:
+            with get_write_connection() as conn:
                 if conn is None:
                     return
                 cursor = conn.cursor()
@@ -417,7 +455,7 @@ def store_insider_trades(code: str, df):
                 str(row.get('变动途径', ''))[:50] if pd.notna(row.get('变动途径', None)) else None,
             ))
         if rows:
-            with get_connection() as conn:
+            with get_write_connection() as conn:
                 if conn is None:
                     return
                 cursor = conn.cursor()
@@ -458,7 +496,7 @@ def fetch_stock_info(code: str) -> Optional[dict]:
 def store_stock_info(code: str, name: str, market: str = '', stock_type: str = 'dividend', is_etf: int = 0):
     """写入/更新股票基本信息"""
     try:
-        with get_connection() as conn:
+        with get_write_connection() as conn:
             if conn is None:
                 return
             cursor = conn.cursor()
@@ -512,7 +550,7 @@ def store_dividend_events(code: str, df):
                 str(row.get('announce_date', ''))[:10] if pd.notna(row.get('announce_date', None)) else None,
             ))
         if rows:
-            with get_connection() as conn:
+            with get_write_connection() as conn:
                 if conn is None:
                     return
                 cursor = conn.cursor()

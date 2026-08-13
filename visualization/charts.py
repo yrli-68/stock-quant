@@ -12,10 +12,25 @@ import pandas as pd
 import numpy as np
 import os
 import warnings
+import functools
+import threading
 from datetime import datetime
 
 # 忽略matplotlib的一些非关键警告
 warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
+
+# matplotlib/mplfinance 使用 pyplot 全局状态，多线程并发绘图不安全，
+# 用全局锁串行化所有绘图调用（数据抓取/策略计算仍可并行）。
+_PLOT_LOCK = threading.Lock()
+
+
+def _synchronized_plot(func):
+    """装饰器：使绘图方法在多线程环境下串行执行，避免 pyplot 状态竞争"""
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with _PLOT_LOCK:
+            return func(self, *args, **kwargs)
+    return wrapper
 
 # ============================================================================
 # 中文字体设置
@@ -102,6 +117,7 @@ class ChartGenerator:
         """获取完整的保存路径（自动加前缀）"""
         return os.path.join(self.output_dir, self.prefix + filename)
 
+    @_synchronized_plot
     def plot_kline_with_indicators(self, df, title='K线图与技术指标', save_path=None):
         """
         绘制K线图 + 成交量 + MACD + RSI 子图
@@ -246,6 +262,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_equity_curve(self, backtest_result, title='权益曲线与回撤', save_path=None):
         """
         绘制权益曲线和回撤曲线
@@ -337,6 +354,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_trade_distribution(self, trades_df, save_path=None):
         """
         绘制交易盈亏分布饼图和柱状图
@@ -425,6 +443,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_signal_on_price(self, df, signals, title='买卖信号标注', save_path=None, other_signals=None):
         """
         在价格图上标注买卖信号
@@ -519,6 +538,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_indicators_dashboard(self, df, title='技术指标仪表盘', save_path=None):
         """
         综合指标仪表盘（多子图：MA+布林带、MACD、RSI、KDJ、成交量）
@@ -660,6 +680,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_compare_strategies(self, results_dict, save_path=None):
         """
         比较多个策略的权益曲线
@@ -716,6 +737,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_risk_heatmap(self, risk_metrics, save_path=None):
         """
         风险指标热力图
@@ -793,6 +815,7 @@ class ChartGenerator:
 
         return save_path
 
+    @_synchronized_plot
     def plot_monthly_returns_heatmap(self, daily_returns, save_path=None):
         """
         月度收益热力图
