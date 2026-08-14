@@ -172,26 +172,26 @@ class ChartGenerator:
 
         # MACD指标
         if 'MACD' in df.columns and 'MACD_Signal' in df.columns and 'MACD_Hist' in df.columns:
-            add_plots.append(mpf.make_addplot(df['MACD'], panel=2, color=COLOR_BLUE, width=1.2, ylabel='MACD'))
-            add_plots.append(mpf.make_addplot(df['MACD_Signal'], panel=2, color=COLOR_ORANGE, width=1.2))
+            add_plots.append(mpf.make_addplot(df['MACD'], panel=2, color=COLOR_BLUE, width=1.2, ylabel='MACD', secondary_y=False))
+            add_plots.append(mpf.make_addplot(df['MACD_Signal'], panel=2, color=COLOR_ORANGE, width=1.2, secondary_y=False))
             # MACD柱状图
             macd_hist_colors = [COLOR_UP if v >= 0 else COLOR_DOWN for v in df['MACD_Hist']]
-            add_plots.append(mpf.make_addplot(df['MACD_Hist'], type='bar', panel=2, color=macd_hist_colors, width=0.8))
+            add_plots.append(mpf.make_addplot(df['MACD_Hist'], type='bar', panel=2, color=macd_hist_colors, width=0.8, secondary_y=False))
 
         # RSI指标
         if 'RSI' in df.columns:
-            add_plots.append(mpf.make_addplot(df['RSI'], panel=3, color=COLOR_PURPLE, width=1.2, ylabel='RSI'))
+            add_plots.append(mpf.make_addplot(df['RSI'], panel=3, color=COLOR_PURPLE, width=1.2, ylabel='RSI', secondary_y=False))
             # 添加RSI参考线
-            add_plots.append(mpf.make_addplot(pd.Series(70, index=df.index), panel=3, color=COLOR_GRAY, width=0.8, linestyle='--'))
-            add_plots.append(mpf.make_addplot(pd.Series(30, index=df.index), panel=3, color=COLOR_GRAY, width=0.8, linestyle='--'))
+            add_plots.append(mpf.make_addplot(pd.Series(70, index=df.index), panel=3, color=COLOR_GRAY, width=0.8, linestyle='--', secondary_y=False))
+            add_plots.append(mpf.make_addplot(pd.Series(30, index=df.index), panel=3, color=COLOR_GRAY, width=0.8, linestyle='--', secondary_y=False))
 
         # 布林带指标
         has_boll = 'BOLL_UPPER' in df.columns and 'BOLL_MIDDLE' in df.columns and 'BOLL_LOWER' in df.columns
         boll_panel = 4 if 'RSI' in df.columns else 3
         if has_boll:
-            add_plots.append(mpf.make_addplot(df['BOLL_UPPER'], panel=boll_panel, color=COLOR_UP, width=1.0, alpha=0.7, ylabel='BOLL'))
-            add_plots.append(mpf.make_addplot(df['BOLL_MIDDLE'], panel=boll_panel, color=COLOR_GRAY, width=1.0, alpha=0.8, linestyle='--'))
-            add_plots.append(mpf.make_addplot(df['BOLL_LOWER'], panel=boll_panel, color=COLOR_DOWN, width=1.0, alpha=0.7))
+            add_plots.append(mpf.make_addplot(df['BOLL_UPPER'], panel=boll_panel, color=COLOR_UP, width=1.0, alpha=0.7, ylabel='BOLL', secondary_y=False))
+            add_plots.append(mpf.make_addplot(df['BOLL_MIDDLE'], panel=boll_panel, color=COLOR_GRAY, width=1.0, alpha=0.8, linestyle='--', secondary_y=False))
+            add_plots.append(mpf.make_addplot(df['BOLL_LOWER'], panel=boll_panel, color=COLOR_DOWN, width=1.0, alpha=0.7, secondary_y=False))
 
         # 设置面板比例
         if has_boll and 'RSI' in df.columns:

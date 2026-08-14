@@ -24,6 +24,7 @@ from core.risk import risk_report
 from core.strategy import Strategy
 from strategies.ma_cross import MACrossStrategy
 from strategies.macd_strategy import MACDStrategy
+from strategies.enhanced_macd import EnhancedMACDStrategy
 from strategies.rsi_strategy import RSIStrategy
 from strategies.bollinger_strategy import BollingerStrategy
 from strategies.composite_strategy import CompositeStrategy
@@ -50,6 +51,7 @@ warnings.filterwarnings('ignore')
 STRATEGY_MAP = {
     'ma_cross': ('均线交叉策略', MACrossStrategy),
     'macd': ('MACD策略', MACDStrategy),
+    'enhanced_macd': ('Enhanced-MACD策略', EnhancedMACDStrategy),
     'rsi': ('RSI策略', RSIStrategy),
     'bollinger': ('布林带策略', BollingerStrategy),
     'quality_value': ('质量价值融合策略', QualityValueFactorStrategy),
@@ -62,13 +64,14 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'quality_value', 'composite']
+ALL_STRATEGIES = ['ma_cross', 'macd', 'enhanced_macd', 'rsi', 'bollinger', 'quality_value', 'composite']
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 
 # ETF/指数基金专用策略（适配低波动、趋势跟随特性）
 ETF_STRATEGY_MAP = {
     'ma_cross': ('ETF均线交叉策略', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
     'macd': ('ETF MACD策略', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
+    'enhanced_macd': ('ETF Enhanced-MACD策略', lambda: EnhancedMACDStrategy(fast=16, slow=32, signal=12, name='ETF EnhancedMACD')),
     'rsi': ('ETF RSI策略', lambda: RSIStrategy(period=14, oversold=35, overbought=65, name='ETF RSI')),
     'bollinger': ('ETF布林带策略', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
     'quality_value': ('ETF质量价值融合策略', lambda: QualityValueFactorStrategy(stock_type='auto', name='ETF QualityValue')),
@@ -79,12 +82,13 @@ ETF_STRATEGY_MAP = {
          BollingerStrategy(period=20, std=2.5)],
         threshold=0.4, name='ETF Composite')),
 }
-ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger', 'quality_value', 'composite']
+ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'enhanced_macd', 'rsi', 'bollinger', 'quality_value', 'composite']
 
 # 策略 key 到类的映射（不含 composite，composite 由配置动态构建）
 _STRATEGY_CLASS_MAP = {
     'ma_cross': MACrossStrategy,
     'macd': MACDStrategy,
+    'enhanced_macd': EnhancedMACDStrategy,
     'rsi': RSIStrategy,
     'bollinger': BollingerStrategy,
     'quality_value': QualityValueFactorStrategy,
@@ -846,7 +850,7 @@ def _resolve_symbol(input_str):
 @click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
-@click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|rsi|bollinger|quality_value|composite|all]，多个以|分隔')
+@click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|enhanced_macd|rsi|bollinger|quality_value|composite|all]，多个以|分隔')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
