@@ -1090,6 +1090,31 @@ class DataFetcher:
             logger.error("获取股票列表失败: %s", str(e))
             return pd.DataFrame()
 
+    def get_all_stock_codes(self) -> list:
+        """获取全部 A 股代码列表（按代码排序分页拉取，供通配符展开使用）"""
+        codes = []
+        try:
+            for page in range(1, 61):
+                url = (
+                    f'http://vip.stock.finance.sina.com.cn/quotes_service/'
+                    f'api/json_v2.php/Market_Center.getHQNodeData?'
+                    f'page={page}&num=100&sort=code&asc=1&'
+                    f'node=hs_a&symbol=&_s_r_a=auto'
+                )
+                resp = self._session.get(url, timeout=15)
+                data = json.loads(resp.text)
+                if not data:
+                    break
+                for item in data:
+                    code = item.get('code', '')
+                    if code:
+                        codes.append(code)
+                if len(data) < 100:
+                    break
+        except Exception as e:
+            logger.error("获取全量股票列表失败: %s", str(e))
+        return codes
+
     # ==================== 实时行情 ====================
 
     def get_realtime_quote(self, symbol: str) -> dict:

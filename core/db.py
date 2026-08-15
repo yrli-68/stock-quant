@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 
 _DB_CONFIG = None
 
+# 数据库缓存模式：
+#   0 = 忽略数据库缓存（纯网络，不读不写）
+#   1 = 读缓存，不写数据库
+#   2 = 不读缓存，直接走网络获取，获取的数据覆盖写入数据库
+_DB_MODE = 1
+
+
+def set_db_mode(mode: int):
+    """设置数据库缓存模式 (0/1/2)"""
+    global _DB_MODE
+    _DB_MODE = int(mode)
+
+
+def get_db_mode() -> int:
+    """获取数据库缓存模式"""
+    return _DB_MODE
+
+
 # 写操作锁：多线程/多进程并发 REPLACE INTO 时 InnoDB 容易死锁（1213）。
 # 优先用 fcntl 文件锁（跨进程，适用于多进程并行），不支持时回退线程锁。
 _WRITE_LOCK = threading.Lock()
@@ -58,8 +76,8 @@ def _load_db_config():
 
 
 @contextmanager
-def get_connection():
-    """获取数据库连接 (上下文管理器)"""
+def _open_connection():
+    """建立数据库连接（不含模式判断）"""
     cfg = _load_db_config()
     if not cfg:
         raise RuntimeError("数据库配置未找到, 请检查 input/stock-quant.json")
@@ -89,6 +107,17 @@ def get_connection():
 
 
 @contextmanager
+def get_connection():
+    """获取读数据库连接 (上下文管理器)"""
+    if _DB_MODE in (0, 2):
+        # 模式 0/2：不从数据库读取缓存
+        yield None
+        return
+    with _open_connection() as conn:
+        yield conn
+
+
+@contextmanager
 def _db_write_lock():
     """跨进程写锁：优先 fcntl 文件锁，回退线程锁"""
     if fcntl is not None:
@@ -109,8 +138,12 @@ def _db_write_lock():
 @contextmanager
 def get_write_connection():
     """获取写数据库连接（带跨进程写锁，串行化写事务，避免死锁）"""
+    if _DB_MODE in (0, 1):
+        # 模式 0/1：不写数据库
+        yield None
+        return
     with _db_write_lock():
-        with get_connection() as conn:
+        with _open_connection() as conn:
             yield conn
 
 

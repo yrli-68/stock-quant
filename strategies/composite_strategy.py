@@ -111,4 +111,8 @@ class CompositeStrategy(Strategy):
         # 加权信号 < 负阈值 → 卖出
         final_signals[weighted_sum < -self.threshold] = -1
 
+        # 附加加权分数曲线与阈值，供图表展示
+        final_signals.attrs['weighted_sum'] = pd.Series(weighted_sum, index=df.index)
+        final_signals.attrs['threshold'] = self.threshold
+
         return final_signals

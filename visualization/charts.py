@@ -100,7 +100,7 @@ STRATEGY_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#e67e22', '#9b59b6', '#1abc
 class ChartGenerator:
     """图表生成器，用于生成各类量化分析图表"""
 
-    def __init__(self, output_dir='./output', prefix=''):
+    def __init__(self, output_dir='./output', prefix='', date_tag=''):
         """
         初始化图表生成器
 
@@ -108,13 +108,18 @@ class ChartGenerator:
         ----------
         output_dir : str, 图表输出目录
         prefix : str, 文件名前缀（如股票代码），避免批量分析时互相覆盖
+        date_tag : str, 日期标签（如 yyyymmdd_360d），追加到文件名末尾
         """
         self.output_dir = output_dir
         self.prefix = (prefix + '_') if prefix else ''
+        self.date_tag = date_tag
         os.makedirs(output_dir, exist_ok=True)
 
     def _get_save_path(self, filename):
-        """获取完整的保存路径（自动加前缀）"""
+        """获取完整的保存路径（自动加前缀与日期后缀）"""
+        if self.date_tag:
+            base, ext = os.path.splitext(filename)
+            filename = f'{base}_{self.date_tag}{ext}'
         return os.path.join(self.output_dir, self.prefix + filename)
 
     @_synchronized_plot
@@ -533,6 +538,226 @@ class ChartGenerator:
         # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
         fig.suptitle(title, y=1, fontsize=16)
     
+        fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
+        plt.close(fig)
+
+        return save_path
+
+    # 策略 → 指标子图类型
+    STRATEGY_INDICATOR_TYPE = {
+        'ma_cross': 'ma',
+        'macd': 'macd',
+        'enhanced_macd': 'macd',
+        'rsi': 'rsi',
+        'bollinger': 'boll',
+        'momentum': 'momentum',
+        'volatility': 'volatility',
+        'breadth': 'volume',
+        'composite': 'composite',
+    }
+
+    def _strategy_indicator_addplots(self, df, strategy_key, panel, signals=None):
+        """根据策略生成对应的技术指标 addplot 列表（绘制在 panel 面板）"""
+        plots = []
+        ind_type = self.STRATEGY_INDICATOR_TYPE.get(strategy_key)
+        if ind_type == 'macd':
+            if all(c in df.columns for c in ('MACD_DIF', 'MACD_DEA', 'MACD_BAR')):
+                plots.append(mpf.make_addplot(df['MACD_DIF'], panel=panel, color=COLOR_BLUE, width=1.2, ylabel='MACD', label='DIF', secondary_y=False))
+                plots.append(mpf.make_addplot(df['MACD_DEA'], panel=panel, color=COLOR_ORANGE, width=1.2, label='DEA', secondary_y=False))
+                hist_colors = [COLOR_UP if v >= 0 else COLOR_DOWN for v in df['MACD_BAR']]
+                plots.append(mpf.make_addplot(df['MACD_BAR'], type='bar', panel=panel, color=hist_colors, width=0.8, label='MACD', secondary_y=False))
+        elif ind_type == 'rsi':
+            if 'RSI14' in df.columns:
+                plots.append(mpf.make_addplot(df['RSI14'], panel=panel, color=COLOR_PURPLE, width=1.2, ylabel='RSI', label='RSI', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(70, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超买70', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(30, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超卖30', secondary_y=False))
+        elif ind_type == 'boll':
+            if all(c in df.columns for c in ('BOLL_UPPER', 'BOLL_MIDDLE', 'BOLL_LOWER')):
+                plots.append(mpf.make_addplot(df['BOLL_UPPER'], panel=panel, color=COLOR_UP, width=1.0, alpha=0.7, ylabel='BOLL', label='上轨', secondary_y=False))
+                plots.append(mpf.make_addplot(df['BOLL_MIDDLE'], panel=panel, color=COLOR_GRAY, width=1.0, alpha=0.8, linestyle='--', label='中轨', secondary_y=False))
+                plots.append(mpf.make_addplot(df['BOLL_LOWER'], panel=panel, color=COLOR_DOWN, width=1.0, alpha=0.7, label='下轨', secondary_y=False))
+                if 'Close' in df.columns:
+                    plots.append(mpf.make_addplot(df['Close'], panel=panel, color=COLOR_BLUE, width=0.8, alpha=0.8, label='收盘价', secondary_y=False))
+        elif ind_type == 'ma':
+            for period, color in ((5, COLOR_ORANGE), (10, COLOR_TEAL), (20, COLOR_PURPLE)):
+                col = f'MA{period}'
+                if col in df.columns:
+                    plots.append(mpf.make_addplot(df[col], panel=panel, color=color, width=1.0, label=f'MA{period}', secondary_y=False))
+        elif ind_type == 'momentum':
+            if 'MOM60' in df.columns:
+                plots.append(mpf.make_addplot(df['MOM60'], panel=panel, color=COLOR_BLUE, width=1.0, ylabel='MOM60', label='MOM60', secondary_y=False))
+        elif ind_type == 'volatility':
+            if 'HV20' in df.columns:
+                plots.append(mpf.make_addplot(df['HV20'], panel=panel, color=COLOR_TEAL, width=1.0, ylabel='HV20', label='HV20', secondary_y=False))
+        elif ind_type == 'volume':
+            if 'Volume' in df.columns:
+                vol_ma = df['Volume'].rolling(5).mean()
+                ratio = df['Volume'] / vol_ma
+                plots.append(mpf.make_addplot(ratio, panel=panel, color=COLOR_BLUE, width=1.0, ylabel='量比', label='量比', secondary_y=False))
+        elif ind_type == 'composite':
+            weighted_sum = None
+            threshold = 0.25
+            if signals is not None and hasattr(signals, 'attrs'):
+                weighted_sum = signals.attrs.get('weighted_sum')
+                threshold = signals.attrs.get('threshold', 0.25)
+            if weighted_sum is not None:
+                weighted_sum = weighted_sum.reindex(df.index)
+                plots.append(mpf.make_addplot(weighted_sum, panel=panel, color=COLOR_BLUE, width=1.1, ylabel='加权分', label='加权分', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(threshold, index=df.index), panel=panel, color=COLOR_UP, width=0.8, linestyle='--', label='买入阈值', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(-threshold, index=df.index), panel=panel, color=COLOR_DOWN, width=0.8, linestyle='--', label='卖出阈值', secondary_y=False))
+        return plots
+
+    @_synchronized_plot
+    def plot_signal_composite(self, df, signals, strategy_key='', title='买卖信号', save_path=None, equity_curve=None):
+        """
+        K线主图（买卖点直接标注在K线上）+ 成交量 + 策略指标子图 + 权益曲线子图
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            包含 OHLCV 及技术指标列的 DataFrame
+        signals : pd.Series
+            信号序列，1=买入，-1=卖出，0=持有
+        strategy_key : str
+            策略 key，决定指标子图类型
+        title : str
+            图表标题
+        save_path : str
+            保存路径
+        """
+        if save_path is None:
+            save_path = self._get_save_path('signal_composite.png')
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'date' in df.columns:
+                df = df.set_index('date')
+            df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+
+        _sig_attrs = getattr(signals, 'attrs', None)
+        if not isinstance(signals.index, pd.DatetimeIndex):
+            signals.index = pd.to_datetime(signals.index)
+        signals = signals.reindex(df.index).fillna(0).astype(int)
+        if _sig_attrs:
+            try:
+                signals.attrs = _sig_attrs
+            except Exception:
+                pass
+
+        # 规范化 OHLCV 列名以兼容 mplfinance
+        df = df.copy()
+        rename_map = {}
+        ohlc_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        for old_col, new_col in ohlc_map.items():
+            if old_col in df.columns and new_col not in df.columns:
+                rename_map[old_col] = new_col
+        if rename_map:
+            df = df.rename(columns=rename_map)
+        for col in ('Open', 'High', 'Low', 'Close'):
+            if col not in df.columns:
+                raise ValueError(f"缺少必要列: {col}")
+
+        add_plots = []
+        panel_ratios = [2, 1]  # K线(原高度2/3) + 成交量
+
+        # 买卖点直接标注在 K 线主图（panel 0）上
+        # 买入点：位于当日最低价下方；卖出点：位于当日最高价上方
+        buy_marker = (df['Low'] * 0.97).where(signals == 1)
+        sell_marker = (df['High'] * 1.03).where(signals == -1)
+        add_plots.append(mpf.make_addplot(buy_marker, type='scatter', panel=0,
+                                          marker='^', markersize=110, color=COLOR_UP, secondary_y=False))
+        add_plots.append(mpf.make_addplot(sell_marker, type='scatter', panel=0,
+                                          marker='v', markersize=110, color=COLOR_DOWN, secondary_y=False))
+
+        # 指标子图 (panel 2，panel 1 为成交量)
+        indicator_panel = 2
+        ind_plots = self._strategy_indicator_addplots(df, strategy_key, indicator_panel, signals=signals)
+        has_indicator = bool(ind_plots)
+        if has_indicator:
+            add_plots.extend(ind_plots)
+            panel_ratios.append(1.2)
+
+        # 权益曲线子图（最后）
+        eq_series = None
+        if equity_curve is not None:
+            equity_panel = 3 if has_indicator else 2
+            eq_series = equity_curve.reindex(df.index)
+            add_plots.append(mpf.make_addplot(eq_series, panel=equity_panel, color=COLOR_BLUE, width=1.1, ylabel='权益', secondary_y=False))
+            panel_ratios.append(1.2)
+
+        mc = mpf.make_marketcolors(up=COLOR_UP, down=COLOR_DOWN, edge='inherit', wick='inherit',
+                                   volume={'up': COLOR_UP, 'down': COLOR_DOWN}, alpha=0.9)
+        s = mpf.make_mpf_style(
+            marketcolors=mc, gridstyle=':', gridcolor='#e0e0e0',
+            facecolor=COLOR_BG, figcolor=COLOR_BG, y_on_right=False,
+            rc={'font.sans-serif': [FP_REGULAR.get_name(), 'DejaVu Sans'], 'axes.unicode_minus': False}
+        )
+
+        fig, axes = mpf.plot(
+            df, type='candle', style=s, volume=True, addplot=add_plots,
+            panel_ratios=tuple(panel_ratios), figsize=(16, 9),
+            returnfig=True, warn_too_much_data=len(df) + 1,
+            datetime_format='%Y-%m', xrotation=0
+        )
+
+        # 标题移到图下方
+        #fig.text(0.5, 0.015, title, ha='center', va='bottom', fontsize=13c, color=COLOR_DARK)
+
+        # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
+        fig.suptitle(title, y=0.13, fontsize=13, fontproperties=FP_BOLD)
+
+
+        for ax in axes:
+            if ax.get_ylabel():
+                ax.set_ylabel(ax.get_ylabel(), fontproperties=FP_REGULAR)
+            for label in (ax.get_xticklabels() + ax.get_yticklabels()):
+                label.set_fontproperties(FP_REGULAR)
+
+        # 指标子图图例置于左侧
+        if has_indicator:
+            ind_ax = axes[indicator_panel * 2]
+            if ind_ax.get_legend() is not None:
+                ind_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
+
+        # 权益子图起终点值标注
+        if eq_series is not None and len(eq_series) > 0:
+            eq_ax = axes[equity_panel * 2]
+            first_idx = eq_series.first_valid_index()
+            if first_idx is not None:
+                first_pos = df.index.get_loc(first_idx)
+                first_val = eq_series.loc[first_idx]
+                if pd.notna(first_val):
+                    eq_ax.annotate(f'{first_val:,.0f}', xy=(first_pos, first_val),
+                                   xytext=(8, 8), textcoords='offset points',
+                                   fontsize=9, color=COLOR_BLUE, fontproperties=FP_REGULAR)
+            last_val = eq_series.iloc[-1]
+            if pd.notna(last_val):
+                eq_ax.annotate(f'{last_val:,.0f}', xy=(len(df) - 1, last_val),
+                                xytext=(-10, 8), textcoords='offset points',
+                                fontsize=9, color=COLOR_BLUE, fontproperties=FP_REGULAR)
+
+        # X轴：自适应月度刻度（yyyy-mm，标签不重叠前提下尽量密集）
+        month_idx = []
+        prev_ym = None
+        for i, d in enumerate(df.index):
+            ym = (d.year, d.month)
+            if ym != prev_ym:
+                month_idx.append(i)
+                prev_ym = ym
+        n_months = len(month_idx)
+        # 在候选间隔中选尽量小的，保证标签数不超过约 18 个（不重叠）
+        step = 12
+        for cand in (1, 2, 3, 4, 6, 12):
+            if n_months / cand <= 18:
+                step = cand
+                break
+        ticks = month_idx[::step]
+        labels = [df.index[i].strftime('%Y-%m') for i in ticks]
+        bottom_ax = axes[-2]
+        bottom_ax.set_xticks(ticks)
+        bottom_ax.set_xticklabels(labels, fontsize=8, fontproperties=FP_REGULAR)
+
+        fig.tight_layout(rect=[0, 0.03, 1, 1])
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)
 
