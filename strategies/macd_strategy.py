@@ -66,17 +66,16 @@ class MACDStrategy(Strategy):
         macd_df = calc_macd(df, fast=self.fast, slow=self.slow, signal=self.signal)
         dif = macd_df['DIF']
         dea = macd_df['DEA']
-        macd_bar = macd_df['MACD']
 
         # 初始化信号序列
         signals = pd.Series(0, index=df.index, dtype=int)
 
-        # 金叉买入：DIF 上穿 DEA 且 MACD 柱状线 > 0
-        # 条件：上一期 DIF <= 上一期 DEA，当期 DIF > 当期 DEA，且当期 MACD 柱 > 0
+        # 金叉买入：DIF 上穿 DEA
+        # 条件：上一期 DIF <= 上一期 DEA，当期 DIF > 当期 DEA
+        # 注：金叉时 DIF > DEA 恒成立，故 MACD 柱 > 0 为冗余条件，已省略
         golden_cross = (
             (dif.shift(1) <= dea.shift(1)) &
-            (dif > dea) &
-            (macd_bar > 0)
+            (dif > dea)
         )
         signals[golden_cross] = 1
 

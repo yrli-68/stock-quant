@@ -53,6 +53,28 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings('ignore')
 
 
+def _call_with_timeout(fn, timeout=30):
+    """在守护线程中运行函数，超时返回 None，避免 akshare 网络接口卡死"""
+    import threading
+    result = {}
+
+    def _runner():
+        try:
+            result['value'] = fn()
+        except Exception as e:
+            result['error'] = e
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        logger.warning("数据获取超时(>%ds)，已跳过", timeout)
+        return None
+    if 'error' in result:
+        raise result['error']
+    return result.get('value')
+
+
 class QualityValueFactorStrategy(Strategy):
     """
     质量价值融合策略
@@ -197,7 +219,7 @@ class QualityValueFactorStrategy(Strategy):
 
         df_pe, df_pb = None, None
         try:
-            df_pe = ak.stock_index_pe_lg(symbol=index_name)
+            df_pe = _call_with_timeout(lambda: ak.stock_index_pe_lg(symbol=index_name), timeout=30)
             pe_col = '滚动市盈率(TTM)' if '滚动市盈率(TTM)' in df_pe.columns else '滚动市盈率'
             df_pe = df_pe.rename(columns={'日期': 'date', pe_col: 'pe_ttm'})
             df_pe['date'] = pd.to_datetime(df_pe['date'])
@@ -206,7 +228,7 @@ class QualityValueFactorStrategy(Strategy):
             df_pe = None
 
         try:
-            df_pb = ak.stock_index_pb_lg(symbol=index_name)
+            df_pb = _call_with_timeout(lambda: ak.stock_index_pb_lg(symbol=index_name), timeout=30)
             df_pb = df_pb.rename(columns={'日期': 'date', '市净率': 'pb'})
             df_pb['date'] = pd.to_datetime(df_pb['date'])
             df_pb = df_pb.set_index('date')[['pb']]
@@ -247,7 +269,7 @@ class QualityValueFactorStrategy(Strategy):
         import akshare as ak
 
         try:
-            df = ak.stock_value_em(symbol=symbol)
+            df = _call_with_timeout(lambda: ak.stock_value_em(symbol=symbol), timeout=30)
             if df is not None and not df.empty:
                 col_map = {
                     '数据日期': 'date', 'PE(TTM)': 'pe_ttm',
@@ -269,8 +291,8 @@ class QualityValueFactorStrategy(Strategy):
             pass
 
         try:
-            pe_df = ak.stock_zh_valuation_baidu(symbol=symbol, indicator='市盈率(TTM)', period='全部')
-            pb_df = ak.stock_zh_valuation_baidu(symbol=symbol, indicator='市净率', period='全部')
+            pe_df = _call_with_timeout(lambda: ak.stock_zh_valuation_baidu(symbol=symbol, indicator='市盈率(TTM)', period='全部'), timeout=30)
+            pb_df = _call_with_timeout(lambda: ak.stock_zh_valuation_baidu(symbol=symbol, indicator='市净率', period='全部'), timeout=30)
             if pe_df is not None:
                 pe_df = pe_df.rename(columns={'date': 'date', 'value': 'pe_ttm'})
                 pe_df['date'] = pd.to_datetime(pe_df['date'])
@@ -404,7 +426,7 @@ class QualityValueFactorStrategy(Strategy):
 
         try:
             import akshare as ak
-            df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2016')
+            df = _call_with_timeout(lambda: ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2016'), timeout=30)
             self._financials_cache[symbol] = df
             # 回写数据库
             try:
@@ -542,7 +564,7 @@ class QualityValueFactorStrategy(Strategy):
                 if report_date not in QualityValueFactorStrategy._holder_date_cache:
                     try:
                         QualityValueFactorStrategy._holder_date_cache[report_date] = \
-                            ak.stock_hold_num_cninfo(date=report_date)
+                            _call_with_timeout(lambda: ak.stock_hold_num_cninfo(date=report_date), timeout=30)
                     except Exception:
                         continue
 
@@ -667,7 +689,7 @@ class QualityValueFactorStrategy(Strategy):
 
             df_ths = None
             try:
-                df_ths = ak.stock_shareholder_change_ths(symbol=symbol)
+                df_ths = _call_with_timeout(lambda: ak.stock_shareholder_change_ths(symbol=symbol), timeout=30)
             except Exception:
                 pass
 

@@ -321,6 +321,132 @@ def calc_macd_divergence(df, fast=12, slow=26, signal=9, lookback=20, price_col=
     }, index=df.index)
 
 
+def calc_adx(df, period=14):
+    """计算 ADX / DMI 指标（平均趋向指数）
+
+    Returns:
+        pd.DataFrame: 包含 'ADX', 'PLUS_DI', 'MINUS_DI' 三列
+    """
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1.0 / period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1.0 / period, adjust=False).mean() / atr)
+
+    denom = plus_di + minus_di
+    dx = 100 * (plus_di - minus_di).abs() / denom.where(denom != 0)
+    dx = dx.fillna(0.0)
+    adx = dx.ewm(alpha=1.0 / period, adjust=False).mean()
+
+    return pd.DataFrame({'ADX': adx, 'PLUS_DI': plus_di, 'MINUS_DI': minus_di}, index=df.index)
+
+
+def classify_trend(df, date=None):
+    """判断个股当前趋势
+
+    趋势分为三类：强势（多头）、弱势（空头）、横盘震荡（无趋势）。
+
+    Args:
+        df (pd.DataFrame): 已包含技术指标的行情数据（需 add_all_indicators 处理过）
+        date: 判断时点，默认取最新交易日；传入日期则只用 <= 该日期的数据
+
+    Returns:
+        str: '强势' / '弱势' / '横盘震荡'
+    """
+    if df is None or len(df) == 0:
+        return '横盘震荡'
+
+    if date is not None:
+        sub = df.loc[df.index <= date]
+    else:
+        sub = df
+    if len(sub) == 0:
+        return '横盘震荡'
+
+    row = sub.iloc[-1]
+
+    def _v(name):
+        v = row.get(name)
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+
+    ma20 = _v('MA20')
+    ma60 = _v('MA60')
+    ma120 = _v('MA120')
+    adx = _v('ADX14')
+    plus_di = _v('PLUS_DI')
+    minus_di = _v('MINUS_DI')
+    dif = _v('MACD_DIF')
+
+    closes = sub['close'].astype(float).values
+    slope = 0.0
+    slope_norm = 0.0
+    if len(closes) >= 2:
+        y = closes[-60:]
+        x = np.arange(len(y), dtype=float)
+        slope = float(np.polyfit(x, y, 1)[0])
+        mean_y = y.mean()
+        if mean_y > 0:
+            slope_norm = slope / mean_y
+
+    high60 = sub['high'].tail(60).max()
+    low60 = sub['low'].tail(60).min()
+    amplitude = None
+    if not (pd.isna(high60) or pd.isna(low60)) and low60 > 0:
+        amplitude = float(high60 / low60)
+
+    # 强势（全部满足）
+    if (ma20 is not None and ma60 is not None and ma120 is not None
+            and ma20 > ma60 > ma120
+            and adx is not None and adx >= 25
+            and plus_di is not None and minus_di is not None and plus_di > minus_di
+            and slope > 0
+            and dif is not None and dif > 0):
+        return '强势'
+
+    # 弱势（全部满足）
+    if (ma20 is not None and ma60 is not None and ma120 is not None
+            and ma20 < ma60 < ma120
+            and adx is not None and adx >= 25
+            and plus_di is not None and minus_di is not None and minus_di > plus_di
+            and slope < 0
+            and dif is not None and dif < 0):
+        return '弱势'
+
+    # 横盘震荡（满足任意两条）
+    cond_count = 0
+    if adx is not None and adx < 25:
+        cond_count += 1
+    if ma20 is not None and ma60 is not None and ma60 != 0 and abs(ma20 - ma60) / ma60 < 0.03:
+        cond_count += 1
+    if abs(slope_norm) < 0.001:
+        cond_count += 1
+    if amplitude is not None and amplitude < 1.3:
+        cond_count += 1
+
+    if cond_count >= 2:
+        return '横盘震荡'
+
+    return '横盘震荡'
+
+
 def add_all_indicators(df):
     """一次性添加所有技术指标到DataFrame"""
     df = df.copy()
@@ -328,6 +454,7 @@ def add_all_indicators(df):
     df['MA10'] = calc_ma(df, 10)
     df['MA20'] = calc_ma(df, 20)
     df['MA60'] = calc_ma(df, 60)
+    df['MA120'] = calc_ma(df, 120)
     df['EMA12'] = calc_ema(df, 12)
     df['EMA26'] = calc_ema(df, 26)
     macd = calc_macd(df)
@@ -344,6 +471,10 @@ def add_all_indicators(df):
     df['KDJ_D'] = kdj['D']
     df['KDJ_J'] = kdj['J']
     df['ATR14'] = calc_atr(df, 14)
+    adx = calc_adx(df, 14)
+    df['ADX14'] = adx['ADX']
+    df['PLUS_DI'] = adx['PLUS_DI']
+    df['MINUS_DI'] = adx['MINUS_DI']
     df['OBV'] = calc_obv(df)
     df['CCI20'] = calc_cci(df, 20)
     df['WR14'] = calc_wr(df, 14)

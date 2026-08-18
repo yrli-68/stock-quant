@@ -4,8 +4,8 @@
 Enhanced-MACD 策略 (Enhanced MACD Strategy)
 
 基于 MACD 指标的金叉死叉来生成交易信号（在 MACD 策略基础上增强）：
-    - DIF 上穿 DEA 且 MACD 柱 > 0 且 DIF > 0、DEA > 0（金叉）→ 买入信号
-    - DIF 下穿 DEA（死叉）→ 卖出信号
+    - DIF 上穿 DEA 且 DIF > 0 且上升趋势（close > MA20 且 MA20 > MA60）→ 买入信号
+    - DIF 下穿 DEA（死叉）或 0 < dif_dea_pct < 0.3 且价格跌破 20 日均线 → 卖出信号
 
 MACD 是一种趋势跟踪动量指标，通过快慢 EMA 的差值来反映
 价格趋势的强度和方向变化。
@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 
 from core.strategy import Strategy
-from core.indicators import calc_macd
+from core.indicators import calc_macd, calc_ma
 
 
 class EnhancedMACDStrategy(Strategy):
@@ -23,16 +23,20 @@ class EnhancedMACDStrategy(Strategy):
     Enhanced-MACD 交易策略
 
     利用 MACD 指标的 DIF 线与 DEA 线的交叉来生成买卖信号。
-    当 DIF 从下方上穿 DEA、MACD 柱状线为正且 DIF/DEA 均在零轴上方时买入；
-    当 DIF 从上方下穿 DEA 时卖出。
+    当 DIF 从下方上穿 DEA、DIF 位于零轴上方且处于上升趋势
+    （close > MA20 且 MA20 > MA60）时买入；
+    当 DIF 从上方下穿 DEA，或 DIF 仅微弱高于 DEA（0 < (DIF-DEA)/close×100 < 0.3）
+    且价格跌破 20 日均线时卖出。
 
     Attributes:
         fast (int): 快速 EMA 周期，默认 12
         slow (int): 慢速 EMA 周期，默认 26
         signal (int): 信号线 DEA 周期，默认 9
+        ma_period (int): 趋势快速均线/卖出参考均线周期，默认 20
+        ma_slow (int): 趋势慢速均线周期，默认 60
     """
 
-    def __init__(self, fast=12, slow=26, signal=9, name='EnhancedMACD'):
+    def __init__(self, fast=12, slow=26, signal=9, ma_period=20, ma_slow=60, name='EnhancedMACD'):
         """
         初始化 Enhanced-MACD 策略
 
@@ -40,21 +44,26 @@ class EnhancedMACDStrategy(Strategy):
             fast (int): 快速 EMA 周期，默认 12
             slow (int): 慢速 EMA 周期，默认 26
             signal (int): 信号线 DEA 的 EMA 周期，默认 9
+            ma_period (int): 趋势快速均线/卖出参考均线周期，默认 20
+            ma_slow (int): 趋势慢速均线周期，默认 60
             name (str): 策略名称
         """
         super().__init__(name=name)
         self.fast = fast
         self.slow = slow
         self.signal = signal
+        self.ma_period = ma_period
+        self.ma_slow = ma_slow
 
     def generate_signals(self, df):
         """
         生成 Enhanced-MACD 交易信号
 
-        计算 MACD 指标（DIF、DEA、MACD 柱），然后检测交叉信号：
-            - DIF 上穿 DEA 且 MACD 柱 > 0 且 DIF > 0、DEA > 0 → 买入(1)
-            - DIF 下穿 DEA → 卖出(-1)
+        计算 MACD 指标（DIF、DEA），然后检测交叉信号：
+            - DIF 上穿 DEA 且 DIF > 0 且 uptrend → 买入(1)
+            - DIF 下穿 DEA 或 (0 < (DIF-DEA)/close×100 < 0.3 且 收盘价跌破 MA20) → 卖出(-1)
             - 其余情况 → 持有(0)
+            其中 uptrend = close > MA20 且 MA20 > MA60
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
@@ -66,25 +75,39 @@ class EnhancedMACDStrategy(Strategy):
         macd_df = calc_macd(df, fast=self.fast, slow=self.slow, signal=self.signal)
         dif = macd_df['DIF']
         dea = macd_df['DEA']
-        macd_bar = macd_df['MACD']
+
+        # 计算趋势/卖出参考均线
+        ma = calc_ma(df, self.ma_period)
+        ma_slow = calc_ma(df, self.ma_slow)
+        close = df['close']
 
         # 初始化信号序列
         signals = pd.Series(0, index=df.index, dtype=int)
 
-        # 金叉买入：DIF 上穿 DEA 且 MACD 柱状线 > 0，且 DIF > 0、DEA > 0
-        # 条件：上一期 DIF <= 上一期 DEA，当期 DIF > 当期 DEA，且当期 MACD 柱 > 0
+        # 上升趋势：close > MA20 且 MA20 > MA60
+        uptrend = (close > ma) & (ma > ma_slow)
+
+        # 金叉买入：DIF 上穿 DEA 且 DIF > 0 且上升趋势
+        # 条件：上一期 DIF <= 上一期 DEA，当期 DIF > 当期 DEA，DIF 位于零轴上方，且处于上升趋势
+        # 注：金叉时 DIF > DEA 恒成立，故 MACD 柱 > 0 为冗余条件，已省略
         golden_cross = (
             (dif.shift(1) <= dea.shift(1)) &
             (dif > dea) &
-            (macd_bar > 0) &
             (dif > 0) &
-            (dea > 0)
+            uptrend
         )
         signals[golden_cross] = 1
 
-        # 死叉卖出：DIF 下穿 DEA
-        # 条件：上一期 DIF >= 上一期 DEA，当期 DIF < 当期 DEA
+        # 卖出：DIF 下穿 DEA（死叉）或 (0 < dif_dea_pct < 0.3 且 收盘价跌破 MA20)
+        dif_dea_pct = (dif - dea) / close * 100
         death_cross = (dif.shift(1) >= dea.shift(1)) & (dif < dea)
-        signals[death_cross] = -1
+        price_breakdown = (
+            (dif_dea_pct > 0) &
+            (dif_dea_pct < 0.3) &
+            (close.shift(1) > ma.shift(1)) &
+            (close < ma)
+        )
+        sell_condition = death_cross | price_breakdown
+        signals[sell_condition] = -1
 
         return signals

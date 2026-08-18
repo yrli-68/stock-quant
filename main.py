@@ -19,13 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入核心模块
 from core.data_fetcher import DataFetcher
-from core.indicators import add_all_indicators
+from core.indicators import add_all_indicators, classify_trend
 from core.backtest import BacktestEngine
 from core.risk import risk_report
 from core.strategy import Strategy
 from strategies.ma_cross import MACrossStrategy
 from strategies.macd_strategy import MACDStrategy
 from strategies.enhanced_macd import EnhancedMACDStrategy
+from strategies.enhanced_rsi import EnhancedRSIStrategy
 from strategies.rsi_strategy import RSIStrategy
 from strategies.bollinger_strategy import BollingerStrategy
 from strategies.composite_strategy import CompositeStrategy
@@ -53,6 +54,7 @@ STRATEGY_MAP = {
     'ma_cross': ('均线交叉策略', MACrossStrategy),
     'macd': ('MACD策略', MACDStrategy),
     'enhanced_macd': ('Enhanced-MACD策略', EnhancedMACDStrategy),
+    'enhanced_rsi': ('Enhanced-RSI策略', EnhancedRSIStrategy),
     'rsi': ('RSI策略', RSIStrategy),
     'bollinger': ('布林带策略', BollingerStrategy),
     'quality_value': ('质量价值融合策略', QualityValueFactorStrategy),
@@ -65,7 +67,7 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma_cross', 'macd', 'enhanced_macd', 'rsi', 'bollinger', 'quality_value', 'composite']
+ALL_STRATEGIES = ['ma_cross', 'macd', 'enhanced_macd', 'enhanced_rsi', 'rsi', 'bollinger', 'quality_value', 'composite']
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 
 # ETF/指数基金专用策略（适配低波动、趋势跟随特性）
@@ -73,6 +75,7 @@ ETF_STRATEGY_MAP = {
     'ma_cross': ('ETF均线交叉策略', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
     'macd': ('ETF MACD策略', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
     'enhanced_macd': ('ETF Enhanced-MACD策略', lambda: EnhancedMACDStrategy(fast=16, slow=32, signal=12, name='ETF EnhancedMACD')),
+    'enhanced_rsi': ('ETF Enhanced-RSI策略', lambda: EnhancedRSIStrategy(period=14, name='ETF EnhancedRSI')),
     'rsi': ('ETF RSI策略', lambda: RSIStrategy(period=14, oversold=35, overbought=65, name='ETF RSI')),
     'bollinger': ('ETF布林带策略', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
     'quality_value': ('ETF质量价值融合策略', lambda: QualityValueFactorStrategy(stock_type='auto', name='ETF QualityValue')),
@@ -83,13 +86,14 @@ ETF_STRATEGY_MAP = {
          BollingerStrategy(period=20, std=2.5)],
         threshold=0.4, name='ETF Composite')),
 }
-ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'enhanced_macd', 'rsi', 'bollinger', 'quality_value', 'composite']
+ALL_ETF_STRATEGIES = ['ma_cross', 'macd', 'enhanced_macd', 'enhanced_rsi', 'rsi', 'bollinger', 'quality_value', 'composite']
 
 # 策略 key 到类的映射（不含 composite，composite 由配置动态构建）
 _STRATEGY_CLASS_MAP = {
     'ma_cross': MACrossStrategy,
     'macd': MACDStrategy,
     'enhanced_macd': EnhancedMACDStrategy,
+    'enhanced_rsi': EnhancedRSIStrategy,
     'rsi': RSIStrategy,
     'bollinger': BollingerStrategy,
     'quality_value': QualityValueFactorStrategy,
@@ -253,17 +257,34 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strate
     return result, {}, strategy_name, signals
 
 
-def _parse_dates(start, end):
-    """解析日期字符串，返回默认值"""
-    if end is None:
+def _parse_dates(start, end, duration=None):
+    """解析日期字符串，返回默认值
+
+    duration: 分析时段天数（从结束时间向前），指定时忽略 start。
+    对 start/end 做格式校验并统一为 YYYY-MM-DD，非法时抛出明确错误。
+    """
+    def _normalize_date(d):
+        d = str(d).strip()
+        for fmt in ('%Y-%m-%d', '%Y%m%d'):
+            try:
+                return datetime.strptime(d, fmt).strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+        raise click.ClickException(f'日期格式不正确: {d}，期望格式 YYYY-MM-DD 或 YYYYMMDD')
+
+    if end is not None:
+        end_date = _normalize_date(end)
+    else:
         end_date = datetime.now().strftime('%Y-%m-%d')
+
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+
+    if duration is not None:
+        start_date = (end_dt - timedelta(days=duration)).strftime('%Y-%m-%d')
+    elif start is not None:
+        start_date = _normalize_date(start)
     else:
-        end_date = end
-    if start is None:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         start_date = (end_dt - timedelta(days=365)).strftime('%Y-%m-%d')
-    else:
-        start_date = start
     return start_date, end_date
 
 
@@ -277,6 +298,72 @@ def _build_date_tag(start_date, end_date):
         except Exception:
             pass
     return tag
+
+
+def _profit_int(return_value):
+    """收益率转百分数整数（0.675 -> 67），None 返回 None"""
+    if return_value is None:
+        return None
+    return int(return_value * 100)
+
+
+def _calc_sharpe_drawdown(equity_curve):
+    """从权益曲线计算夏普比率与最大回撤（返回 (sharpe, max_drawdown)）"""
+    eq = pd.Series([float(v) for v in equity_curve])
+    if len(eq) < 2:
+        return 0.0, 0.0
+    rets = eq.pct_change().dropna()
+    if len(rets) > 1 and np.std(rets, ddof=1) > 0:
+        excess = rets - 0.03 / 252
+        sharpe = float(np.mean(excess) / np.std(rets, ddof=1) * np.sqrt(252))
+    else:
+        sharpe = 0.0
+    cummax = eq.cummax()
+    drawdowns = (eq - cummax) / cummax
+    max_dd = float(np.abs(np.min(drawdowns))) if len(drawdowns) else 0.0
+    return sharpe, max_dd
+
+
+def _build_report_filename(source, end_date, days, strategy, mode, profit=None):
+    """构建报告文件名: source_yyyymmdd_days_strategy_mode_profit.html"""
+    d2 = end_date.replace('-', '') if end_date else datetime.now().strftime('%Y%m%d')
+    strategy_tag = str(strategy).replace('|', '_')
+    parts = [str(source), d2, f'{days}d', strategy_tag, f'm{mode}']
+    if profit is not None:
+        parts.append(str(profit))
+    return '_'.join(parts) + '.html'
+
+
+def _format_cmd_params(symbol, symbol_file, hot, start, end, strategy, is_index,
+                       capital, output, output_file, threads, db, mode, duration=None,
+                       filter_signal=None):
+    """构建命令选项参数摘要字符串，用于在报告中标注本次运行所用的选项"""
+    parts = ['analyze']
+    if symbol:
+        parts.append(f'-s "{symbol}"')
+    if symbol_file:
+        parts.append(f'-sf "{symbol_file}"')
+    if hot:
+        parts.append(f'-h {hot}')
+    if start:
+        parts.append(f'-st {start}')
+    if end:
+        parts.append(f'-e {end}')
+    if duration is not None:
+        parts.append(f'-d {duration}')
+    parts.append(f'-g {strategy}')
+    if is_index:
+        parts.append('-i')
+    parts.append(f'-c {capital:g}')
+    parts.append(f'-o "{output}"')
+    if output_file:
+        parts.append(f'-of "{output_file}"')
+    parts.append(f'-t {threads}')
+    parts.append(f'-db {db}')
+    parts.append(f'-m {mode}')
+    if filter_signal:
+        parts.append(f'-f {filter_signal}')
+    return ' '.join(parts)
 
 
 def _format_risk_report_rows(risk):
@@ -318,10 +405,52 @@ def _get_signal_color(sig_text):
     return {'买入': 'green', '卖出': 'red', '观望': 'yellow'}.get(sig_text, 'white')
 
 
+# 信号过滤映射：-f 选项字符 -> 信号值 -> 信号文本
+_FILTER_SIGNAL_MAP = {'b': 1, 's': -1, 'w': 0}
+_FILTER_SIGNAL_TEXT = {'b': '买入', 's': '卖出', 'w': '观望'}
+
+
+def _get_primary_signal_value(all_signals, all_risks=None):
+    """确定股票的主信号值：优先综合策略，其次最佳收益策略
+
+    Args:
+        all_signals: {策略key: 信号序列}
+        all_risks: {策略key: 风险指标dict}，用于在无综合策略时选出最佳策略
+
+    Returns:
+        int: 主信号值 1/-1/0，无法确定时返回 None
+    """
+    if not all_signals:
+        return None
+    if 'composite' in all_signals:
+        sk = 'composite'
+    else:
+        best_sk = None
+        best_ret = -999
+        for key in all_signals:
+            r = (all_risks or {}).get(key, {}).get('total_return')
+            if r is not None and (r or 0) > best_ret:
+                best_ret = r or 0
+                best_sk = key
+        sk = best_sk if best_sk is not None else next(iter(all_signals))
+    sig = all_signals.get(sk)
+    if sig is None or len(sig) == 0:
+        return None
+    return int(sig.iloc[-1]) if hasattr(sig, 'iloc') else int(sig[-1])
+
+
+def _match_filter(filter_signal, all_signals, all_risks=None):
+    """判断股票是否满足 -f 信号过滤条件（未设置过滤时恒为 True）"""
+    if not filter_signal:
+        return True
+    return _get_primary_signal_value(all_signals, all_risks) == _FILTER_SIGNAL_MAP[filter_signal]
+
+
 def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index,
                           strategy_map, strategies_to_run, all_results, all_risks, all_charts,
                           all_signals=None, latest_close=None, latest_date=None,
-                          trading_days=None, report_filename=None):
+                          trading_days=None, report_filename=None, cmd_params='',
+                          strategy=None, mode=0):
     """生成 HTML 分析报告"""
     import base64
     from datetime import datetime as dt
@@ -445,6 +574,9 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 <div class="info">
     <span><strong>最新价格:</strong> {f'{latest_close:.2f}' if latest_close is not None else 'N/A'} <small>({str(latest_date.date()) if latest_date is not None else 'N/A'})</small></span>
 </div>
+<div class="info">
+    <span><strong>命令参数:</strong> {cmd_params}</span>
+</div>
 
 <h2>策略对比排名</h2>
 <table class="rank">
@@ -459,8 +591,19 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </body>
 </html>'''
 
-    date_tag = _build_date_tag(start_date, end_date)
-    report_path = report_filename if report_filename else os.path.join('report', f'{symbol}_{date_tag}.html')
+    # 最佳策略收益率（用于文件名）
+    best_return = None
+    for sk in strategies_to_run:
+        tr = all_risks.get(sk, {}).get('total_return')
+        if tr is not None and (best_return is None or tr > best_return):
+            best_return = tr
+
+    if report_filename:
+        report_path = report_filename
+    else:
+        days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
+        report_path = _build_report_filename(symbol, end_date, days, strategy, mode,
+                                             profit=_profit_int(best_return))
     if not os.path.dirname(report_path):
         report_path = os.path.join('report', report_path)
     with open(report_path, 'w', encoding='utf-8') as f:
@@ -468,7 +611,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
     return report_path
 
 
-def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, report_filename=None, end_date=None, start_date=None):
+def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, report_filename=None, end_date=None, start_date=None, cmd_params='', source=None, mode=0):
     """生成多股票汇总 HTML 报告"""
     import base64
     from datetime import datetime as dt
@@ -553,6 +696,46 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
                 <td>{r.get('total_trades', 'N/A')}</td>
                 <td>{sig_display}</td>
             </tr>'''
+
+    # 最新信号表：每行一只股票，每列一个策略，单元格为该股票该策略的最新信号
+    strategy_keys = []
+    for d in all_stock_data:
+        for sk in d.get('strategies_to_run', []):
+            if sk not in strategy_keys:
+                strategy_keys.append(sk)
+
+    strategy_names = {}
+    for d in all_stock_data:
+        smap = d['strategy_map']
+        for sk in strategy_keys:
+            if sk not in strategy_names and sk in smap:
+                strategy_names[sk] = smap[sk]
+
+    def _signal_cell(sig_series):
+        if sig_series is None or len(sig_series) == 0:
+            return '<td style="color:#000000">N/A</td>'
+        last = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
+        if last == 1:
+            return '<td style="color:#e74c3c;font-weight:bold">买</td>'
+        if last == -1:
+            return '<td style="color:#27ae60;font-weight:bold">卖</td>'
+        return '<td style="color:#000000">-</td>'
+
+    signal_rows = ''
+    for d in all_stock_data:
+        s = d['symbol']
+        sn = d['stock_name']
+        label = f'{s} {sn}'.strip()
+        sigs = d.get('all_signals', {})
+        signal_rows += f'<tr><td>{label}</td>'
+        for sk in strategy_keys:
+            signal_rows += _signal_cell(sigs.get(sk))
+        signal_rows += '</tr>'
+
+    signal_table_html = '<table><tr><th>股票</th>'
+    for sk in strategy_keys:
+        signal_table_html += f'<th>{strategy_names.get(sk, sk)}</th>'
+    signal_table_html += '</tr>' + signal_rows + '</table>'
 
     # 各股票详情
     detail_sections = ''
@@ -673,6 +856,12 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
     <span><strong>分析周期:</strong> {all_stock_data[0]['start_date'] if all_stock_data else 'N/A'} ~ {all_stock_data[0]['end_date'] if all_stock_data else 'N/A'}</span>
     <span><strong>生成时间:</strong> {report_time}</span>
 </div>
+<div class="info">
+    <span><strong>命令参数:</strong> {cmd_params}</span>
+</div>
+
+<h2>最新信号表</h2>
+{signal_table_html}
 
 <h2>汇总排名（各股票最佳策略）</h2>
 <table>
@@ -690,8 +879,25 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </body>
 </html>'''
 
-    date_tag = _build_date_tag(start_date, end_date)
-    report_path = report_filename if report_filename else os.path.join('report', f'report_{date_tag}.html')
+    # 平均收益率（各股票最佳策略收益率的均值，用于文件名）
+    best_returns = []
+    for d in all_stock_data:
+        risks = d.get('all_risks', {})
+        best_ret = None
+        for sk in d.get('strategies_to_run', []):
+            r = risks.get(sk, {}).get('total_return')
+            if r is not None and (best_ret is None or r > best_ret):
+                best_ret = r
+        if best_ret is not None:
+            best_returns.append(best_ret)
+    avg_return = (sum(best_returns) / len(best_returns)) if best_returns else None
+
+    if report_filename:
+        report_path = report_filename
+    else:
+        days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
+        report_path = _build_report_filename(source, end_date, days, strategy, mode,
+                                             profit=_profit_int(avg_return))
     if not os.path.dirname(report_path):
         report_path = os.path.join('report', report_path)
     with open(report_path, 'w', encoding='utf-8') as f:
@@ -815,15 +1021,17 @@ def _resolve_symbol(input_str):
 @click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYY-MM-DD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYY-MM-DD')
-@click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|enhanced_macd|rsi|bollinger|quality_value|composite|all]，多个以|分隔')
+@click.option('--duration', '-d', default=None, type=int, help='分析时段天数（从结束时间向前，默认180天；与 -st 同时使用时忽略 -st）')
+@click.option('--strategy', '-g', default='all', help='策略选择 [ma_cross|macd|enhanced_macd|enhanced_rsi|rsi|bollinger|quality_value|composite|all]，多个以|分隔')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100000, type=float, help='初始资金（默认100000）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--output-file', '-of', default=None, help='指定HTML报告文件名，默认自动生成')
 @click.option('--threads', '-t', default=1, type=int, help='并行进程数（默认1，多股票时可设为4等以加速）')
 @click.option('--db', '-db', default=1, type=int, help='数据库缓存模式 [0=不读不写|1=只读缓存不写(默认)|2=不读缓存走网络覆盖写]')
-@click.option('--mode', '-m', default=0, type=int, help='分析模式 [0=常规(默认)|1=资金利用最大化轮动选股|2=多持仓资金利用最大化|3=多持仓强化(买卖信号与选股优化)]')
-def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file, threads, db, mode):
+@click.option('--mode', '-m', default=0, type=int, help='分析模式 [0=常规(默认)|1=资金利用最大化轮动选股|2=多持仓资金利用最大化|3=多持仓强化(买卖信号与选股优化)|4=多持仓强化(趋势择股卖出)]')
+@click.option('--filter', '-f', 'filter_signal', default=None, type=click.Choice(['b', 's', 'w']), help='信号过滤，仅输出符合指定信号的股票报告 [b=买入|s=卖出|w=观望]')
+def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file, threads, db, mode, duration, filter_signal):
     """单只/批量股票综合分析
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
@@ -833,6 +1041,7 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
     -s 和 -sf 可同时使用，股票列表会自动合并去重。
     都不指定时从 stock-quant.json 读取自选股。
     使用 -h 指定数量时，忽略 -s/-sf，从网络获取最热门股票。
+    使用 -d 指定分析时段天数（从结束时间向前，默认180天）；与 -st 同时使用时忽略 -st。
     """
     # 设置数据库缓存模式
     from core.db import set_db_mode
@@ -843,6 +1052,11 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
         click.echo(click.style('  数据库缓存: 只读缓存，不写数据库', fg='yellow'))
     elif db == 2:
         click.echo(click.style('  数据库缓存: 不读缓存，走网络获取并覆盖写库', fg='yellow'))
+
+    # 命令选项参数摘要（用于在报告中标注）
+    cmd_params = _format_cmd_params(symbol, symbol_file, hot, start, end, strategy,
+                                    is_index, capital, output, output_file, threads, db, mode, duration,
+                                    filter_signal)
 
     # 确定要分析的股票列表
     time_start = datetime.now()
@@ -894,10 +1108,10 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
                         expanded.extend(matched)
                     else:
                         expanded.append(s)
-                # 最多查询 100 只
-                if len(expanded) > 100:
-                    click.echo(click.style(f'  通配符匹配 {len(expanded)} 只，超过 100 只上限，仅取前 100 只', fg='yellow'))
-                    expanded = expanded[:100]
+                # 最多查询 500 只
+                if len(expanded) > 500:
+                    click.echo(click.style(f'  通配符匹配 {len(expanded)} 只，超过 500 只上限，仅取前 500 只', fg='yellow'))
+                    expanded = expanded[:500]
                 symbol_list = expanded
                 symbols = symbol_list
                 s_multi = True
@@ -939,78 +1153,117 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
 
     click.echo(click.style(f'\n  股票来源: {", ".join(sources)} → 共 {len(symbols)} 只（已去重）', fg='blue'))
 
-    # 模式 1：资金利用最大化轮动选股；模式 2：多持仓资金利用最大化；模式 3：多持仓强化
+    # 确定股票源标签
+    if hot:
+        source_tag = f'hot{hot}'
+    elif symbol_file:
+        source_tag = os.path.splitext(os.path.basename(symbol_file))[0]
+    elif len(symbols) > 1:
+        source_tag = 'multi'
+    elif len(symbols) == 1:
+        source_tag = symbols[0]
+    else:
+        source_tag = 'favs'
+
+    # 解析日期（结束日期/分析周期天数用于报告文件名）
+    # -d 指定分析时段天数（默认180天）；若同时指定 -st 和 -d，忽略 -st
+    if duration is not None:
+        duration_days = duration
+    elif start is None:
+        duration_days = 180
+    else:
+        duration_days = None
+    start_date_str, end_date_str = _parse_dates(start, end, duration_days)
+
+    # 模式 1：资金利用最大化轮动选股；模式 2：多持仓资金利用最大化；模式 3/4：多持仓强化
     if mode == 1:
-        _run_rotation_analysis(symbols, start, end, strategy, capital, output, output_file)
+        _run_rotation_analysis(symbols, start_date_str, end_date_str, strategy, capital, output, output_file, cmd_params,
+                               source=source_tag, mode=mode)
         return
     if mode == 2:
-        _run_portfolio_analysis(symbols, start, end, strategy, capital, output, output_file)
+        _run_portfolio_analysis(symbols, start_date_str, end_date_str, strategy, capital, output, output_file, cmd_params=cmd_params,
+                                source=source_tag, mode=mode)
         return
     if mode == 3:
-        _run_portfolio_analysis_v3(symbols, start, end, strategy, capital, output, output_file)
+        _run_portfolio_analysis_v3(symbols, start_date_str, end_date_str, strategy, capital, output, output_file, cmd_params,
+                                   source=source_tag, mode=mode)
         return
-
-    # 确定输出文件名（日期部分取结束日期）
-    start_date_str, end_date_str = _parse_dates(start, end)
-    date_tag = _build_date_tag(start_date_str, end_date_str)
-    if not output_file:
-        if hot:
-            output_file = f'hot{hot}_{date_tag}.html'
-        elif s_multi:
-            output_file = f'multi_{date_tag}.html'
-        elif symbol and symbol_file:
-            sf_basename = os.path.splitext(os.path.basename(symbol_file))[0]
-            output_file = f'{symbols[0]}_{sf_basename}_{date_tag}.html'
-        elif symbol:
-            output_file = f'{symbols[0]}_{date_tag}.html'
-        elif symbol_file:
-            sf_basename = os.path.splitext(os.path.basename(symbol_file))[0]
-            output_file = f'{sf_basename}_{date_tag}.html'
-        else:
-            output_file = f'report_{date_tag}.html'
+    if mode == 4:
+        _run_portfolio_analysis_v4(symbols, start_date_str, end_date_str, strategy, capital, output, output_file, cmd_params,
+                                   source=source_tag, mode=mode)
+        return
 
     all_stock_data = []
     if len(symbols) > 1 and threads > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import TimeoutError as _FutTimeout
+        import math
         n_workers = min(threads, len(symbols))
         click.echo(click.style(f'\n  使用 {n_workers} 个进程并行分析...', fg='blue'))
 
-        tasks = [(s, start, end, strategy, is_index, capital, output, output_file, True) for s in symbols]
+        tasks = [(s, start_date_str, end_date_str, strategy, is_index, capital, output, output_file, True, cmd_params, mode, filter_signal) for s in symbols]
         results = [None] * len(symbols)
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # 单只股票超时（秒），避免个别股票因网络/数据库异常导致整体挂起
+        per_stock_timeout = 180
+        waves = max(1, math.ceil(len(symbols) / n_workers))
+        executor = ProcessPoolExecutor(max_workers=n_workers)
+        try:
             futures = {executor.submit(_analyze_single_worker, task): i for i, task in enumerate(tasks)}
-            for fut in as_completed(futures):
-                idx = futures[fut]
-                try:
-                    _, data, out = fut.result()
-                except Exception as e:
-                    data, out = None, f'  异常: {e}'
-                results[idx] = data
-                if data is None:
-                    click.echo(click.style(f'\n  [{idx+1}/{len(symbols)}] {symbols[idx]} 分析失败', fg='red'))
-                    if out.strip():
-                        click.echo(out)
-                else:
-                    click.echo(click.style(f'  [{idx+1}/{len(symbols)}] {symbols[idx]} 完成', fg='cyan'))
+            try:
+                for fut in as_completed(futures, timeout=per_stock_timeout * waves):
+                    idx = futures[fut]
+                    try:
+                        _, data, out = fut.result()
+                    except Exception as e:
+                        data, out = None, f'  异常: {e}'
+                    results[idx] = data
+                    if data is None:
+                        if '信号过滤' in out:
+                            click.echo(click.style(f'  [{idx+1}/{len(symbols)}] {symbols[idx]} 已跳过（信号过滤）', fg='yellow'))
+                            click.echo(out)
+                        else:
+                            click.echo(click.style(f'\n  [{idx+1}/{len(symbols)}] {symbols[idx]} 分析失败', fg='red'))
+                            if out.strip():
+                                click.echo(out)
+                    else:
+                        click.echo(click.style(f'  [{idx+1}/{len(symbols)}] {symbols[idx]} 完成', fg='cyan'))
+            except _FutTimeout:
+                stuck = [symbols[futures[f]] for f in futures if not f.done()]
+                click.echo(click.style(
+                    f'\n  警告: {len(stuck)} 只股票分析超时({per_stock_timeout}秒)被跳过: {", ".join(stuck)}', fg='yellow'))
+                for f in futures:
+                    if not f.done():
+                        f.cancel()
+                # 强制终止卡住的工作进程，避免 shutdown 挂起
+                for proc in list(executor._processes.values()):
+                    proc.terminate()
+        finally:
+            executor.shutdown(wait=True)
         all_stock_data = [d for d in results if d is not None]
     else:
         for idx, raw_symbol in enumerate(symbols):
             if len(symbols) > 1:
                 click.echo(click.style(f'\n  ── [{idx+1}/{len(symbols)}] ──', fg='cyan', bold=True))
-            data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file,
-                                   batch_mode=len(symbols) > 1)
+            data = _analyze_single(raw_symbol, start_date_str, end_date_str, strategy, is_index, capital, output, output_file,
+                                   batch_mode=len(symbols) > 1, cmd_params=cmd_params, mode=mode,
+                                   filter_signal=filter_signal)
             if data is not None:
                 all_stock_data.append(data)
 
     if len(symbols) > 1:
         click.echo(click.style(f'\n  批量分析完成，共 {len(symbols)} 只股票', fg='green', bold=True))
 
+    if filter_signal:
+        click.echo(click.style(
+            f'  信号过滤: 共 {len(symbols)} 只股票，符合 "{_FILTER_SIGNAL_TEXT[filter_signal]}" 条件的 {len(all_stock_data)} 只', fg='cyan'))
+
     # 生成汇总 HTML 报告
     if all_stock_data:
         try:
             html_path = _generate_multi_html_report(all_stock_data, strategy, is_index, capital,
                                                     report_filename=output_file, end_date=end_date_str,
-                                                    start_date=start_date_str)
+                                                    start_date=start_date_str, cmd_params=cmd_params,
+                                                    source=source_tag, mode=mode)
             click.echo(click.style(f'\n  汇总报告: {html_path}', fg='green'))
         except Exception as e:
             click.echo(click.style(f'\n  汇总报告生成失败: {e}', fg='yellow'))
@@ -1019,7 +1272,7 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
     click.echo(click.style(f'\n  总运行时间: {elapsed:.1f} 秒', fg='cyan', bold=True))
 
 
-def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file=None, batch_mode=False):
+def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file=None, batch_mode=False, cmd_params='', mode=0, filter_signal=None):
     """分析单只股票"""
     symbol = raw_symbol.strip()
     for prefix in ('sh', 'sz', 'SH', 'SZ'):
@@ -1078,9 +1331,10 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
         click.echo(click.style(f'  获取到 {len(df)} 条数据记录', fg='green'))
 
         # 异步缓存除权除息数据到数据库（不阻塞主流程）
+        # 使用独立的 DataFetcher，避免与主流程共享 requests.Session（非线程安全）
         def _cache_dividend():
             try:
-                fetcher.get_dividend_data(symbol)
+                DataFetcher().get_dividend_data(symbol)
             except Exception:
                 pass
         try:
@@ -1289,6 +1543,12 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 table_rows.append([i, name, ret_str, shp_str, dd_str, tr_str, signal])
             _print_table(headers, table_rows)
 
+        # 信号过滤：仅当主信号符合 -f 指定条件时才输出报告
+        if filter_signal and not _match_filter(filter_signal, all_signals, all_risks):
+            click.echo(click.style(
+                f'  信号过滤: 主信号不符合 "{_FILTER_SIGNAL_TEXT[filter_signal]}" 条件，已跳过该股票', fg='yellow'))
+            return None
+
         # 生成 HTML 报告（单只股票时）
         if not batch_mode:
             try:
@@ -1300,7 +1560,10 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                     latest_close=latest_close,
                     latest_date=latest_date,
                     trading_days=len(df),
-                    report_filename=output_file
+                    report_filename=output_file,
+                    cmd_params=cmd_params,
+                    strategy=strategy,
+                    mode=mode
                 )
                 click.echo(click.style(f'\n  HTML报告: {html_path}', fg='green'))
             except Exception as e:
@@ -1338,31 +1601,33 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
 def _analyze_single_worker(args):
     """多进程 worker：分析单只股票，捕获其控制台输出，返回 (raw_symbol, data, 输出文本)"""
-    raw_symbol, start, end, strategy, is_index, capital, output, output_file, batch_mode = args
+    raw_symbol, start, end, strategy, is_index, capital, output, output_file, batch_mode, cmd_params, mode, filter_signal = args
     buf = io.StringIO()
     data = None
     try:
         with contextlib.redirect_stdout(buf):
             data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital,
-                                   output, output_file, batch_mode=batch_mode)
+                                   output, output_file, batch_mode=batch_mode, cmd_params=cmd_params,
+                                   mode=mode, filter_signal=filter_signal)
     except Exception as e:
         buf.write(f'\n  异常: {e}\n')
     return raw_symbol, data, buf.getvalue()
 
 
-def _run_rotation_analysis(symbols, start, end, strategy, capital, output, output_file):
+def _run_rotation_analysis(symbols, start, end, strategy, capital, output, output_file, cmd_params='',
+                           source=None, mode=0):
     """模式 1：资金利用最大化轮动选股
 
     每天先检查所持股票是否有卖出信号，有则全部卖出；再遍历股票池，
-    若某股票出现买入信号则全额买入。分析周期内持仓股票可能变化，
-    报告列出各持仓时间段及所购股票。
+    对出现买入信号(1)的股票用全部剩余资金买入；若剩余资金 < 总资金/10
+    且有持仓权益 > 总资金/3，则卖出该持仓的一半释放资金后再买入。
+    分析周期内持仓股票可能变化。支持 1 只及以上股票，报告格式与模式 2/3/4 一致。
     """
-    if len(symbols) < 2:
-        click.echo(click.style('  错误: 轮动模式至少需要 2 只股票', fg='red'))
+    if len(symbols) < 1:
+        click.echo(click.style('  错误: 轮动模式至少需要 1 只股票', fg='red'))
         return
 
     start_date, end_date = _parse_dates(start, end)
-    date_tag = _build_date_tag(start_date, end_date)
 
     # 确定轮动所用策略
     if strategy == 'all':
@@ -1398,178 +1663,219 @@ def _run_rotation_analysis(symbols, start, end, strategy, capital, output, outpu
         except Exception as e:
             click.echo(click.style(f'  {symbol} 信号计算失败: {e}', fg='yellow'))
 
-    if len(stock_data) < 2:
-        click.echo(click.style('  错误: 有效股票数据不足 2 只', fg='red'))
+    if len(stock_data) < 1:
+        click.echo(click.style('  错误: 有效股票数据不足', fg='red'))
         return
 
     # 日期对齐（取并集）
     all_dates = sorted(set().union(*[set(df.index) for df, _ in stock_data.values()]))
 
-    # 轮动回测
+    total = float(capital)          # 总资金（固定为初始资金）
     cash = float(capital)
-    holding = None
-    shares = 0.0
-    entry_price = 0.0
-    entry_date = None
-    periods = []  # (start_date, end_date, symbol, entry_price, exit_price)
-    trade_count = 0
+    cash_by_date = {}               # 交易日 -> 当日剩余资金（用于按日历日累计闲置资金）
+    positions = {}                  # symbol -> {'shares','entry_date','entry_price'}
+    events = []                     # (date, sell_symbol, sell_amount, buy_symbol, buy_amount, equity, hold_count, cleared_symbols, cash)
+    trade_stats = {}                # symbol -> {'buy_amount','sell_amount','first_buy','last_sell'}
+    daily_eq_sum = {}               # symbol -> 持股期间每日市值之和（用于计算日平均权益）
+    daily_eq_count = {}             # symbol -> 持股天数
+    equity_curve = []               # 每日权益（用于计算夏普比率与最大回撤）
+
+    def _close_price(symbol, d):
+        edf = stock_data[symbol][0]
+        p = edf['close'].asof(d)
+        if pd.isna(p):
+            p = edf['close'].iloc[-1]
+        return float(p)
+
+    def _equity(d):
+        eq = cash
+        for sym, pos in positions.items():
+            eq += pos['shares'] * _close_price(sym, d)
+        return eq
+
+    def _accumulate_daily_equity(d):
+        for sym, pos in positions.items():
+            mv = pos['shares'] * _close_price(sym, d)
+            daily_eq_sum[sym] = daily_eq_sum.get(sym, 0.0) + mv
+            daily_eq_count[sym] = daily_eq_count.get(sym, 0) + 1
+        cash_by_date[d.strftime('%Y-%m-%d')] = cash
+        equity_curve.append(_equity(d))
 
     for date in all_dates:
-        # 1. 卖出检查：所持股票出现卖出信号则全部卖出
-        if holding is not None:
-            df, sig = stock_data[holding]
-            if date in df.index:
-                s = int(sig.loc[date])
+        # 步骤0：卖出检查 —— 持仓中信号为 -1 的全部清仓
+        sold_list = []
+        sold_amount = 0.0
+        cleared_list = []
+        for symbol in list(positions.keys()):
+            df, sig = stock_data[symbol]
+            if date in df.index and int(sig.loc[date]) == -1:
+                pos = positions[symbol]
                 price = float(df['close'].loc[date])
-                if s == -1:
-                    cash += shares * price
-                    periods.append((entry_date, date, holding, entry_price, price))
-                    trade_count += 1
-                    holding = None
-                    shares = 0.0
-        # 2. 买入检查：股票池中某股票出现买入信号则全额买入
-        if holding is None:
-            for symbol in symbols:
-                if symbol not in stock_data:
+                amount = pos['shares'] * price
+                cash += amount
+                sold_amount += amount
+                del positions[symbol]
+                sold_list.append(symbol)
+                cleared_list.append(symbol)
+                st = trade_stats.setdefault(symbol, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
+                st['sell_amount'] += amount
+                st['last_sell'] = date
+
+        # 步骤1：买入检查 —— 遍历股票池，对买入信号(1)的股票用全部剩余资金买入；
+        # 若有多个股票满足条件，只买入第一只符合条件的股票
+        buy_symbols = []
+        buy_amount_total = 0.0
+        sell_symbols = list(sold_list)
+        sell_amount_total = sold_amount
+        for symbol in symbols:
+            if symbol not in stock_data or symbol in positions:
+                continue
+            df, sig = stock_data[symbol]
+            if date in df.index and int(sig.loc[date]) == 1:
+                price = float(df['close'].loc[date])
+                # 剩余资金不足时，若有持仓权益 > 总资金/3，卖出该持仓的一半释放资金
+                if cash < total / 10.0:
+                    sell_target = None
+                    sell_value = 0.0
+                    for held in positions:
+                        held_value = positions[held]['shares'] * _close_price(held, date)
+                        if held_value > total / 3.0 and held_value > sell_value:
+                            sell_target = held
+                            sell_value = held_value
+                    if sell_target is not None:
+                        pos = positions[sell_target]
+                        held_price = _close_price(sell_target, date)
+                        sell_shares = pos['shares'] / 2.0
+                        pos['shares'] -= sell_shares
+                        cash += sell_shares * held_price
+                        sell_symbols.append(sell_target)
+                        sell_amount_total += sell_shares * held_price
+                        st = trade_stats.setdefault(sell_target, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
+                        st['sell_amount'] += sell_shares * held_price
+                        st['last_sell'] = date
+                buy_amount = cash
+                if buy_amount <= 0:
                     continue
-                df, sig = stock_data[symbol]
-                if date in df.index:
-                    s = int(sig.loc[date])
-                    price = float(df['close'].loc[date])
-                    if s == 1:
-                        shares = cash / price
-                        cash = 0.0
-                        holding = symbol
-                        entry_price = price
-                        entry_date = date
-                        trade_count += 1
-                        break
+                shares = buy_amount / price
+                cash -= buy_amount
+                positions[symbol] = {'shares': shares, 'entry_date': date, 'entry_price': price}
+                buy_symbols.append(symbol)
+                buy_amount_total += buy_amount
+                st = trade_stats.setdefault(symbol, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
+                st['buy_amount'] += buy_amount
+                break
 
-    # 期末平仓
-    if holding is not None:
-        df, _ = stock_data[holding]
-        last_price = float(df['close'].iloc[-1])
-        cash += shares * last_price
-        periods.append((entry_date, df.index[-1], holding, entry_price, last_price))
-        holding = None
+        # 步骤2：记录当日交易事件（有买卖行为时）
+        if buy_symbols or sell_symbols:
+            sell_str = '/'.join(sell_symbols) if sell_symbols else None
+            buy_str = '/'.join(buy_symbols) if buy_symbols else None
+            events.append((date, sell_str, sell_amount_total, buy_str, buy_amount_total,
+                           _equity(date), len(positions), cleared_list, cash))
+        _accumulate_daily_equity(date)
 
+    # 期末市值（不强制平仓，保留期末持仓）
     final_value = cash
-    total_return = (final_value - capital) / capital if capital else 0.0
+    for symbol, pos in positions.items():
+        edf = stock_data[symbol][0]
+        final_value += pos['shares'] * float(edf['close'].iloc[-1])
+
+    total_return = (final_value - total) / total if total else 0.0
+    total_shares = sum(pos['shares'] for pos in positions.values())
+    equity_curve.append(final_value)
+    sharpe, max_dd = _calc_sharpe_drawdown(equity_curve)
+
+    # 闲置资金天数 = 分析周期内每日剩余资金累计 / 资金总额
+    period_days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days + 1
+    cum_cash = 0.0
+    carry = float(capital)
+    day0 = pd.Timestamp(start_date)
+    for i in range(period_days):
+        day_key = (day0 + pd.Timedelta(days=i)).strftime('%Y-%m-%d')
+        if day_key in cash_by_date:
+            carry = cash_by_date[day_key]
+        cum_cash += carry
+    idle_days = (cum_cash / total) if total else 0.0
 
     # 解析持仓股票名称
     name_map = {}
-    held_symbols = set(p[2] for p in periods)
-    for s in held_symbols:
+    held = set(positions.keys()) | set(trade_stats.keys())
+    for e in events:
+        if e[1]:
+            held.update(str(e[1]).split('/'))
+        if e[3]:
+            held.update(str(e[3]).split('/'))
+    for s in held:
         code, name = _resolve_symbol(s)
         name_map[s] = name if name else s
 
+    # 个股收益统计
+    stock_stats = []
+    end_dt = all_dates[-1] if all_dates else None
+    for sym, st in trade_stats.items():
+        buy_amt = st['buy_amount']
+        sell_amt = st['sell_amount']
+        final_mv = 0.0
+        if sym in positions:
+            edf = stock_data[sym][0]
+            final_mv = positions[sym]['shares'] * float(edf['close'].iloc[-1])
+        total_profit = sell_amt + final_mv - buy_amt
+        hold_cnt = daily_eq_count.get(sym, 0)
+        avg_eq = (daily_eq_sum.get(sym, 0.0) / hold_cnt) if hold_cnt > 0 else 0.0
+        ret = (total_profit / avg_eq) if avg_eq else 0.0
+        exit_date = st['last_sell'] if st['last_sell'] is not None else end_dt
+        hold_days = (exit_date - st['first_buy']).days if st['first_buy'] is not None and exit_date is not None else 0
+        stock_stats.append((sym, buy_amt, sell_amt, final_mv, total_profit, ret, hold_days))
+    stock_stats.sort(key=lambda x: x[4], reverse=True)
+
     # 打印结果
     click.echo()
-    _print_section('轮动选股结果')
-    click.echo(click.style(f'  最终资金: {final_value:,.2f}', fg='green', bold=True))
+    _print_section('多持仓组合结果')
+    click.echo(click.style(f'  总权益: {final_value:,.2f}', fg='green', bold=True))
     click.echo(click.style(f'  总收益率: {total_return * 100:.2f}%', fg='green' if total_return >= 0 else 'red', bold=True))
-    click.echo(click.style(f'  交易次数: {trade_count}', fg='white'))
+    click.echo(click.style(f'  夏普比率: {sharpe:.2f}', fg='white'))
+    click.echo(click.style(f'  最大回撤: {max_dd * 100:.2f}%', fg='white'))
+    click.echo(click.style(f'  持股数量: {total_shares:,.0f} 股', fg='white'))
+    click.echo(click.style(f'  交易次数: {len(events)}', fg='white'))
+    click.echo(click.style(f'  闲置资金天数/分析周期天数: {idle_days:.2f} / {period_days}', fg='white'))
 
-    headers = ['序号', '开始日期', '结束日期', '股票代码', '股票名称', '买入价', '卖出价', '区间收益率', '持有天数']
-    table_rows = []
-    for i, (sd, ed, sym, ep, xp) in enumerate(periods, 1):
-        ret = (xp - ep) / ep if ep else 0.0
-        days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days
-        table_rows.append([i, str(sd.date()), str(ed.date()), sym, name_map.get(sym, sym),
-                           f'{ep:.2f}', f'{xp:.2f}', f'{ret * 100:.2f}%', days])
-    _print_table(headers, table_rows)
+    _print_section('个股收益统计')
+    headers2 = ['股票代码', '股票名称', '买入金额', '卖出金额', '期末市值', '总收益', '收益率', '持股天数']
+    rows2 = []
+    for sym, buy_amt, sell_amt, final_mv, total_profit, ret, hold_days in stock_stats:
+        rows2.append([sym, name_map.get(sym, sym), f'{buy_amt:,.0f}', f'{sell_amt:,.0f}',
+                      f'{final_mv:,.0f}', f'{total_profit:,.0f}', f'{ret * 100:.2f}%', str(hold_days)])
+    _print_table(headers2, rows2)
 
     # 生成 HTML 报告
     try:
-        html_path = _generate_rotation_html(
+        html_path = _generate_portfolio_html(
             symbols, strategy_name, start_date, end_date, capital, final_value,
-            total_return, trade_count, periods, name_map, output_file
+            total_return, events, positions, stock_data, name_map, stock_stats,
+            idle_days, period_days, output_file, cmd_params,
+            source=source, strategy=strategy, mode=mode, sharpe=sharpe, max_drawdown=max_dd,
+            output=output
         )
-        click.echo(click.style(f'\n  轮动报告: {html_path}', fg='green'))
+        click.echo(click.style(f'\n  组合报告: {html_path}', fg='green'))
     except Exception as e:
-        click.echo(click.style(f'\n  轮动报告生成失败: {e}', fg='yellow'))
+        click.echo(click.style(f'\n  组合报告生成失败: {e}', fg='yellow'))
 
 
-def _generate_rotation_html(pool_symbols, strategy_name, start_date, end_date, capital,
-                            final_value, total_return, trade_count, periods, name_map, output_file):
-    """生成轮动选股 HTML 报告"""
-    date_tag = _build_date_tag(start_date, end_date)
-    report_path = output_file if output_file else os.path.join('report', f'rotation_{date_tag}.html')
-    if not os.path.dirname(report_path):
-        report_path = os.path.join('report', report_path)
-
-    rows = ''
-    for i, (sd, ed, sym, ep, xp) in enumerate(periods, 1):
-        ret = (xp - ep) / ep if ep else 0.0
-        days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days
-        color = '#27ae60' if ret >= 0 else '#e74c3c'
-        rows += f'''<tr>
-            <td>{i}</td><td>{sd.date()}</td><td>{ed.date()}</td>
-            <td>{sym}</td><td>{name_map.get(sym, sym)}</td>
-            <td>{ep:.2f}</td><td>{xp:.2f}</td>
-            <td style="color:{color};font-weight:bold">{ret * 100:.2f}%</td>
-            <td>{days}</td>
-        </tr>'''
-
-    pool_str = '，'.join(str(s) for s in pool_symbols)
-    ret_color = '#27ae60' if total_return >= 0 else '#e74c3c'
-
-    html = f'''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>轮动选股报告</title>
-<style>
-body {{ font-family: 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; background: #fafafa; color: #2c3e50; }}
-h1 {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-h2 {{ border-bottom: 2px solid #bdc3c7; padding-bottom: 6px; margin-top: 30px; }}
-table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
-th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: center; }}
-th {{ background: #3498db; color: white; }}
-tr:nth-child(even) {{ background: #f2f2f2; }}
-.info {{ background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 15px 0; }}
-.info span {{ margin-right: 30px; }}
-.footer {{ text-align: center; color: #95a5a6; margin-top: 40px; font-size: 12px; }}
-</style>
-</head>
-<body>
-<h1>资金利用最大化轮动选股报告</h1>
-<div class="info">
-    <span><strong>策略:</strong> {strategy_name}</span>
-    <span><strong>区间:</strong> {start_date} ~ {end_date}</span>
-    <span><strong>初始资金:</strong> {capital:,.0f}</span>
-    <span><strong>最终资金:</strong> {final_value:,.0f}</span>
-    <span><strong>总收益率:</strong> <span style="color:{ret_color};font-weight:bold">{total_return * 100:.2f}%</span></span>
-    <span><strong>交易次数:</strong> {trade_count}</span>
-</div>
-<div class="info">
-    <span><strong>股票池({len(pool_symbols)}只):</strong> {pool_str}</span>
-</div>
-
-<h2>持仓时间段</h2>
-<table>
-<tr><th>序号</th><th>开始日期</th><th>结束日期</th><th>股票代码</th><th>股票名称</th><th>买入价</th><th>卖出价</th><th>区间收益率</th><th>持有天数</th></tr>
-{rows}
-</table>
-
-<div class="footer"><p>报告由 stock-quant 自动生成</p></div>
-</body>
-</html>'''
-
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(html)
-    return report_path
-
-
-def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, output_file):
+def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, output_file,
+                            weak_trend_cancel=False, trend_priority_sell=False, cmd_params='',
+                            source=None, mode=0):
     """模式 2：多持仓资金利用最大化
 
     每天先按 symbols 顺序找卖出信号（信号 == -1）的持仓并全部卖出；
     再找第一个买入信号（多个则只取第一个）的股票，剩余资金 > 1/10 总资金时
-    用剩余资金买入；不足则从持仓中选出 MACD 柱下降（今日 < 昨日）的一只股票，
-    按其资金 < 1/2 总资金全卖、否则卖一半释放资金买入；
-    若持仓中无 MACD 柱下降股票，则放弃当日买入。
+    用剩余资金买入（单只买入不超过 1/3 总资金）；不足则从持仓中选出
+    MACD 柱下降（今日 < 昨日）的一只股票，按持仓市值 > 总资金 20% 卖一半、
+    否则全卖释放资金买入；若持仓中无 MACD 柱下降股票，则放弃当日买入。
     支持 1 只及以上股票（1 只作为多只的特例处理）。
+
+    weak_trend_cancel: 若为 True，则在现金不足分支中，若买入股当前趋势为弱势，
+        取消被动卖出和买入。
+    trend_priority_sell: 若为 True，则在多个候选卖出股票中按趋势优先级选择
+        （弱势 > 横盘震荡，取消强势股卖出），而非最早买入者。
     """
     if len(symbols) < 1:
         click.echo(click.style('  错误: 该模式至少需要 1 只股票', fg='red'))
@@ -1625,6 +1931,7 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
     trade_stats = {}                # symbol -> {'buy_amount','sell_amount','first_buy','last_sell'}
     daily_eq_sum = {}               # symbol -> 持股期间每日市值之和（用于计算日平均权益）
     daily_eq_count = {}             # symbol -> 持股天数
+    equity_curve = []               # 每日权益（用于计算夏普比率与最大回撤）
 
     def _close_price(symbol, d):
         edf = stock_data[symbol][0]
@@ -1658,6 +1965,16 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
             daily_eq_sum[sym] = daily_eq_sum.get(sym, 0.0) + mv
             daily_eq_count[sym] = daily_eq_count.get(sym, 0) + 1
         cash_by_date[d.strftime('%Y-%m-%d')] = cash
+        equity_curve.append(_equity(d))
+
+    def _buy_cash(cash_avail):
+        """计算实际买入金额：单只买入不超过 1/3 总资金"""
+        return min(cash_avail, total / 3.0)
+
+    def _trend_rank(symbol, d):
+        """趋势卖出优先级：弱势 0 > 横盘震荡 1（强势不参与被动卖出）"""
+        t = classify_trend(stock_data[symbol][0], d)
+        return {'弱势': 0, '横盘震荡': 1}.get(t, 1)
 
     for date in all_dates:
         # 步骤0：找卖出信号 —— 按 symbols 顺序遍历股票池，信号为 -1 的持仓全部卖出
@@ -1704,10 +2021,10 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
         buy_amount = 0.0
 
         if cash > total * 0.1:
-            # 剩余资金充足：全额买入
-            buy_amount = cash
-            buy_shares = cash / buy_price
-            cash = 0.0
+            # 剩余资金充足：买入（单只不超过 1/3 总资金）
+            buy_amount = _buy_cash(cash)
+            buy_shares = buy_amount / buy_price
+            cash -= buy_amount
             if buy_symbol in positions:
                 p = positions[buy_symbol]
                 p['shares'] += buy_shares
@@ -1717,43 +2034,57 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
             st = trade_stats.setdefault(buy_symbol, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
             st['buy_amount'] += buy_amount
         else:
-            # 剩余资金不足：在持仓中找 MACD 柱下降的股票作为卖出对象
-            if positions:
-                candidates = [s for s in positions if _macd_declining(s, date)]
-                if candidates:
-                    sell_target = min(candidates, key=lambda s: positions[s]['entry_date'])
-                    pos = positions[sell_target]
-                    cur_price = _close_price(sell_target, date)
-                    pos_value = pos['shares'] * cur_price
-                    if pos_value < total * 0.5:
-                        sold_shares = pos['shares']
-                        cash += sold_shares * cur_price
-                        del positions[sell_target]
-                        sell_symbol = sell_target
-                        sell_amount = sold_shares * cur_price
-                        cleared_list.append(sell_target)
+            # 剩余资金不足：若买入股趋势为弱势则取消被动卖出和买入
+            weak_cancel = (weak_trend_cancel
+                           and classify_trend(stock_data[buy_symbol][0], date) == '弱势')
+            if not weak_cancel:
+                # 在持仓中找 MACD 柱下降的股票作为卖出对象
+                # 若当日已有主动卖出（信号 == -1），则不再执行被动卖出
+                if not sold_list and positions:
+                    if trend_priority_sell:
+                        # 模式4：取消强势股卖出，仅弱势/横盘震荡参与被动卖出
+                        candidates = [s for s in positions if _macd_declining(s, date)
+                                      and classify_trend(stock_data[s][0], date) != '强势']
                     else:
-                        sell_shares = pos['shares'] / 2.0
-                        pos['shares'] -= sell_shares
-                        cash += sell_shares * cur_price
-                        sell_symbol = sell_target
-                        sell_amount = sell_shares * cur_price
-                    st = trade_stats.setdefault(sell_target, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
-                    st['sell_amount'] += sell_amount
-                    st['last_sell'] = date
-            # 只有发生卖出释放资金时才买入；否则放弃当日买入
-            if sell_symbol is not None and cash > 0:
-                buy_amount = cash
-                buy_shares = cash / buy_price
-                cash = 0.0
-                if buy_symbol in positions:
-                    p = positions[buy_symbol]
-                    p['shares'] += buy_shares
-                    p['avg_price'] = (p['avg_price'] * (p['shares'] - buy_shares) + buy_price * buy_shares) / p['shares']
-                else:
-                    positions[buy_symbol] = {'shares': buy_shares, 'entry_date': date, 'avg_price': buy_price}
-                st = trade_stats.setdefault(buy_symbol, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
-                st['buy_amount'] += buy_amount
+                        candidates = [s for s in positions if _macd_declining(s, date)]
+                    if candidates:
+                        if trend_priority_sell:
+                            sell_target = min(candidates, key=lambda s: (_trend_rank(s, date), positions[s]['entry_date']))
+                        else:
+                            sell_target = min(candidates, key=lambda s: positions[s]['entry_date'])
+                        pos = positions[sell_target]
+                        cur_price = _close_price(sell_target, date)
+                        pos_value = pos['shares'] * cur_price
+                        # 被动卖出：持仓市值 > 总资金×20% 卖一半，否则全卖
+                        if pos_value > total * 0.2:
+                            sell_shares = pos['shares'] / 2.0
+                            pos['shares'] -= sell_shares
+                            cash += sell_shares * cur_price
+                            sell_symbol = sell_target
+                            sell_amount = sell_shares * cur_price
+                        else:
+                            sold_shares = pos['shares']
+                            cash += sold_shares * cur_price
+                            del positions[sell_target]
+                            sell_symbol = sell_target
+                            sell_amount = sold_shares * cur_price
+                            cleared_list.append(sell_target)
+                        st = trade_stats.setdefault(sell_target, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
+                        st['sell_amount'] += sell_amount
+                        st['last_sell'] = date
+                # 只有发生卖出释放资金时才买入；否则放弃当日买入
+                if sell_symbol is not None and cash > 0:
+                    buy_amount = _buy_cash(cash)
+                    buy_shares = buy_amount / buy_price
+                    cash -= buy_amount
+                    if buy_symbol in positions:
+                        p = positions[buy_symbol]
+                        p['shares'] += buy_shares
+                        p['avg_price'] = (p['avg_price'] * (p['shares'] - buy_shares) + buy_price * buy_shares) / p['shares']
+                    else:
+                        positions[buy_symbol] = {'shares': buy_shares, 'entry_date': date, 'avg_price': buy_price}
+                    st = trade_stats.setdefault(buy_symbol, {'buy_amount': 0.0, 'sell_amount': 0.0, 'first_buy': date, 'last_sell': None})
+                    st['buy_amount'] += buy_amount
 
         # 当日买入被放弃（无足够资金且无卖出）时，买入股票置空
         if buy_amount <= 0:
@@ -1778,6 +2109,8 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
 
     total_return = (final_value - total) / total if total else 0.0
     total_shares = sum(pos['shares'] for pos in positions.values())
+    equity_curve.append(final_value)
+    sharpe, max_dd = _calc_sharpe_drawdown(equity_curve)
 
     # 闲置资金天数 = 分析周期内每日剩余资金累计 / 资金总额
     # 按日历日累计：非交易日沿用最近交易日的剩余资金
@@ -1828,6 +2161,8 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
     _print_section('多持仓组合结果')
     click.echo(click.style(f'  总权益: {final_value:,.2f}', fg='green', bold=True))
     click.echo(click.style(f'  总收益率: {total_return * 100:.2f}%', fg='green' if total_return >= 0 else 'red', bold=True))
+    click.echo(click.style(f'  夏普比率: {sharpe:.2f}', fg='white'))
+    click.echo(click.style(f'  最大回撤: {max_dd * 100:.2f}%', fg='white'))
     click.echo(click.style(f'  持股数量: {total_shares:,.0f} 股', fg='white'))
     click.echo(click.style(f'  交易次数: {len(events)}', fg='white'))
     click.echo(click.style(f'  闲置资金天数/分析周期天数: {idle_days:.2f} / {period_days}', fg='white'))
@@ -1844,28 +2179,51 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
         html_path = _generate_portfolio_html(
             symbols, strategy_name, start_date, end_date, capital, final_value,
             total_return, events, positions, stock_data, name_map, stock_stats,
-            idle_days, period_days, output_file
+            idle_days, period_days, output_file, cmd_params,
+            source=source, strategy=strategy, mode=mode, sharpe=sharpe, max_drawdown=max_dd,
+            output=output
         )
         click.echo(click.style(f'\n  组合报告: {html_path}', fg='green'))
     except Exception as e:
         click.echo(click.style(f'\n  组合报告生成失败: {e}', fg='yellow'))
 
 
-def _run_portfolio_analysis_v3(symbols, start, end, strategy, capital, output, output_file):
+def _run_portfolio_analysis_v3(symbols, start, end, strategy, capital, output, output_file, cmd_params='',
+                               source=None, mode=3):
     """模式 3：多持仓强化优化
 
     在模式 2（多持仓资金利用最大化）基础上，进一步加强对买卖信号
-    与股票选择的优化。当前为模式 2 的基线实现，后续在此迭代增强。
+    与股票选择的优化。当前已引入个股趋势判断：现金不足时，若买入股当前
+    趋势为弱势，则取消被动卖出和买入。
     """
-    _run_portfolio_analysis(symbols, start, end, strategy, capital, output, output_file)
+    _run_portfolio_analysis(symbols, start, end, strategy, capital, output, output_file,
+                            weak_trend_cancel=True, cmd_params=cmd_params, source=source, mode=mode)
+
+
+def _run_portfolio_analysis_v4(symbols, start, end, strategy, capital, output, output_file, cmd_params='',
+                               source=None, mode=4):
+    """模式 4：多持仓强化优化（趋势择股卖出）
+
+    在模式 3 基础上，修改卖出股票的选择方式：当多个持仓同时满足卖出条件时，
+    取消强势股卖出，仅在弱势与横盘震荡之间按趋势值优先选择弱势的股票。
+    """
+    _run_portfolio_analysis(symbols, start, end, strategy, capital, output, output_file,
+                            weak_trend_cancel=True, trend_priority_sell=True, cmd_params=cmd_params,
+                            source=source, mode=mode)
 
 
 def _generate_portfolio_html(pool_symbols, strategy_name, start_date, end_date, capital,
                              final_value, total_return, events, positions, stock_data,
-                             name_map, stock_stats, idle_days, period_days, output_file):
+                             name_map, stock_stats, idle_days, period_days, output_file,
+                             cmd_params='', source=None, strategy=None, mode=0,
+                             sharpe=0.0, max_drawdown=0.0, output='./output'):
     """生成多持仓组合 HTML 报告"""
-    date_tag = _build_date_tag(start_date, end_date)
-    report_path = output_file if output_file else os.path.join('report', f'portfolio_{date_tag}.html')
+    if output_file:
+        report_path = output_file
+    else:
+        days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
+        report_path = _build_report_filename(source, end_date, days, strategy, mode,
+                                             profit=_profit_int(total_return))
     if not os.path.dirname(report_path):
         report_path = os.path.join('report', report_path)
 
@@ -1880,7 +2238,10 @@ def _generate_portfolio_html(pool_symbols, strategy_name, start_date, end_date, 
         else:
             sell_str = '-'
         sell_amt = f'{sell_amount:,.0f}' if sell_amount else '-'
-        buy_str = f'{buy_symbol} {name_map.get(buy_symbol, buy_symbol)}' if buy_symbol else '-'
+        if buy_symbol:
+            buy_str = '<br>'.join(f'{s} {name_map.get(s, s)}' for s in buy_symbol.split('/'))
+        else:
+            buy_str = '-'
         buy_amt = f'{buy_amount:,.0f}' if buy_amount else '-'
         tx_rows += f'''<tr>
             <td>{date.date()}</td><td>{buy_str}</td><td>{buy_amt}</td>
@@ -1917,6 +2278,36 @@ def _generate_portfolio_html(pool_symbols, strategy_name, start_date, end_date, 
     pool_str = '，'.join(str(s) for s in pool_symbols)
     ret_color = '#27ae60' if total_return >= 0 else '#e74c3c'
 
+    # 生成所有买入股票的 K 线图（价格+买卖点、成交量、MACD），内嵌到报告末尾
+    import base64 as _b64
+
+    def _img_to_b64(path):
+        if not path or not os.path.exists(path):
+            return ''
+        with open(path, 'rb') as f:
+            return _b64.b64encode(f.read()).decode()
+
+    date_tag = _build_date_tag(start_date, end_date)
+    bought_symbols = [sym for sym, buy_amt, *_ in stock_stats if buy_amt > 0]
+    charts_html = ''
+    for sym in bought_symbols:
+        if sym not in stock_data:
+            continue
+        df, sig = stock_data[sym]
+        label = f'{sym} {name_map.get(sym, sym)}'.strip()
+        try:
+            cg = ChartGenerator(output_dir=output, prefix=f'{sym}_portfolio', date_tag=date_tag)
+            chart_path = cg.plot_signal_composite(
+                df, sig, strategy_key='macd', title=f'{label} K线与买卖点'
+            )
+            b64 = _img_to_b64(chart_path)
+            if b64:
+                ext = os.path.splitext(chart_path)[1].lstrip('.')
+                charts_html += f'<div class="chart"><h3>{label}</h3>'
+                charts_html += f'<img src="data:image/{ext};base64,{b64}" alt="{label}" style="max-width:100%;border:1px solid #ddd;border-radius:4px;"></div>'
+        except Exception as e:
+            charts_html += f'<div class="chart">图表生成失败 {label}: {e}</div>'
+
     html = f'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1932,6 +2323,7 @@ th {{ background: #3498db; color: white; }}
 tr:nth-child(even) {{ background: #f2f2f2; }}
 .info {{ background: #ecf0f1; padding: 15px; border-radius: 5px; margin: 15px 0; }}
 .info span {{ margin-right: 30px; }}
+.chart {{ margin: 20px 0; text-align: center; }}
 .footer {{ text-align: center; color: #95a5a6; margin-top: 40px; font-size: 12px; }}
 </style>
 </head>
@@ -1944,11 +2336,16 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
     <span><strong>总权益:</strong> {final_value:,.0f}</span>
     <span><strong>持股数量:</strong> {total_shares:,.0f} 股</span>
     <span><strong>总收益率:</strong> <span style="color:{ret_color};font-weight:bold">{total_return * 100:.2f}%</span></span>
+    <span><strong>夏普比率:</strong> {sharpe:.2f}</span>
+    <span><strong>最大回撤:</strong> {max_drawdown * 100:.2f}%</span>
     <span><strong>交易次数:</strong> {len(events)}</span>
     <span><strong>闲置资金天数/分析周期:</strong> {idle_days:.2f} / {period_days}</span>
 </div>
 <div class="info">
     <span><strong>股票池({len(pool_symbols)}只):</strong> {pool_str}</span>
+</div>
+<div class="info">
+    <span><strong>命令参数:</strong> {cmd_params}</span>
 </div>
 
 <h2>交易记录</h2>
@@ -1968,6 +2365,9 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 <tr><th>股票代码</th><th>股票名称</th><th>持股数</th><th>成本价</th><th>最新价</th><th>市值</th></tr>
 {hold_rows}
 </table>
+
+<h2>买入股票 K 线图</h2>
+{charts_html}
 
 <div class="footer"><p>报告由 stock-quant 自动生成</p></div>
 </body>

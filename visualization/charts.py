@@ -239,7 +239,7 @@ class ChartGenerator:
             addplot=add_plots if add_plots else None,
             title=title,
             panel_ratios=panel_ratios,
-            figsize=(16, 9.5),
+            figsize=(16, 8),
             returnfig=True,
             warn_too_much_data=len(df) + 1
         )
@@ -683,7 +683,7 @@ class ChartGenerator:
             equity_panel = 3 if has_indicator else 2
             eq_series = equity_curve.reindex(df.index)
             add_plots.append(mpf.make_addplot(eq_series, panel=equity_panel, color=COLOR_BLUE, width=1.1, ylabel='权益', secondary_y=False))
-            panel_ratios.append(1.2)
+            panel_ratios.append(1)
 
         mc = mpf.make_marketcolors(up=COLOR_UP, down=COLOR_DOWN, edge='inherit', wick='inherit',
                                    volume={'up': COLOR_UP, 'down': COLOR_DOWN}, alpha=0.9)
@@ -695,16 +695,16 @@ class ChartGenerator:
 
         fig, axes = mpf.plot(
             df, type='candle', style=s, volume=True, addplot=add_plots,
-            panel_ratios=tuple(panel_ratios), figsize=(16, 9),
+            panel_ratios=tuple(panel_ratios), figsize=(16, 6.5),
             returnfig=True, warn_too_much_data=len(df) + 1,
             datetime_format='%Y-%m', xrotation=0
         )
 
-        # 标题移到图下方
-        #fig.text(0.5, 0.015, title, ha='center', va='bottom', fontsize=13c, color=COLOR_DARK)
+        # 标题
+        # fig.text(0.5, 0.015, title, ha='center', va='top', fontsize=12, color=COLOR_DARK)
 
         # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
-        fig.suptitle(title, y=0.13, fontsize=13, fontproperties=FP_BOLD)
+        fig.suptitle(" \n"+title, y=0.95, fontsize=12, fontproperties=FP_BOLD)
 
 
         for ax in axes:
