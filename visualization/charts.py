@@ -519,12 +519,12 @@ class ChartGenerator:
         if len(buy_signals) > 0:
             buy_prices = df_aligned.loc[buy_signals.index, 'close']
             ax.scatter(buy_signals.index, buy_prices, color=COLOR_UP, marker='^',
-                       s=100, zorder=5, label=f'买入 ({len(buy_signals)}次)', edgecolors='white', linewidth=0.5)
+                       s=75, zorder=5, label=f'买入 ({len(buy_signals)}次)', edgecolors='white', linewidth=0.5)
 
         if len(sell_signals) > 0:
             sell_prices = df_aligned.loc[sell_signals.index, 'close']
             ax.scatter(sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
-                       s=100, zorder=5, label=f'卖出 ({len(sell_signals)}次)', edgecolors='white', linewidth=0.5)
+                       s=75, zorder=5, label=f'卖出 ({len(sell_signals)}次)', edgecolors='white', linewidth=0.5)
 
         ax.set_title(" ", fontsize=11, fontproperties=FP_BOLD, color=COLOR_DARK)
         ax.set_ylabel('价格', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
@@ -547,9 +547,10 @@ class ChartGenerator:
     STRATEGY_INDICATOR_TYPE = {
         'ma_cross': 'ma',
         'macd': 'macd',
-        'enhanced_macd': 'macd',
+        'emacd': 'macd',
         'rsi': 'rsi',
         'bollinger': 'boll',
+        'kdj': 'kdj',
         'momentum': 'momentum',
         'volatility': 'volatility',
         'breadth': 'volume',
@@ -578,6 +579,13 @@ class ChartGenerator:
                 plots.append(mpf.make_addplot(df['BOLL_LOWER'], panel=panel, color=COLOR_DOWN, width=1.0, alpha=0.7, label='下轨', secondary_y=False))
                 if 'Close' in df.columns:
                     plots.append(mpf.make_addplot(df['Close'], panel=panel, color=COLOR_BLUE, width=0.8, alpha=0.8, label='收盘价', secondary_y=False))
+        elif ind_type == 'kdj':
+            if all(c in df.columns for c in ('KDJ_K', 'KDJ_D', 'KDJ_J')):
+                plots.append(mpf.make_addplot(df['KDJ_K'], panel=panel, color=COLOR_BLUE, width=1.2, ylabel='KDJ', label='K', secondary_y=False))
+                plots.append(mpf.make_addplot(df['KDJ_D'], panel=panel, color=COLOR_ORANGE, width=1.2, label='D', secondary_y=False))
+                plots.append(mpf.make_addplot(df['KDJ_J'], panel=panel, color=COLOR_PURPLE, width=1.0, label='J', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(80, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超买80', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(20, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超卖20', secondary_y=False))
         elif ind_type == 'ma':
             for period, color in ((5, COLOR_ORANGE), (10, COLOR_TEAL), (20, COLOR_PURPLE)):
                 col = f'MA{period}'

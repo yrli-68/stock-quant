@@ -1,0 +1,1 @@
+mysql -usmit -p -D stock_quant -N -e "SELECT symbol FROM stock_basic where market = '创业板'  ORDER BY RAND() LIMIT 100;" > input/chi100.txt

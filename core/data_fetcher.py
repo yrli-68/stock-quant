@@ -221,18 +221,41 @@ class DataFetcher:
             logger.debug("数据库读取 K 线跳过: %s", e)
 
         # ============================================================
-        # 第二步：从新浪 API 获取
+        # 第二步：从新浪 API 获取（K线与复权因子并行请求）
         # ============================================================
         try:
-            datalen = 1000  # 最多获取1000条
-            url = (
+            adjust_type = adjust if adjust != 'None' else ''
+            need_factor = adjust_type in ('qfq', 'hfq')
+
+            # K线与复权因子并行发起 HTTP 请求（self._session 非线程安全，
+            # 每个请求用独立的 requests.Session）
+            import concurrent.futures as _cf
+
+            def _http_get(url, headers=None, timeout=15):
+                s = requests.Session()
+                s.headers.update(HEADERS)
+                if headers:
+                    s.headers.update(headers)
+                r = s.get(url, timeout=timeout)
+                return r
+
+            kline_url = (
                 f'https://quotes.sina.com.cn/cn/api/json_v2.php/'
                 f'CN_MarketData.getKLineData?'
-                f'symbol={sina_code}&scale=240&ma=no&datalen={datalen}'
+                f'symbol={sina_code}&scale=240&ma=no&datalen=1000'
             )
-            logger.info("从新浪获取K线数据: %s", sina_code)
+            factor_url = (
+                f'https://finance.sina.com.cn/realstock/company/{sina_code}/{adjust_type}.js'
+                if need_factor else None
+            )
 
-            resp = self._session.get(url, timeout=15)
+            logger.info("从新浪获取K线数据: %s%s", sina_code, ' (含复权因子)' if need_factor else '')
+            with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+                fut_k = ex.submit(_http_get, kline_url)
+                fut_f = ex.submit(_http_get, factor_url) if need_factor else None
+                resp = fut_k.result()
+                factor_resp = fut_f.result() if fut_f else None
+
             data = resp.json()
 
             if not data or not isinstance(data, list):
@@ -260,10 +283,9 @@ class DataFetcher:
 
             logger.info("新浪返回 %d 条原始K线记录 (不复权)", len(df))
 
-            # 复权
-            adjust_type = adjust if adjust != 'None' else ''
-            if adjust_type in ('qfq', 'hfq'):
-                factor_df = self._get_sina_adjust_factor(raw_symbol, adjust_type)
+            # 复权（复用已并行获取的因子响应）
+            if need_factor and factor_resp is not None:
+                factor_df = self._parse_sina_adjust_factor_text(raw_symbol, factor_resp.text)
                 if not factor_df.empty:
                     df = self._apply_adjust_factor(df, factor_df, adjust_type)
                     logger.info("已应用 %s 复权因子，共 %d 条记录", adjust_type, len(df))
@@ -329,6 +351,34 @@ class DataFetcher:
 
     # ==================== 复权因子 ====================
 
+    def _fetch_sina_adjust_factor_raw(self, symbol: str, adjust_type: str) -> str:
+        """仅发起新浪复权因子 HTTP 请求，返回原始响应文本（用于与K线请求并行）"""
+        sina_code = self._get_sina_prefix(symbol)
+        url = f'https://finance.sina.com.cn/realstock/company/{sina_code}/{adjust_type}.js'
+        resp = self._session.get(url, timeout=15)
+        return resp.text
+
+    def _parse_sina_adjust_factor_text(self, symbol: str, text: str) -> pd.DataFrame:
+        """解析新浪复权因子原始响应文本，返回 [date, factor] DataFrame（date 为索引）"""
+        match = re.search(r'=\s*(\{.*\})', text, re.DOTALL)
+        if not match:
+            logger.warning("无法解析复权因子数据: %s", symbol)
+            return pd.DataFrame()
+
+        data = json.loads(match.group(1))
+        records = data.get('data', [])
+
+        if not records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['d'])
+        df['factor'] = pd.to_numeric(df['f'], errors='coerce')
+        df = df.dropna(subset=['date', 'factor'])
+        df = df.set_index('date')
+        df = df.sort_index()
+        return df
+
     def _get_sina_adjust_factor(
         self,
         symbol: str,
@@ -351,31 +401,11 @@ class DataFetcher:
             pd.DataFrame: 包含 [date, factor] 列，date 为索引
         """
         sina_code = self._get_sina_prefix(symbol)
-        url = f'https://finance.sina.com.cn/realstock/company/{sina_code}/{adjust_type}.js'
 
         try:
             logger.info("获取新浪复权因子: %s (%s)", sina_code, adjust_type)
-            resp = self._session.get(url, timeout=15)
-
-            # 解析 JS 格式: var sh600036qfq = {...}
-            text = resp.text
-            match = re.search(r'=\s*(\{.*\})', text, re.DOTALL)
-            if not match:
-                logger.warning("无法解析复权因子数据: %s", symbol)
-                return pd.DataFrame()
-
-            data = json.loads(match.group(1))
-            records = data.get('data', [])
-
-            if not records:
-                return pd.DataFrame()
-
-            df = pd.DataFrame(records)
-            df['date'] = pd.to_datetime(df['d'])
-            df['factor'] = pd.to_numeric(df['f'], errors='coerce')
-            df = df.dropna(subset=['date', 'factor'])
-            df = df.set_index('date')
-            df = df.sort_index()
+            text = self._fetch_sina_adjust_factor_raw(symbol, adjust_type)
+            df = self._parse_sina_adjust_factor_text(symbol, text)
 
             logger.info("获取复权因子成功: %s, 共 %d 个节点", symbol, len(df))
             return df
@@ -1150,6 +1180,15 @@ class DataFetcher:
                 if len(parts) < 30:
                     return {}
 
+                # 新浪原生行情时间：parts[30]=日期, parts[31]=时间
+                sina_datetime = None
+                try:
+                    if len(parts) > 31 and parts[30] and parts[31]:
+                        sina_datetime = datetime.strptime(
+                            f"{parts[30]} {parts[31]}", "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    sina_datetime = None
+
                 quote = {
                     'symbol': raw_symbol,
                     'name': parts[0],
@@ -1165,7 +1204,7 @@ class DataFetcher:
                     'change_pct': round(
                         (float(parts[3]) - float(parts[2])) / float(parts[2]) * 100, 2
                     ) if parts[3] and parts[2] and float(parts[2]) != 0 else 0,
-                    'timestamp': datetime.now().isoformat(),
+                    'datetime': sina_datetime.isoformat() if sina_datetime else None, # 新浪原生行情时间
                 }
                 logger.info("成功获取 %s 实时行情，价格: %.2f", raw_symbol, quote['price'])
                 return quote
@@ -1176,6 +1215,8 @@ class DataFetcher:
                     ticker = yf.Ticker(symbol)
                     info = ticker.info
                     fast_info = ticker.fast_info
+                    # 美股无新浪原生行情时间，保持 None（调用方按 datetime==今日 判断会跳过）
+                    sina_datetime = None
                     quote = {
                         'symbol': symbol,
                         'name': info.get('shortName', info.get('longName', '')),
@@ -1187,7 +1228,7 @@ class DataFetcher:
                         'volume': float(info.get('volume', 0) or 0),
                         'change': float(info.get('regularMarketChange', 0) or 0),
                         'change_pct': float((info.get('regularMarketChangePercent', 0) or 0)),
-                        'timestamp': datetime.now().isoformat(),
+                        'datetime': sina_datetime.isoformat() if sina_datetime else None, # 新浪原生行情时间
                     }
                     return quote
                 except Exception:

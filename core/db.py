@@ -8,6 +8,7 @@ import json
 import os
 import logging
 import threading
+import time
 import tempfile
 from contextlib import contextmanager
 from typing import Optional, List, Tuple
@@ -43,6 +44,10 @@ def get_db_mode() -> int:
 # 优先用 fcntl 文件锁（跨进程，适用于多进程并行），不支持时回退线程锁。
 _WRITE_LOCK = threading.Lock()
 _LOCK_FILE_PATH = os.path.join(tempfile.gettempdir(), 'stock_quant_db_write.lock')
+
+# 写锁获取超时（秒）。若残留/挂起进程一直持有文件锁，超时后跳过本次写库，
+# 避免后续所有 -db 2 运行永久阻塞在 flock 上。
+_LOCK_TIMEOUT = 30
 
 
 def _load_db_config():
@@ -119,20 +124,40 @@ def get_connection():
 
 @contextmanager
 def _db_write_lock():
-    """跨进程写锁：优先 fcntl 文件锁，回退线程锁"""
+    """跨进程写锁（带超时）：优先 fcntl 文件锁，回退线程锁
+
+    返回是否成功获取锁（False 表示超时未获取，调用方应跳过写库）。
+    """
     if fcntl is not None:
         f = open(_LOCK_FILE_PATH, 'a')
+        acquired = False
+        deadline = time.time() + _LOCK_TIMEOUT
         try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            yield
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        logger.warning(
+                            "获取写锁超时(%ds)，跳过本次数据库写入", _LOCK_TIMEOUT)
+                        break
+                    time.sleep(0.2)
+            yield acquired
         finally:
             try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                if acquired:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             finally:
                 f.close()
     else:
-        with _WRITE_LOCK:
-            yield
+        acquired = _WRITE_LOCK.acquire(timeout=_LOCK_TIMEOUT)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                _WRITE_LOCK.release()
 
 
 @contextmanager
@@ -142,7 +167,10 @@ def get_write_connection():
         # 模式 0/1：不写数据库
         yield None
         return
-    with _db_write_lock():
+    with _db_write_lock() as locked:
+        if not locked:
+            yield None
+            return
         with _open_connection() as conn:
             yield conn
 
