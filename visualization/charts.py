@@ -546,15 +546,15 @@ class ChartGenerator:
     # 策略 → 指标子图类型
     STRATEGY_INDICATOR_TYPE = {
         'ma_cross': 'ma',
+        'ema_cross': 'ema',
         'macd': 'macd',
-        'emacd': 'macd',
         'rsi': 'rsi',
         'bollinger': 'boll',
         'kdj': 'kdj',
         'momentum': 'momentum',
         'volatility': 'volatility',
         'breadth': 'volume',
-        'composite': 'composite',
+        'quality_value': 'quality_value',
     }
 
     def _strategy_indicator_addplots(self, df, strategy_key, panel, signals=None):
@@ -587,10 +587,15 @@ class ChartGenerator:
                 plots.append(mpf.make_addplot(pd.Series(80, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超买80', secondary_y=False))
                 plots.append(mpf.make_addplot(pd.Series(20, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超卖20', secondary_y=False))
         elif ind_type == 'ma':
-            for period, color in ((5, COLOR_ORANGE), (10, COLOR_TEAL), (20, COLOR_PURPLE)):
+            for period, color in ((10, COLOR_ORANGE), (30, COLOR_TEAL)):
                 col = f'MA{period}'
                 if col in df.columns:
-                    plots.append(mpf.make_addplot(df[col], panel=panel, color=color, width=1.0, label=f'MA{period}', secondary_y=False))
+                    plots.append(mpf.make_addplot(df[col], panel=panel, color=color, width=1.0, ylabel='MA', label=f'MA{period}', secondary_y=False))
+        elif ind_type == 'ema':
+            for period, color in ((10, COLOR_ORANGE), (30, COLOR_TEAL)):
+                col = f'EMA{period}'
+                if col in df.columns:
+                    plots.append(mpf.make_addplot(df[col], panel=panel, color=color, width=1.0, ylabel='EMA', label=f'EMA{period}', secondary_y=False))
         elif ind_type == 'momentum':
             if 'MOM60' in df.columns:
                 plots.append(mpf.make_addplot(df['MOM60'], panel=panel, color=COLOR_BLUE, width=1.0, ylabel='MOM60', label='MOM60', secondary_y=False))
@@ -602,18 +607,146 @@ class ChartGenerator:
                 vol_ma = df['Volume'].rolling(5).mean()
                 ratio = df['Volume'] / vol_ma
                 plots.append(mpf.make_addplot(ratio, panel=panel, color=COLOR_BLUE, width=1.0, ylabel='量比', label='量比', secondary_y=False))
-        elif ind_type == 'composite':
-            weighted_sum = None
-            threshold = 0.25
+        elif ind_type == 'quality_value':
+            combined = None
+            buy_threshold = 0.55
+            sell_threshold = 0.45
             if signals is not None and hasattr(signals, 'attrs'):
-                weighted_sum = signals.attrs.get('weighted_sum')
-                threshold = signals.attrs.get('threshold', 0.25)
-            if weighted_sum is not None:
-                weighted_sum = weighted_sum.reindex(df.index)
-                plots.append(mpf.make_addplot(weighted_sum, panel=panel, color=COLOR_BLUE, width=1.1, ylabel='加权分', label='加权分', secondary_y=False))
-                plots.append(mpf.make_addplot(pd.Series(threshold, index=df.index), panel=panel, color=COLOR_UP, width=0.8, linestyle='--', label='买入阈值', secondary_y=False))
-                plots.append(mpf.make_addplot(pd.Series(-threshold, index=df.index), panel=panel, color=COLOR_DOWN, width=0.8, linestyle='--', label='卖出阈值', secondary_y=False))
+                combined = signals.attrs.get('combined_score')
+                buy_threshold = getattr(self, 'qv_buy_threshold', 0.55)
+                sell_threshold = getattr(self, 'qv_sell_threshold', 0.45)
+            if combined is not None:
+                combined = combined.reindex(df.index)
+                plots.append(mpf.make_addplot(combined, panel=panel, color=COLOR_BLUE, width=1.1, ylabel='质价分', label='综合得分', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(buy_threshold, index=df.index), panel=panel, color=COLOR_UP, width=0.8, linestyle='--', label='买入阈值', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(sell_threshold, index=df.index), panel=panel, color=COLOR_DOWN, width=0.8, linestyle='--', label='卖出阈值', secondary_y=False))
+
+        # 买卖点标注在指标子图（panel）上，位置依据指标量纲选取
+        if signals is not None and len(signals) > 0:
+            buy_val, sell_val = self._indicator_marker_values(df, ind_type)
+            if buy_val is not None and sell_val is not None:
+                buy_marker = pd.Series(buy_val, index=df.index).where(signals == 1)
+                sell_marker = pd.Series(sell_val, index=df.index).where(signals == -1)
+                plots.append(mpf.make_addplot(buy_marker, type='scatter', panel=panel,
+                                              marker='^', markersize=90, color=COLOR_UP, secondary_y=False))
+                plots.append(mpf.make_addplot(sell_marker, type='scatter', panel=panel,
+                                              marker='v', markersize=90, color=COLOR_DOWN, secondary_y=False))
+
         return plots
+
+    def _indicator_marker_values(self, df, ind_type):
+        """返回指标子图上买卖点标注的 y 值 (buy_val, sell_val)"""
+        if ind_type == 'rsi':
+            return 10.0, 90.0
+        if ind_type == 'kdj':
+            return 15.0, 85.0
+        if ind_type == 'macd':
+            cols = [c for c in ('MACD_DIF', 'MACD_DEA', 'MACD_BAR') if c in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'ma':
+            cols = [f'MA{p}' for p in (10, 30) if f'MA{p}' in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'ema':
+            cols = [f'EMA{p}' for p in (10, 30) if f'EMA{p}' in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'boll':
+            if all(c in df.columns for c in ('BOLL_UPPER', 'BOLL_LOWER')):
+                lo = float(df['BOLL_LOWER'].min())
+                hi = float(df['BOLL_UPPER'].max())
+                span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+                return lo - span * 0.05, hi + span * 0.05
+            return None, None
+        if ind_type == 'momentum':
+            if 'MOM60' in df.columns:
+                v = df['MOM60'].dropna()
+                if len(v):
+                    lo, hi = float(v.min()), float(v.max())
+                    span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+                    return lo - span * 0.05, hi + span * 0.05
+            return None, None
+        if ind_type == 'volatility':
+            if 'HV20' in df.columns:
+                v = df['HV20'].dropna()
+                if len(v):
+                    lo, hi = float(v.min()), float(v.max())
+                    span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+                    return lo - span * 0.05, hi + span * 0.05
+            return None, None
+        if ind_type == 'volume':
+            return 1.0, 0.0
+        if ind_type == 'quality_value':
+            return 0.8, 0.2
+        return None, None
+
+    def _reposition_signal_markers(self, axes, panel, buy_val, sell_val):
+        """将指标子图上的买卖点散点重定位到靠近子图边框位置
+
+        买入点 Y 位于底部边框上方，间隙 = 子图高度的 1/8；
+        卖出点 Y 位于顶部边框下方，间隙 = 子图高度的 1/8。
+
+        通过散点集合的常量 Y 值识别买卖点集合（buy_val / sell_val）。
+        """
+        if buy_val is None or sell_val is None:
+            return
+        try:
+            ax = axes[panel * 2]
+            ymin, ymax = ax.get_ylim()
+            # 保证有足够余量容纳两侧各 1/8 高度的标记
+            height = ymax - ymin
+            if height < 2.5:
+                pad = (2.5 - height) / 2
+                ymin -= pad
+                ymax += pad
+                height = ymax - ymin
+            buy_gap = height / 8
+            sell_gap = height / 8
+            for coll in ax.collections:
+                if not hasattr(coll, 'get_offsets'):
+                    continue
+                offs = coll.get_offsets()
+                if offs is None or len(offs) == 0:
+                    continue
+                offs = np.asarray(offs, dtype=float)
+                if offs.ndim != 2 or offs.shape[1] < 2:
+                    continue
+                ys = offs[:, 1]
+                finite = np.isfinite(ys)
+                if not finite.any():
+                    continue
+                yvals = ys[finite]
+                if np.allclose(yvals, buy_val, atol=1e-6):
+                    offs[finite, 1] = ymin + buy_gap
+                    coll.set_offsets(offs)
+                elif np.allclose(yvals, sell_val, atol=1e-6):
+                    offs[finite, 1] = ymax - sell_gap
+                    coll.set_offsets(offs)
+            ax.set_ylim(ymin, ymax)
+        except Exception:
+            pass
 
     @_synchronized_plot
     def plot_signal_composite(self, df, signals, strategy_key='', title='买卖信号', save_path=None, equity_curve=None):
@@ -668,14 +801,7 @@ class ChartGenerator:
         add_plots = []
         panel_ratios = [2, 1]  # K线(原高度2/3) + 成交量
 
-        # 买卖点直接标注在 K 线主图（panel 0）上
-        # 买入点：位于当日最低价下方；卖出点：位于当日最高价上方
-        buy_marker = (df['Low'] * 0.97).where(signals == 1)
-        sell_marker = (df['High'] * 1.03).where(signals == -1)
-        add_plots.append(mpf.make_addplot(buy_marker, type='scatter', panel=0,
-                                          marker='^', markersize=110, color=COLOR_UP, secondary_y=False))
-        add_plots.append(mpf.make_addplot(sell_marker, type='scatter', panel=0,
-                                          marker='v', markersize=110, color=COLOR_DOWN, secondary_y=False))
+        # 买卖点标注已移至指标子图（由 _strategy_indicator_addplots 处理），K线主图不再标注
 
         # 指标子图 (panel 2，panel 1 为成交量)
         indicator_panel = 2
@@ -691,7 +817,7 @@ class ChartGenerator:
             equity_panel = 3 if has_indicator else 2
             eq_series = equity_curve.reindex(df.index)
             add_plots.append(mpf.make_addplot(eq_series, panel=equity_panel, color=COLOR_BLUE, width=1.1, ylabel='权益', secondary_y=False))
-            panel_ratios.append(1)
+            panel_ratios.append(1.5)
 
         mc = mpf.make_marketcolors(up=COLOR_UP, down=COLOR_DOWN, edge='inherit', wick='inherit',
                                    volume={'up': COLOR_UP, 'down': COLOR_DOWN}, alpha=0.9)
@@ -707,6 +833,12 @@ class ChartGenerator:
             returnfig=True, warn_too_much_data=len(df) + 1,
             datetime_format='%Y-%m', xrotation=0
         )
+
+        # 将指标子图上的买卖点散点重定位到靠近子图边框（买入贴近底部、卖出贴近顶部）
+        if has_indicator:
+            ind_type = self.STRATEGY_INDICATOR_TYPE.get(strategy_key)
+            buy_val, sell_val = self._indicator_marker_values(df, ind_type)
+            self._reposition_signal_markers(axes, indicator_panel, buy_val, sell_val)
 
         # 标题
         # fig.text(0.5, 0.015, title, ha='center', va='top', fontsize=12, color=COLOR_DARK)
@@ -754,6 +886,164 @@ class ChartGenerator:
                 prev_ym = ym
         n_months = len(month_idx)
         # 在候选间隔中选尽量小的，保证标签数不超过约 18 个（不重叠）
+        step = 12
+        for cand in (1, 2, 3, 4, 6, 12):
+            if n_months / cand <= 18:
+                step = cand
+                break
+        ticks = month_idx[::step]
+        labels = [df.index[i].strftime('%Y-%m') for i in ticks]
+        bottom_ax = axes[-2]
+        bottom_ax.set_xticks(ticks)
+        bottom_ax.set_xticklabels(labels, fontsize=8, fontproperties=FP_REGULAR)
+
+        fig.tight_layout(rect=[0, 0.03, 1, 1])
+        fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
+        plt.close(fig)
+
+        return save_path
+
+    @_synchronized_plot
+    def plot_multi_strategy_composite(self, df, strategies_data, title='多策略信号图表', save_path=None):
+        """
+        多策略综合图表：一个K线图，含各策略指标子图 + 汇总权益子图
+
+        结构:
+        - panel 0: K线
+        - panel 1: 成交量
+        - panel 2..N: 各策略指标子图（ma_cross/macd/rsi/kdj 等），买卖点标注在各自指标子图
+        - 最后一个 panel: 权益曲线汇总（每个策略一条曲线）
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            包含 OHLCV 及技术指标列的 DataFrame
+        strategies_data : list of dict
+            每个策略一个 dict: {
+                'key': 策略key,
+                'name': 策略显示名,
+                'signals': 信号序列(1/-1/0),
+                'equity_curve': 权益曲线(pd.Series),
+            }
+        title : str
+            图表标题
+        save_path : str
+            保存路径
+
+        Returns
+        -------
+        str : 保存的文件路径
+        """
+        if save_path is None:
+            save_path = self._get_save_path('multi_strategy_composite.png')
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'date' in df.columns:
+                df = df.set_index('date')
+            df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+
+        # 规范化 OHLCV 列名以兼容 mplfinance
+        df = df.copy()
+        rename_map = {}
+        ohlc_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        for old_col, new_col in ohlc_map.items():
+            if old_col in df.columns and new_col not in df.columns:
+                rename_map[old_col] = new_col
+        if rename_map:
+            df = df.rename(columns=rename_map)
+        for col in ('Open', 'High', 'Low', 'Close'):
+            if col not in df.columns:
+                raise ValueError(f"缺少必要列: {col}")
+
+        add_plots = []
+        panel_ratios = [2, 1]  # K线 + 成交量
+
+        # 各策略指标子图（含各自买卖点标注）
+        indicator_panels = []  # (panel, strategy_key)
+        next_panel = 2
+        for sd in strategies_data:
+            signals = sd.get('signals')
+            if signals is not None and len(signals) > 0:
+                if not isinstance(signals.index, pd.DatetimeIndex):
+                    signals.index = pd.to_datetime(signals.index)
+                signals = signals.reindex(df.index).fillna(0).astype(int)
+                sd['signals'] = signals
+            else:
+                sd['signals'] = pd.Series(0, index=df.index, dtype=int)
+            sk = sd.get('key', '')
+            ind_plots = self._strategy_indicator_addplots(df, sk, next_panel, signals=sd['signals'])
+            if ind_plots:
+                add_plots.extend(ind_plots)
+                panel_ratios.append(1.2)
+                indicator_panels.append((next_panel, sk))
+                next_panel += 1
+
+        # 权益曲线汇总子图（每个策略一条曲线）
+        equity_panel = next_panel
+        has_equity = False
+        for i, sd in enumerate(strategies_data):
+            eq = sd.get('equity_curve')
+            if eq is None:
+                continue
+            eq_series = eq.reindex(df.index)
+            color = STRATEGY_COLORS[i % len(STRATEGY_COLORS)]
+            add_plots.append(mpf.make_addplot(eq_series, panel=equity_panel, color=color, width=1.0,
+                                              label=sd.get('name', sd.get('key', '')), ylabel='权益', secondary_y=False))
+            has_equity = True
+        if has_equity:
+            panel_ratios.append(1.8)
+
+        mc = mpf.make_marketcolors(up=COLOR_UP, down=COLOR_DOWN, edge='inherit', wick='inherit',
+                                   volume={'up': COLOR_UP, 'down': COLOR_DOWN}, alpha=0.9)
+        s = mpf.make_mpf_style(
+            marketcolors=mc, gridstyle=':', gridcolor='#e0e0e0',
+            facecolor=COLOR_BG, figcolor=COLOR_BG, y_on_right=False,
+            rc={'font.sans-serif': [FP_REGULAR.get_name(), 'DejaVu Sans'], 'axes.unicode_minus': False}
+        )
+
+        fig, axes = mpf.plot(
+            df, type='candle', style=s, volume=True, addplot=add_plots,
+            panel_ratios=tuple(panel_ratios), figsize=(16, 6 + 1.2 * len(indicator_panels)),
+            returnfig=True, warn_too_much_data=len(df) + 1,
+            datetime_format='%Y-%m', xrotation=0
+        )
+
+        # 各指标子图买卖点重定位到靠近子图边框
+        for panel, sk in indicator_panels:
+            ind_type = self.STRATEGY_INDICATOR_TYPE.get(sk)
+            buy_val, sell_val = self._indicator_marker_values(df, ind_type)
+            self._reposition_signal_markers(axes, panel, buy_val, sell_val)
+
+        fig.suptitle(" \n"+title, y=0.97, fontsize=13, fontproperties=FP_BOLD)
+
+        for ax in axes:
+            if ax.get_ylabel():
+                ax.set_ylabel(ax.get_ylabel(), fontproperties=FP_REGULAR)
+            for label in (ax.get_xticklabels() + ax.get_yticklabels()):
+                label.set_fontproperties(FP_REGULAR)
+
+        # 指标子图图例置于左侧
+        for panel, _sk in indicator_panels:
+            ind_ax = axes[panel * 2]
+            if ind_ax.get_legend() is not None:
+                ind_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
+
+        # 权益子图图例
+        if has_equity:
+            eq_ax = axes[equity_panel * 2]
+            if eq_ax.get_legend() is not None:
+                eq_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
+
+        # X轴：自适应月度刻度
+        month_idx = []
+        prev_ym = None
+        for i, d in enumerate(df.index):
+            ym = (d.year, d.month)
+            if ym != prev_ym:
+                month_idx.append(i)
+                prev_ym = ym
+        n_months = len(month_idx)
         step = 12
         for cand in (1, 2, 3, 4, 6, 12):
             if n_months / cand <= 18:

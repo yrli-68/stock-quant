@@ -21,14 +21,16 @@ class Strategy(ABC):
         name (str): 策略名称，用于标识和日志输出
     """
 
-    def __init__(self, name='BaseStrategy'):
+    def __init__(self, name='BaseStrategy', enhance=0):
         """
         初始化策略基类
 
         Args:
             name (str): 策略名称，默认为 'BaseStrategy'
+            enhance (int): 信号增强判定级别，0=基本判定，>0 时启用对应增强条件
         """
         self.name = name
+        self.enhance = enhance
 
     @abstractmethod
     def generate_signals(self, df):

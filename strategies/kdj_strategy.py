@@ -14,7 +14,7 @@ KDJ 是一种随机振荡指标，通过比较收盘价在近期高低价区间�
 import pandas as pd
 
 from core.strategy import Strategy
-from core.indicators import calc_kdj
+from core.indicators import calc_kdj, calc_ma
 
 
 class KDJStrategy(Strategy):
@@ -33,7 +33,7 @@ class KDJStrategy(Strategy):
         overbought (float): 超买阈值，默认 80
     """
 
-    def __init__(self, n=9, m1=3, m2=3, oversold=20, overbought=80, name='KDJ'):
+    def __init__(self, n=9, m1=3, m2=3, oversold=20, overbought=80, ma_slow=60, name='KDJ'):
         """
         初始化 KDJ 策略
 
@@ -43,6 +43,7 @@ class KDJStrategy(Strategy):
             m2 (int): D 线平滑周期，默认 3
             oversold (float): 超卖阈值，K 低于此值视为超卖，默认 20
             overbought (float): 超买阈值，K 高于此值视为超买，默认 80
+            ma_slow (int): 增强过滤用慢速均线周期，默认 60
             name (str): 策略名称
         """
         super().__init__(name=name)
@@ -51,15 +52,20 @@ class KDJStrategy(Strategy):
         self.m2 = m2
         self.oversold = oversold
         self.overbought = overbought
+        self.ma_slow = ma_slow
 
     def generate_signals(self, df):
         """
         生成 KDJ 交易信号
 
         计算 KDJ 指标（K、D、J），然后检测交叉信号：
-            - 低位金叉买入：上一期 K <= D，当期 K > D，且 K 处于超卖区（< oversold）
-            - 高位死叉卖出：上一期 K >= D，当期 K < D，且 K 处于超买区（> overbought）
+            - 金叉买入：上一期 K <= D，当期 K > D
+            - 死叉卖出：上一期 K >= D，当期 K < D
             - 其余情况 → 持有(0)
+
+        增强级别 1（enhance>=1）时：
+            - 买入额外要求 close > MA60
+            - 卖出条件同基础（死叉）
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'high'、'low'、'close' 列
@@ -75,12 +81,19 @@ class KDJStrategy(Strategy):
         # 初始化信号序列
         signals = pd.Series(0, index=df.index, dtype=int)
 
-        # 低位金叉买入：K 上穿 D 且 K 处于超卖区
-        golden_cross = (k.shift(1) <= d.shift(1)) & (k > d) & (k < self.oversold)
-        signals[golden_cross] = 1
+        # 金叉买入：K 上穿 D
+        golden_cross = (k.shift(1) <= d.shift(1)) & (k > d)
 
-        # 高位死叉卖出：K 下穿 D 且 K 处于超买区
-        death_cross = (k.shift(1) >= d.shift(1)) & (k < d) & (k > self.overbought)
+        # 死叉卖出：K 下穿 D
+        death_cross = (k.shift(1) >= d.shift(1)) & (k < d)
+
+        # 增强级别 1：买入额外要求 close > MA60
+        if self.enhance >= 1:
+            ma_slow = calc_ma(df, self.ma_slow)
+            close = df['close']
+            golden_cross = golden_cross & (close > ma_slow)
+
+        signals[golden_cross] = 1
         signals[death_cross] = -1
 
         return signals

@@ -24,22 +24,11 @@
 
 ### 2.2 策略注册表
 
-- `STRATEGY_MAP`：个股策略（`ma_cross`、`macd`、`enhanced_macd`、`rsi`、`bollinger`、`quality_value`、`composite`）
+- `STRATEGY_MAP`：个股策略（`ma_cross`、`ema_cross`、`macd`、`rsi`、`bollinger`、`kdj`、`quality_value`）
 - `INDEX_STRATEGY_MAP`：指数专属策略（`momentum`、`volatility`、`breadth`）
 - `ETF_STRATEGY_MAP`：ETF/指数基金专用策略（参数适配低波动、趋势跟随）
-- 默认综合策略权重 `_DEFAULT_COMPOSITE_WEIGHTS` 与阈值 `_DEFAULT_COMPOSITE_THRESHOLD`（默认 0.25）
 
-### 2.3 composite 综合策略
-
-`CompositeStrategy.generate_signals` 采用**加权投票**机制：
-
-1. 每个子策略独立生成信号
-2. 按权重加权求和得到 `weighted_sum`
-3. `weighted_sum > threshold` → 买入(1)；`< -threshold` → 卖出(-1)；其余 → 持有(0)
-
-权重与阈值来自 `input/stock-quant.json` 的 `composite` 配置，缺失时回退到默认权重。
-
-### 2.4 数据与指标
+### 2.3 数据与指标
 
 - 行情：`DataFetcher.get_stock_data(symbol, start_date, end_date)`
 - 指标：`add_all_indicators(df)`，产出 MA5/10/20/60/120、MACD（DIF/DEA/BAR）、RSI、BOLL、KDJ、ATR、ADX/+DI/-DI、OBV、CCI、WR、VWAP、HV、MOM 等
@@ -102,7 +91,7 @@
 ### 选股策略
 
 - 股票池来自 `-s`/`-sf`/`-h`（要求 **≥1 只**，单只作为特例处理）
-- 策略：`-g all` → composite，否则取 `|` 分隔列表的**第一个**策略
+- 策略：`-g all` → ma_cross，否则取 `|` 分隔列表的**第一个**策略
 - 每日遍历股票池，对出现买入信号(1)的股票**用全部剩余资金买入**（已持有的不重复买入）
 
 ### 买卖行为（集中持仓 + 部分止盈轮动）
@@ -125,7 +114,7 @@
 ### 选股策略
 
 - 股票池来自 `-s`/`-sf`/`-h`（要求 **≥1 只**，1 只作为多只的特例处理）
-- 策略：`-g all` → composite，否则取第一个策略
+- 策略：`-g all` → ma_cross，否则取第一个策略
 - 每日按 `symbols` 顺序遍历股票池，找第一个买入信号(1)的股票
 
 ### 买卖行为（多持仓、现金优先）

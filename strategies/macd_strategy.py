@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 
 from core.strategy import Strategy
-from core.indicators import calc_macd
+from core.indicators import calc_macd, calc_ma
 
 
 class MACDStrategy(Strategy):
@@ -30,9 +30,11 @@ class MACDStrategy(Strategy):
         fast (int): 快速 EMA 周期，默认 12
         slow (int): 慢速 EMA 周期，默认 26
         signal (int): 信号线 DEA 周期，默认 9
+        ma_period (int): 增强过滤用趋势快速均线周期，默认 20
+        ma_slow (int): 增强过滤用趋势慢速均线周期，默认 60
     """
 
-    def __init__(self, fast=12, slow=26, signal=9, name='MACD'):
+    def __init__(self, fast=12, slow=26, signal=9, ma_period=20, ma_slow=60, name='MACD'):
         """
         初始化 MACD 策略
 
@@ -40,12 +42,16 @@ class MACDStrategy(Strategy):
             fast (int): 快速 EMA 周期，默认 12
             slow (int): 慢速 EMA 周期，默认 26
             signal (int): 信号线 DEA 的 EMA 周期，默认 9
+            ma_period (int): 增强过滤用趋势快速均线周期，默认 20
+            ma_slow (int): 增强过滤用趋势慢速均线周期，默认 60
             name (str): 策略名称
         """
         super().__init__(name=name)
         self.fast = fast
         self.slow = slow
         self.signal = signal
+        self.ma_period = ma_period
+        self.ma_slow = ma_slow
 
     def generate_signals(self, df):
         """
@@ -55,6 +61,10 @@ class MACDStrategy(Strategy):
             - DIF 上穿 DEA 且 MACD 柱 > 0 → 买入(1)
             - DIF 下穿 DEA → 卖出(-1)
             - 其余情况 → 持有(0)
+
+        增强级别 1（enhance>=1）时：
+            - 买入额外要求 close > MA60
+            - 卖出条件同基础（死叉）
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
@@ -77,11 +87,16 @@ class MACDStrategy(Strategy):
             (dif.shift(1) <= dea.shift(1)) &
             (dif > dea)
         )
-        signals[golden_cross] = 1
-
-        # 死叉卖出：DIF 下穿 DEA
+        # 死叉卖出：DIF 下穿 DEA（基本与增强一致）
         # 条件：上一期 DIF >= 上一期 DEA，当期 DIF < 当期 DEA
         death_cross = (dif.shift(1) >= dea.shift(1)) & (dif < dea)
+
+        # 增强级别 1：买入额外要求 close > MA60
+        if self.enhance >= 1:
+            ma_slow = calc_ma(df, self.ma_slow)
+            close = df['close']
+            golden_cross = golden_cross & (close > ma_slow)
+        signals[golden_cross] = 1
         signals[death_cross] = -1
 
         return signals

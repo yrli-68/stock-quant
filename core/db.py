@@ -227,8 +227,8 @@ def fetch_indicators(code: str, start_date: str, end_date: str) -> list:
                 return []
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT trade_date, ma5, ma10, ma20, ma60,
-                       ema12, ema26, macd_dif, macd_dea, macd_bar,
+                SELECT trade_date, ma5, ma10, ma20, ma30, ma60,
+                       ema10, ema12, ema26, ema30, macd_dif, macd_dea, macd_bar,
                        rsi14, boll_upper, boll_middle, boll_lower,
                        kdj_k, kdj_d, kdj_j, atr14, obv, cci20, wr14,
                        vol_ma5, vwap, hv20, mom60
@@ -248,8 +248,8 @@ def store_indicators(code: str, df):
     if df is None or df.empty:
         return
     col_map = {
-        'MA5': 'ma5', 'MA10': 'ma10', 'MA20': 'ma20', 'MA60': 'ma60',
-        'EMA12': 'ema12', 'EMA26': 'ema26',
+        'MA5': 'ma5', 'MA10': 'ma10', 'MA20': 'ma20', 'MA30': 'ma30', 'MA60': 'ma60',
+        'EMA10': 'ema10', 'EMA12': 'ema12', 'EMA26': 'ema26', 'EMA30': 'ema30',
         'MACD_DIF': 'macd_dif', 'MACD_DEA': 'macd_dea', 'MACD_BAR': 'macd_bar',
         'RSI14': 'rsi14',
         'BOLL_UPPER': 'boll_upper', 'BOLL_MIDDLE': 'boll_middle', 'BOLL_LOWER': 'boll_lower',

@@ -134,7 +134,7 @@ class QualityValueFactorStrategy(Strategy):
     ]
 
     def __init__(self, stock_type='auto',
-                 buy_threshold=0.6, sell_threshold=0.4,
+                 buy_threshold=0.55, sell_threshold=0.45,
                  value_weight=0.35, quality_weight=0.30,
                  shareholder_weight=0.15, insider_weight=0.10,
                  volatility_weight=0.10,
