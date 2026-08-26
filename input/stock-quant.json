@@ -1,0 +1,26 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "your_password",
+    "database": "stock_quant"
+  },
+  "composite": {
+    "strategies": ["ma_cross", "ema_cross","macd", "rsi", "bollinger"],
+    "weights": {
+      "ma_cross": 0.15,
+      "ema_cross": 0.15,
+      "macd": 0.2,
+      "kdj": 0.15
+      "rsi": 0.15,
+      "bollinger": 0.1,
+      "quality_value": 0.1
+    },
+    "signal_weight": 0.7,
+    "position_weight": 0.3,
+    "window": 20,
+    "z_buy": 1.5,
+    "z_sell": -1.5
+  }
+}
