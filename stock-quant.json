@@ -6,5 +6,10 @@
         "password": "smit2024",
         "database": "stock_quant",
         "charset": "utf8mb4"
-    }
+    },
+   "composite": {
+       "ma_cross": 0.4,
+       "macd": 0.4,
+       "kdj": 0.2
+   }
 }

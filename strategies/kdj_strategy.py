@@ -79,7 +79,7 @@ class KDJStrategy(Strategy):
         d = kdj['D']
 
         # 初始化信号序列
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 金叉买入：K 上穿 D
         golden_cross = (k.shift(1) <= d.shift(1)) & (k > d)
@@ -87,13 +87,14 @@ class KDJStrategy(Strategy):
         # 死叉卖出：K 下穿 D
         death_cross = (k.shift(1) >= d.shift(1)) & (k < d)
 
-        # 增强级别 1：买入额外要求 close > MA60
+        # 基础版条件 → 弱信号
+        signals[golden_cross] = self.signal_value(1)
+        signals[death_cross] = self.signal_value(-1)
+
+        # 增强级别 1：买入额外要求 close > MA60 → 强信号
         if self.enhance >= 1:
             ma_slow = calc_ma(df, self.ma_slow)
             close = df['close']
-            golden_cross = golden_cross & (close > ma_slow)
-
-        signals[golden_cross] = 1
-        signals[death_cross] = -1
+            signals[golden_cross & (close > ma_slow)] = self.signal_value(1, strong=True)
 
         return signals

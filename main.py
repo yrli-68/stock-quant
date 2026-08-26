@@ -186,7 +186,7 @@ def _run_strategy(strategy_key, df, capital=100000, is_index=False, enhance=0):
     strategy = _build_strategy_instance(strategy_key, strategy_map, enhance)
     signals = strategy.generate_signals(df)
     engine = BacktestEngine(initial_capital=capital)
-    result = engine.run(df, signals)
+    result = engine.run(df, signals, position_style='fraction')
     result['strategy_name'] = strategy_name
     result['strategy_key'] = strategy_key
     result['enhance'] = enhance
@@ -210,7 +210,7 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strate
     signals = strategy.generate_signals(df)
 
     engine = BacktestEngine(initial_capital=capital)
-    result = engine.run(df, signals)
+    result = engine.run(df, signals, position_style='fraction')
 
     risk = risk_report(result['daily_returns'].dropna(), result['equity_curve'])
     result.update(risk)
@@ -348,7 +348,7 @@ def _format_risk_report_rows(risk):
     rows.append(['最大回撤', _safe_pct(risk.get('max_drawdown'))])
     rows.append(['夏普比率', _safe_float(risk.get('sharpe_ratio'))])
     rows.append(['胜率', _safe_pct(risk.get('win_rate'))])
-    rows.append(['总交易次数', str(risk.get('total_trades', 'N/A'))])
+    rows.append(['买入/卖出次数', _fmt_trade_count(risk)])
     rows.append(['盈利因子', _safe_float(risk.get('profit_factor'))])
 
     return rows
@@ -359,27 +359,35 @@ def _get_signal_text(sig_series):
     if sig_series is None or len(sig_series) == 0:
         return 'N/A'
     last_sig = sig_series.iloc[-1] if hasattr(sig_series, 'iloc') else sig_series[-1]
-    sig_map = {1: '买入', -1: '卖出', 0: '观望'}
-    return sig_map.get(int(last_sig), str(last_sig))
+    sig_map = {1.0: '买入', 0.5: '弱买', 0.0: '观望', -0.5: '弱卖', -1.0: '卖出'}
+    return sig_map.get(float(last_sig), str(last_sig))
 
 
 def _get_signal_color(sig_text):
     """获取信号对应的颜色"""
-    return {'买入': 'green', '卖出': 'red', '观望': 'yellow'}.get(sig_text, 'white')
+    return {'买入': 'green', '弱买': 'green', '卖出': 'red', '弱卖': 'red', '观望': 'yellow'}.get(sig_text, 'white')
 
 
-# 信号过滤映射：-f 选项字符 -> 信号值 -> 信号文本
-_FILTER_SIGNAL_MAP = {'b': 1, 's': -1, 'w': 0}
+def _fmt_trade_count(risk, avg_buy=None, avg_sell=None):
+    """格式化买入/卖出次数为 '买入/卖出'（如 2.0/3.2）"""
+    buy = avg_buy if avg_buy is not None else risk.get('buy_count')
+    sell = avg_sell if avg_sell is not None else risk.get('sell_count')
+    if buy is None or sell is None:
+        return str(risk.get('total_trades', 'N/A'))
+    return f'{buy:.1f}/{sell:.1f}'
+
+
+# 信号过滤映射：-f 选项字符 -> 信号文本
 _FILTER_SIGNAL_TEXT = {'b': '买入', 's': '卖出', 'w': '观望'}
 
 
 def _has_actionable_signal(all_signals):
-    """判断是否存在至少一个策略的最新信号不是观望（买/卖）"""
+    """判断是否存在至少一个策略的最新信号不是观望（买/卖/弱买/弱卖）"""
     for sig in all_signals.values():
         if sig is None or len(sig) == 0:
             continue
-        last = int(sig.iloc[-1]) if hasattr(sig, 'iloc') else int(sig[-1])
-        if last in (1, -1):
+        last = float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
+        if last != 0.0:
             return True
     return False
 
@@ -392,7 +400,7 @@ def _get_primary_signal_value(all_signals, all_risks=None):
         all_risks: {策略key: 风险指标dict}，用于选出最佳策略
 
     Returns:
-        int: 主信号值 1/-1/0，无法确定时返回 None
+        float: 主信号值 1/0.5/0/-0.5/-1，无法确定时返回 None
     """
     if not all_signals:
         return None
@@ -407,14 +415,24 @@ def _get_primary_signal_value(all_signals, all_risks=None):
     sig = all_signals.get(sk)
     if sig is None or len(sig) == 0:
         return None
-    return int(sig.iloc[-1]) if hasattr(sig, 'iloc') else int(sig[-1])
+    return float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
 
 
 def _match_filter(filter_signal, all_signals, all_risks=None):
-    """判断股票是否满足 -f 信号过滤条件（未设置过滤时恒为 True）"""
+    """判断股票是否满足 -f 信号过滤条件（未设置过滤时恒为 True）
+
+    b=买入(强买1/弱买0.5)，s=卖出(强卖-1/弱卖-0.5)，w=观望(0)。
+    """
     if not filter_signal:
         return True
-    return _get_primary_signal_value(all_signals, all_risks) == _FILTER_SIGNAL_MAP[filter_signal]
+    val = _get_primary_signal_value(all_signals, all_risks)
+    if val is None:
+        return False
+    if filter_signal == 'b':
+        return val > 0
+    if filter_signal == 's':
+        return val < 0
+    return val == 0
 
 
 def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index,
@@ -458,7 +476,8 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
             r.get('total_return'),
             r.get('sharpe_ratio'),
             r.get('max_drawdown'),
-            r.get('total_trades'),
+            r.get('buy_count'),
+            r.get('sell_count'),
             r.get('annual_return'),
             r.get('win_rate'),
             r.get('profit_factor'),
@@ -467,11 +486,11 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
     rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
     rank_rows_html = ''
-    for i, (name, tr, sh, dd, nt, ar, wr, pf, sig) in enumerate(rankings, 1):
+    for i, (name, tr, sh, dd, bc, sc, ar, wr, pf, sig) in enumerate(rankings, 1):
         rank_rows_html += f'''<tr>
             <td>{i}</td><td>{name}</td>
             <td>{_safe_pct_html(tr)}</td><td>{_safe_float_html(sh)}</td>
-            <td>{_safe_pct_html(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
+            <td>{_safe_pct_html(dd)}</td><td>{f'{bc or 0:.1f}/{sc or 0:.1f}'}</td>
             <td>{_safe_pct_html(ar)}</td><td>{_safe_pct_html(wr)}</td>
             <td>{_safe_float_html(pf)}</td>
             <td style="font-weight:bold;color:{'#27ae60' if sig == '买入' else '#e74c3c' if sig == '卖出' else '#f39c12'}">{sig}</td>
@@ -501,7 +520,7 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
             ('最大回撤', lambda: _safe_pct_html(risk.get('max_drawdown'))),
             ('夏普比率', lambda: _safe_float_html(risk.get('sharpe_ratio'))),
             ('胜率', lambda: _safe_pct_html(risk.get('win_rate'))),
-            ('总交易次数', lambda: str(risk.get('total_trades', 'N/A'))),
+            ('买入/卖出次数', lambda: _fmt_trade_count(risk)),
             ('盈利因子', lambda: _safe_float_html(risk.get('profit_factor'))),
         ]:
             detail_html += f'<tr><td>{label}</td><td>{func()}</td></tr>'
@@ -556,7 +575,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 
 <h2>策略对比排名</h2>
 <table class="rank">
-<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th></tr>
+<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>买入/卖出次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th></tr>
 {rank_rows_html}
 </table>
 
@@ -752,11 +771,15 @@ def _build_signal_table(all_stock_data, include_all=False):
     def _signal_text(sig_series, th=None):
         if sig_series is None or len(sig_series) == 0:
             return 'N/A'
-        last = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
-        if last == 1:
+        last = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
+        if last == 1.0:
             return '买'
-        if last == -1:
+        if last == 0.5:
+            return '弱买'
+        if last == -1.0:
             return '卖'
+        if last == -0.5:
+            return '弱卖'
         # 观望：附带次日触发涨跌百分比阈值
         if th:
             parts = []
@@ -779,7 +802,7 @@ def _build_signal_table(all_stock_data, include_all=False):
         sigs = d.get('all_signals', {})
         fcs = d.get('forecast_thresholds', {})
         cells = [_signal_text(sigs.get(sk), fcs.get(sk)) for sk in strategy_keys]
-        if not any(c in ('买', '卖') for c in cells):
+        if not any(c in ('买', '卖', '弱买', '弱卖') for c in cells):
             excluded += 1
             if not include_all:
                 continue
@@ -825,8 +848,12 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
     def _signal_cell(text):
         if text == '买':
             return '<td style="color:#e74c3c;font-weight:bold">买</td>'
+        if text == '弱买':
+            return '<td style="color:#e74c3c">弱买</td>'
         if text == '卖':
             return '<td style="color:#27ae60;font-weight:bold">卖</td>'
+        if text == '弱卖':
+            return '<td style="color:#27ae60">弱卖</td>'
         if text == 'N/A':
             return '<td style="color:#000000">N/A</td>'
         if text.startswith('观(') or ('≥' in text or '≤' in text):
@@ -882,23 +909,23 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
                     fc_str = ' / '.join(parts)
             rankings.append((
                 smap[sk], r.get('total_return'), r.get('sharpe_ratio'),
-                r.get('max_drawdown'), r.get('total_trades'),
+                r.get('max_drawdown'), r.get('buy_count'), r.get('sell_count'),
                 _get_signal_text(sigs.get(sk)),
                 fc_str,
             ))
         rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
         rank_rows = ''
-        for i, (name, tr, sh, dd, nt, sg, fc) in enumerate(rankings, 1):
+        for i, (name, tr, sh, dd, bc, sc, sg, fc) in enumerate(rankings, 1):
             rank_rows += f'''<tr>
                 <td>{i}</td><td>{name}</td>
                 <td>{_safe_pct(tr)}</td><td>{_safe_float(sh)}</td>
-                <td>{_safe_pct(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
+                <td>{_safe_pct(dd)}</td><td>{f'{bc or 0:.1f}/{sc or 0:.1f}'}</td>
                 <td style="font-weight:bold;color:{'#27ae60' if sg == '买入' else '#e74c3c' if sg == '卖出' else '#f39c12'}">{sg}</td>
                 <td>{fc}</td>
             </tr>'''
         detail_sections += f'''<table>
-            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th><th>次日触发价位</th></tr>
+            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>买入/卖出次数</th><th>最新信号</th><th>次日触发价位</th></tr>
             {rank_rows}
         </table>'''
 
@@ -920,7 +947,8 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
     from collections import defaultdict
     strategy_all_returns = defaultdict(list)
     strategy_all_drawdowns = defaultdict(list)
-    strategy_all_trades = defaultdict(list)
+    strategy_all_buys = defaultdict(list)
+    strategy_all_sells = defaultdict(list)
     for d in all_stock_data:
         smap = d['strategy_map']
         risks = d.get('all_risks', {})
@@ -929,13 +957,16 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
             name = smap[sk]
             tr = r.get('total_return')
             dd = r.get('max_drawdown')
-            tt = r.get('total_trades')
+            bc = r.get('buy_count')
+            sc = r.get('sell_count')
             if tr is not None:
                 strategy_all_returns[name].append(tr)
             if dd is not None:
                 strategy_all_drawdowns[name].append(dd)
-            if tt is not None:
-                strategy_all_trades[name].append(tt)
+            if bc is not None:
+                strategy_all_buys[name].append(bc)
+            if sc is not None:
+                strategy_all_sells[name].append(sc)
 
     strategy_avg = []
     for name, rets in strategy_all_returns.items():
@@ -943,14 +974,19 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
         wr = sum(1 for r in rets if r > 0) / len(rets) * 100
         dds = strategy_all_drawdowns.get(name, [])
         avg_dd = sum(dds) / len(dds) if dds else None
-        trades = strategy_all_trades.get(name, [])
-        avg_trades = sum(trades) / len(trades) if trades else None
-        strategy_avg.append((name, avg, wr, max(rets), min(rets), avg_dd, avg_trades))
+        buys = strategy_all_buys.get(name, [])
+        sells = strategy_all_sells.get(name, [])
+        avg_buy = sum(buys) / len(buys) if buys else None
+        avg_sell = sum(sells) / len(sells) if sells else None
+        strategy_avg.append((name, avg, wr, max(rets), min(rets), avg_dd, avg_buy, avg_sell))
     strategy_avg.sort(key=lambda x: x[1], reverse=True)
 
-    strategy_rank_html = '<table><tr><th>排名</th><th>策略</th><th>平均收益率</th><th>正收益占比</th><th>最高</th><th>最低</th><th>最大回撤</th><th>平均交易次数</th></tr>'
-    for i, (name, avg, wr, mx, mn, avg_dd, avg_trades) in enumerate(strategy_avg, 1):
-        trades_str = f'{avg_trades:.1f}' if avg_trades is not None else 'N/A'
+    strategy_rank_html = '<table><tr><th>排名</th><th>策略</th><th>平均收益率</th><th>正收益占比</th><th>最高</th><th>最低</th><th>最大回撤</th><th>平均买入/卖出次数</th></tr>'
+    for i, (name, avg, wr, mx, mn, avg_dd, avg_buy, avg_sell) in enumerate(strategy_avg, 1):
+        if avg_buy is not None and avg_sell is not None:
+            trades_str = f'{avg_buy:.1f}/{avg_sell:.1f}'
+        else:
+            trades_str = 'N/A'
         strategy_rank_html += f'<tr><td>{i}</td><td>{name}</td><td>{_safe_pct(avg)}</td><td>{wr:.0f}%</td><td>{_safe_pct(mx)}</td><td>{_safe_pct(mn)}</td><td>{_safe_pct(avg_dd)}</td><td>{trades_str}</td></tr>'
     strategy_rank_html += '</table>'
 
@@ -1318,7 +1354,7 @@ def _signal_value_at_forecast(df, strategy, next_date, price):
     sig = strategy.generate_signals(df2)
     if sig is None or len(sig) == 0:
         return None
-    return int(sig.iloc[-1]) if hasattr(sig, 'iloc') else int(sig[-1])
+    return float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
 
 
 def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1, depth=5, enhance=0):
@@ -1327,8 +1363,8 @@ def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1
     1) 在 df 末尾追加次日K线（open=high=low=close=c）；
     2) 候选区间 [today_close*(1-k), today_close*(1+k)]，k 取 0.1；
     3) 用二分法（递归 depth=5 次）找：
-         - 买入阈值：最小的 c 使次日信号为 1
-         - 卖出阈值：最大的 c 使次日信号为 -1
+         - 买入阈值：最小的 c 使次日信号 > 0
+         - 卖出阈值：最大的 c 使次日信号 < 0
     4) open/high/low 均取 c。
 
     Returns:
@@ -1351,26 +1387,26 @@ def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1
         def _signal_at(c):
             return _signal_value_at_forecast(df, strategy, next_date, c)
 
-        # 二分查找买入阈值（递归 depth 次）：找使信号==1 的最小 c
+        # 二分查找买入阈值（递归 depth 次）：找使信号>0 的最小 c
         def _find_buy(l, r, depth):
             if depth <= 0:
                 return None
             mid = (l + r) / 2
             sv = _signal_at(mid)
-            if sv == 1:
+            if sv is not None and sv > 0:
                 # 尝试更小值
                 smaller = _find_buy(l, mid, depth - 1)
                 return smaller if smaller is not None else mid
             else:
                 return _find_buy(mid, r, depth - 1)
 
-        # 二分查找卖出阈值（递归 depth 次）：找使信号==-1 的最大 c
+        # 二分查找卖出阈值（递归 depth 次）：找使信号<0 的最大 c
         def _find_sell(l, r, depth):
             if depth <= 0:
                 return None
             mid = (l + r) / 2
             sv = _signal_at(mid)
-            if sv == -1:
+            if sv is not None and sv < 0:
                 larger = _find_sell(mid, r, depth - 1)
                 return larger if larger is not None else mid
             else:
@@ -1400,7 +1436,7 @@ def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--output-file', '-of', default=None, help='指定HTML报告文件名，默认自动生成')
-@click.option('--threads', '-x', default=4, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认4）')
+@click.option('--threads', '-x', default=5, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认5）')
 @click.option('--db', '-db', default=0, type=int, help='数据库缓存模式 [0=不读不写(默认)|1=只读缓存不写|2=不读缓存走网络覆盖写]')
 @click.option('--mode', '-m', default=0, type=int, help='分析模式 [0=常规(默认)|1=资金利用最大化轮动选股|2=多持仓资金利用最大化|3=多持仓强化(买卖信号与选股优化)|4=多持仓强化(趋势择股卖出)]')
 @click.option('--filter', '-f', 'filter_signal', default=None, type=click.Choice(['b', 's', 'w']), help='信号过滤，仅输出符合指定信号的股票报告 [b=买入|s=卖出|w=观望]')
@@ -1813,7 +1849,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 sig = all_signals.get(sk)
                 if sig is None or len(sig) == 0:
                     continue
-                last_sig = int(sig.iloc[-1]) if hasattr(sig, 'iloc') else int(sig[-1])
+                last_sig = float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
                 if last_sig != 0:
                     continue
                 th = _compute_forecast_thresholds(df, sk, strategy_map, end_date, enhance=strategy_enhance.get(sk, 0))
@@ -1908,19 +1944,20 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 rank_total_return = all_risks[sk].get('total_return')
                 rank_sharpe = all_risks[sk].get('sharpe_ratio')
                 rank_drawdown = all_risks[sk].get('max_drawdown')
-                rank_trades = all_risks[sk].get('total_trades')
+                rank_buy = all_risks[sk].get('buy_count')
+                rank_sell = all_risks[sk].get('sell_count')
                 rank_signal = _get_signal_text(all_signals.get(sk))
                 rankings.append((strategy_map[sk][0], rank_total_return, rank_sharpe,
-                                 rank_drawdown, rank_trades, rank_signal))
+                                 rank_drawdown, rank_buy, rank_sell, rank_signal))
             rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
-            headers = ['排名', '策略', '总收益率', '夏普比率', '最大回撤', '交易次数', '最新信号']
+            headers = ['排名', '策略', '总收益率', '夏普比率', '最大回撤', '买入/卖出次数', '最新信号']
             table_rows = []
-            for i, (name, total_ret, sharpe, drawdown, trades, signal) in enumerate(rankings, 1):
+            for i, (name, total_ret, sharpe, drawdown, buy_c, sell_c, signal) in enumerate(rankings, 1):
                 ret_str = f'{total_ret * 100:.2f}%' if total_ret is not None else 'N/A'
                 shp_str = f'{sharpe:.2f}' if sharpe is not None else 'N/A'
                 dd_str = f'{drawdown * 100:.2f}%' if drawdown is not None else 'N/A'
-                tr_str = str(int(trades)) if trades is not None else 'N/A'
+                tr_str = f'{buy_c or 0:.1f}/{sell_c or 0:.1f}'
                 table_rows.append([i, name, ret_str, shp_str, dd_str, tr_str, signal])
             _print_table(headers, table_rows)
 
@@ -2088,7 +2125,7 @@ def _run_rotation_analysis(symbols, start, end, strategy, capital, output, outpu
         cleared_list = []
         for symbol in list(positions.keys()):
             df, sig = stock_data[symbol]
-            if date in df.index and int(sig.loc[date]) == -1:
+            if date in df.index and sig.loc[date] < 0:
                 pos = positions[symbol]
                 price = float(df['close'].loc[date])
                 amount = pos['shares'] * price
@@ -2111,7 +2148,7 @@ def _run_rotation_analysis(symbols, start, end, strategy, capital, output, outpu
             if symbol not in stock_data or symbol in positions:
                 continue
             df, sig = stock_data[symbol]
-            if date in df.index and int(sig.loc[date]) == 1:
+            if date in df.index and sig.loc[date] > 0:
                 price = float(df['close'].loc[date])
                 # 剩余资金不足时，若有持仓权益 > 总资金/3，卖出该持仓的一半释放资金
                 if cash < total / 10.0:
@@ -2363,7 +2400,7 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
             if symbol not in stock_data or symbol not in positions:
                 continue
             df, sig = stock_data[symbol]
-            if date in df.index and int(sig.loc[date]) == -1:
+            if date in df.index and sig.loc[date] < 0:
                 pos = positions[symbol]
                 cur_price = _close_price(symbol, date)
                 amount = pos['shares'] * cur_price
@@ -2383,7 +2420,7 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
             if symbol not in stock_data:
                 continue
             df, sig = stock_data[symbol]
-            if date in df.index and int(sig.loc[date]) == 1:
+            if date in df.index and sig.loc[date] > 0:
                 buy_symbol = symbol
                 buy_price = float(df['close'].loc[date])
                 break
@@ -2781,11 +2818,11 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
         result = _run_strategy(strategy, df, capital=capital, enhance=enhance)
         risk = result  # 结果已包含风险指标
 
-        # 取最新信号值（1=买入, -1=卖出, 0=观望）
+        # 取最新信号值（1=强买, 0.5=弱买, 0=观望, -0.5=弱卖, -1=强卖）
         sig_series = result.get('signals')
         signal_value = None
         if sig_series is not None and len(sig_series) > 0:
-            signal_value = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
+            signal_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
 
         if signal_value is None:
             return None
@@ -2807,6 +2844,8 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
             'max_dd': risk.get('max_drawdown'),
             'win_rate': risk.get('win_rate'),
             'trades': risk.get('total_trades'),
+            'buy_count': risk.get('buy_count'),
+            'sell_count': risk.get('sell_count'),
         }
     except Exception:
         return None
@@ -2841,7 +2880,7 @@ def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=No
                 result = _run_strategy(sk, df, capital=capital, enhance=strat_enhance.get(sk, 0))
                 sig_series = result.get('signals')
                 if sig_series is not None and len(sig_series) > 0:
-                    v = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
+                    v = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
                 else:
                     v = None
                 sig_map[sk] = v
@@ -2896,7 +2935,7 @@ def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None)
 @click.option('--top', '-t', default=10, type=click.IntRange(1, 100), help='筛选排名前N只股票 -tN（N=1~100，默认10）')
 @click.option('--offset', '-o', default=0, type=click.IntRange(0, 1000000), help='从获取到的股票中第N条记录开始分析 -oN（N=0起始，默认0=第一条）')
 @click.option('--min-volume', default=None, type=float, help='最小成交量过滤')
-@click.option('--threads', '-x', default=4, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认4）')
+@click.option('--threads', '-x', default=5, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认5）')
 @click.option('--forecast', is_flag=True, default=False, help='预测次日触发买卖信号的收盘价阈值（不指定则不预测）')
 def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast):
     """股票筛选：从给定股票集中，重点输出符合要求或最佳的股票
@@ -3023,8 +3062,12 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast):
                     v = r['signals'].get(sk)
                     if v == 1:
                         cell = '买'
+                    elif v == 0.5:
+                        cell = '弱买'
                     elif v == -1:
                         cell = '卖'
+                    elif v == -0.5:
+                        cell = '弱卖'
                     elif v == 0:
                         th = r.get('forecasts', {}).get(sk)
                         if th:
@@ -3054,15 +3097,19 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast):
             top_results = results[:top]
             _print_section(f'扫描结果 - Top {len(top_results)}')
 
-            headers = ['排名', '代码', '名称', '最新价格', '信号', '总收益率', '夏普比率', '最大回撤', '胜率', '交易次数']
+            headers = ['排名', '代码', '名称', '最新价格', '信号', '总收益率', '夏普比率', '最大回撤', '胜率', '买入/卖出次数']
             table_rows = []
             for i, r in enumerate(top_results, 1):
                 lc = r.get('latest_close')
                 price_str = f'{lc:.2f}' if lc is not None else 'N/A'
                 if r['signal'] == 1:
                     sig_text = '买入'
+                elif r['signal'] == 0.5:
+                    sig_text = '弱买'
                 elif r['signal'] == -1:
                     sig_text = '卖出'
+                elif r['signal'] == -0.5:
+                    sig_text = '弱卖'
                 else:
                     th = r.get('forecast')
                     if th:
@@ -3081,7 +3128,7 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast):
                 shp_str = f'{r["sharpe"]:.2f}' if r['sharpe'] is not None else 'N/A'
                 dd_str = f'{r["max_dd"] * 100:.2f}%' if r['max_dd'] is not None else 'N/A'
                 wr_str = f'{r["win_rate"] * 100:.2f}%' if r['win_rate'] is not None else 'N/A'
-                tr_str = str(r['trades']) if r['trades'] is not None else 'N/A'
+                tr_str = f"{r.get('buy_count') or 0:.1f}/{r.get('sell_count') or 0:.1f}"
                 table_rows.append([i, r['symbol'], name_map.get(r['symbol'], r['symbol']), price_str, sig_text, ret_str, shp_str, dd_str, wr_str, tr_str])
 
             _print_table(headers, table_rows)
@@ -3204,15 +3251,15 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
 
             _print_section('批量回测结果')
 
-            headers = ['代码', '策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '交易次数', '盈利因子', '结束信号']
+            headers = ['代码', '策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '买入/卖出次数', '盈利因子', '结束信号']
             table_rows = []
             for r in batch_results:
                 risk = r['risk']
                 sig_series = risk.get('signals')
                 sig_value = None
                 if sig_series is not None and len(sig_series) > 0:
-                    sig_value = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
-                sig_text = {1: '买入', -1: '卖出', 0: '观望'}.get(sig_value, 'N/A')
+                    sig_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
+                sig_text = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig_value, 'N/A')
                 table_rows.append([
                     r['symbol'],
                     r['strategy'],
@@ -3221,7 +3268,7 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
                     _pct(risk.get('max_drawdown')),
                     _f(risk.get('sharpe_ratio')),
                     _pct(risk.get('win_rate')),
-                    str(risk.get('total_trades', 'N/A')),
+                    _fmt_trade_count(risk),
                     _f(risk.get('profit_factor')),
                     sig_text,
                 ])
@@ -3274,15 +3321,15 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
             def _f(v):
                 return f'{v:.2f}' if v is not None else 'N/A'
 
-            headers = ['策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '交易次数', '盈利因子', '结束信号']
+            headers = ['策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '买入/卖出次数', '盈利因子', '结束信号']
             table_rows = []
             for sk in strat_keys:
                 risk = all_results[sk]
                 sig_series = risk.get('signals')
                 sig_value = None
                 if sig_series is not None and len(sig_series) > 0:
-                    sig_value = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
-                sig_text = {1: '买入', -1: '卖出', 0: '观望'}.get(sig_value, 'N/A')
+                    sig_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
+                sig_text = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig_value, 'N/A')
                 table_rows.append([
                     STRATEGY_MAP[sk][0],
                     _pct(risk.get('total_return')),
@@ -3290,7 +3337,7 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
                     _pct(risk.get('max_drawdown')),
                     _f(risk.get('sharpe_ratio')),
                     _pct(risk.get('win_rate')),
-                    str(risk.get('total_trades', 'N/A')),
+                    _fmt_trade_count(risk),
                     _f(risk.get('profit_factor')),
                     sig_text,
                 ])
@@ -3407,18 +3454,18 @@ def compare_cmd(symbol, start, end, capital, chart):
         # 输出对比表格
         _print_section('策略对比结果')
 
-        headers = ['策略', '结束信号', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '交易次数', '盈利因子']
+        headers = ['策略', '结束信号', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '买入/卖出次数', '盈利因子']
         table_rows = []
         for sk in ALL_STRATEGIES:
             risk = all_risks[sk]
             name = STRATEGY_MAP[sk][0]
 
-            # 结束日期信号值（1=买入, -1=卖出, 0=观望）
+            # 结束日期信号值（1=强买, 0.5=弱买, 0=观望, -0.5=弱卖, -1=强卖）
             sig_series = all_results[sk].get('signals')
             sig_value = None
             if sig_series is not None and len(sig_series) > 0:
-                sig_value = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
-            sig_text = {1: '买入', -1: '卖出', 0: '观望'}.get(sig_value, 'N/A')
+                sig_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
+            sig_text = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig_value, 'N/A')
 
             def _pct(v):
                 return f'{v * 100:.2f}%' if v is not None else 'N/A'
@@ -3434,7 +3481,7 @@ def compare_cmd(symbol, start, end, capital, chart):
                 _pct(risk.get('max_drawdown')),
                 _f(risk.get('sharpe_ratio')),
                 _pct(risk.get('win_rate')),
-                str(risk.get('total_trades', 'N/A')),
+                _fmt_trade_count(risk),
                 _f(risk.get('profit_factor')),
             ])
 
@@ -3446,25 +3493,26 @@ def compare_cmd(symbol, start, end, capital, chart):
         def _end_signal(sk):
             sig_series = all_results[sk].get('signals')
             if sig_series is not None and len(sig_series) > 0:
-                v = int(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else int(sig_series[-1])
+                v = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
                 return v
             return None
 
         rankings = [(STRATEGY_MAP[sk][0], all_risks[sk].get('sharpe_ratio'),
                      all_risks[sk].get('total_return'),
                      all_risks[sk].get('max_drawdown'),
-                     all_risks[sk].get('total_trades'),
+                     all_risks[sk].get('buy_count'),
+                     all_risks[sk].get('sell_count'),
                      _end_signal(sk)) for sk in ALL_STRATEGIES]
         rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
-        headers = ['排名', '策略', '夏普比率', '总收益率', '最大回撤', '交易次数', '结束信号']
+        headers = ['排名', '策略', '夏普比率', '总收益率', '最大回撤', '买入/卖出次数', '结束信号']
         rank_rows = []
-        for i, (name, sharpe, total_ret, drawdown, trades, sig) in enumerate(rankings, 1):
+        for i, (name, sharpe, total_ret, drawdown, buy_c, sell_c, sig) in enumerate(rankings, 1):
             shp_str = f'{sharpe:.2f}' if sharpe is not None else 'N/A'
             ret_str = f'{total_ret * 100:.2f}%' if total_ret is not None else 'N/A'
             dd_str = f'{drawdown * 100:.2f}%' if drawdown is not None else 'N/A'
-            tr_str = str(int(trades)) if trades is not None else 'N/A'
-            sig_str = {1: '买入', -1: '卖出', 0: '观望'}.get(sig, 'N/A')
+            tr_str = f'{buy_c or 0:.1f}/{sell_c or 0:.1f}'
+            sig_str = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig, 'N/A')
             rank_rows.append([i, name, shp_str, ret_str, dd_str, tr_str, sig_str])
         _print_table(headers, rank_rows)
 

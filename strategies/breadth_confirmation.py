@@ -100,7 +100,7 @@ class BreadthConfirmationStrategy(Strategy):
         ma = calc_ma(df, self.ma_period)
 
         # 初始化信号
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         if breadth_data is not None and len(breadth_data) > 0:
             # ---- 主模式：使用涨跌比数据 ----
@@ -112,14 +112,14 @@ class BreadthConfirmationStrategy(Strategy):
                 (breadth > self.breadth_high) &
                 (close > ma)
             )
-            signals[buy_condition] = 1
+            signals[buy_condition] = self.signal_value(1)
 
             # 卖出：涨跌比 < 低阈值 且 价格跌破 MA5
             sell_condition = (
                 (breadth < self.breadth_low) &
                 (close < ma)
             )
-            signals[sell_condition] = -1
+            signals[sell_condition] = self.signal_value(-1)
 
         else:
             # ---- 降级模式：使用成交量比作为替代 ----
@@ -132,13 +132,13 @@ class BreadthConfirmationStrategy(Strategy):
                     (vol_ratio > self.vol_ratio_threshold) &
                     (close > ma)
                 )
-                signals[buy_condition] = 1
+                signals[buy_condition] = self.signal_value(1)
 
                 # 卖出：缩量下跌（量比 < 0.6 且 价格 < MA5）
                 sell_condition = (
                     (vol_ratio < 0.6) &
                     (close < ma)
                 )
-                signals[sell_condition] = -1
+                signals[sell_condition] = self.signal_value(-1)
 
         return signals

@@ -81,7 +81,7 @@ class BollingerStrategy(Strategy):
         close = df['close']
 
         # 初始化信号序列
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 下轨反弹买入：上一期收盘价 <= 下轨，当期收盘价 > 下轨
         # 表示价格触及下轨支撑后开始反弹
@@ -91,17 +91,18 @@ class BollingerStrategy(Strategy):
         # 表示价格触及上轨阻力后开始回落
         sell_signal = (close.shift(1) >= upper.shift(1)) & (close < upper)
 
-        # 增强级别 1：布林带宽度过滤
+        # 基础版条件 → 弱信号
+        signals[buy_signal] = self.signal_value(1)
+        signals[sell_signal] = self.signal_value(-1)
+
+        # 增强级别 1：布林带宽度过滤 → 强信号
         if self.enhance >= 1:
             bbw = (upper - lower) / middle
             bbw_pctl = bbw.rolling(window=self.bbw_lookback).quantile(0.5)
             is_squeeze = bbw <= bbw_pctl * 0.2
             is_extraWide = bbw >= bbw_pctl * 1.2
             bb_filter = ~(is_squeeze | is_extraWide)
-            buy_signal = buy_signal & bb_filter
-            sell_signal = sell_signal & ~is_squeeze
-
-        signals[buy_signal] = 1
-        signals[sell_signal] = -1
+            signals[buy_signal & bb_filter] = self.signal_value(1, strong=True)
+            signals[sell_signal & ~is_squeeze] = self.signal_value(-1, strong=True)
 
         return signals

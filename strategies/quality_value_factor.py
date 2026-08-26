@@ -135,6 +135,7 @@ class QualityValueFactorStrategy(Strategy):
 
     def __init__(self, stock_type='auto',
                  buy_threshold=0.55, sell_threshold=0.45,
+                 enhance_buy_threshold=0.6, enhance_sell_threshold=0.4,
                  value_weight=0.35, quality_weight=0.30,
                  shareholder_weight=0.15, insider_weight=0.10,
                  volatility_weight=0.10,
@@ -143,6 +144,8 @@ class QualityValueFactorStrategy(Strategy):
         self.stock_type = stock_type
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
+        self.enhance_buy_threshold = enhance_buy_threshold
+        self.enhance_sell_threshold = enhance_sell_threshold
         self.value_weight = value_weight
         self.quality_weight = quality_weight
         self.shareholder_weight = shareholder_weight
@@ -856,11 +859,18 @@ class QualityValueFactorStrategy(Strategy):
     # =========================================================================
 
     def _score_to_signal(self, score):
+        # 增强级别：更严格阈值 → 强信号
+        if self.enhance >= 1:
+            if score >= self.enhance_buy_threshold:
+                return self.signal_value(1, strong=True)
+            elif score <= self.enhance_sell_threshold:
+                return self.signal_value(-1, strong=True)
+        # 基础版条件 → 弱信号
         if score >= self.buy_threshold:
-            return 1
+            return self.signal_value(1)
         elif score <= self.sell_threshold:
-            return -1
-        return 0
+            return self.signal_value(-1)
+        return 0.0
 
     def generate_signals(self, df):
         """
@@ -928,7 +938,7 @@ class QualityValueFactorStrategy(Strategy):
             combined.iloc[i] = (vs * vw + qs * qw + ss * sw + ins * iw + vos * vw2) / total_w
 
         # 3. 转换为交易信号
-        signals = pd.Series(0, index=df.index)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
         for i in range(len(df.index)):
             s = combined.iloc[i]
             if pd.notna(s):

@@ -56,8 +56,11 @@ class BacktestEngine:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
             signals (pd.Series): 交易信号序列，1=买入, -1=卖出, 0=持有
             position_style (str): 持仓模式
-                - 'full': 全仓买卖模式，信号为1时全仓买入，信号为-1时全仓卖出
-                - 'fraction': 按信号比例模式，信号值决定仓位比例
+                - 'full': 全仓买卖模式，信号≥0.5时全仓买入，信号≤-0.5时全仓卖出
+                - 'fraction': 按信号比例模式，仓位水平 in_position 为 0~1 浮点数：
+                    弱买(+0.5)/强买(+1) 时 in_position 累加（封顶1）并买入对应比例资金；
+                    弱卖(-0.5)/强卖(-1) 时 in_position 递减（下限0）并卖出对应比例持仓；
+                    in_position<1 时可加仓，in_position>0 时可减仓
 
         Returns:
             dict: 回测结果，包含以下键值：
@@ -97,7 +100,9 @@ class BacktestEngine:
 
         # 交易记录列表
         trades = []
-        in_position = False  # 是否持有仓位
+        buy_count = 0  # 买入执行次数
+        sell_count = 0  # 卖出执行次数
+        in_position = 0.0  # 仓位水平（0~1 浮点数：0=空仓，1=满仓）
         entry_price = 0.0  # 入场价格
         entry_date = None  # 入场日期
         entry_idx = 0  # 入场索引
@@ -117,20 +122,21 @@ class BacktestEngine:
 
             if position_style == 'full':
                 # ---- 全仓买卖模式 ----
-                if signal == 1 and not in_position:
-                    # 买入信号：全仓买入
+                if signal >= 0.5 and in_position < 1.0:
+                    # 买入信号（含弱买/强买）：全仓买入
                     trade_amount = cash * (1 - self.commission)  # 扣除佣金后的可用资金
                     shares = trade_amount / exec_price
                     shares_held = shares
                     cash -= shares * exec_price * (1 + self.commission)
 
-                    in_position = True
+                    in_position = 1.0
+                    buy_count += 1
                     entry_price = exec_price
                     entry_date = df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i
                     entry_idx = i
 
-                elif signal == -1 and in_position:
-                    # 卖出信号：全仓卖出
+                elif signal <= -0.5 and in_position > 0:
+                    # 卖出信号（含弱卖/强卖）：全仓卖出
                     cash += shares_held * exec_price * (1 - self.commission)
 
                     # 记录交易
@@ -148,47 +154,61 @@ class BacktestEngine:
                         'exit_reason': 'signal'
                     })
 
-                    in_position = False
+                    in_position = 0.0
+                    sell_count += 1
                     shares_held = 0.0
 
             elif position_style == 'fraction':
-                # ---- 按信号比例模式 ----
-                if signal > 0 and not in_position:
-                    # 买入：按信号强度建仓
-                    target_value = cash * signal
+                # ---- 按信号比例模式：in_position 为 0~1 的仓位水平 ----
+                if signal > 0 and in_position < 1.0:
+                    # 买入：仓位水平按信号强度累加（弱买 +0.5 / 强买 +1），封顶 1
+                    increment = min(abs(signal), 1.0 - in_position)
+                    target_value = cash * increment
                     trade_amount = target_value * (1 - self.commission)
                     shares = trade_amount / exec_price
-                    shares_held = shares
+                    shares_held += shares
                     cash -= shares * exec_price * (1 + self.commission)
 
-                    in_position = True
-                    entry_price = exec_price
-                    entry_date = df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i
-                    entry_idx = i
+                    if in_position == 0.0:
+                        # 空仓首次建仓，记录入场信息
+                        entry_price = exec_price
+                        entry_date = df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i
+                        entry_idx = i
+                    in_position += increment
+                    buy_count += 1
 
-                elif signal < 0 and in_position:
-                    # 卖出：平仓
-                    cash += shares_held * exec_price * (1 - self.commission)
+                elif signal < 0 and in_position > 0:
+                    # 卖出：仓位水平按信号强度递减（弱卖 -0.5 / 强卖 -1），下限 0
+                    decrement = min(abs(signal), in_position)
+                    sell_fraction = min(1.0, decrement / in_position)
+                    shares_to_sell = shares_held * sell_fraction
+                    cash += shares_to_sell * exec_price * (1 - self.commission)
+                    shares_held -= shares_to_sell
 
-                    trade_return = (exec_price - entry_price) / entry_price
-                    holding_days = i - entry_idx
+                    in_position -= decrement
+                    sell_count += 1
 
-                    trades.append({
-                        'entry_date': entry_date,
-                        'exit_date': df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i,
-                        'entry_price': entry_price,
-                        'exit_price': exec_price,
-                        'position': shares_held,
-                        'return': trade_return,
-                        'holding_days': holding_days,
-                        'exit_reason': 'signal'
-                    })
+                    if in_position <= 0.0:
+                        # 全部平仓：记录交易
+                        trade_return = (exec_price - entry_price) / entry_price
+                        holding_days = i - entry_idx
 
-                    in_position = False
-                    shares_held = 0.0
+                        trades.append({
+                            'entry_date': entry_date,
+                            'exit_date': df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i,
+                            'entry_price': entry_price,
+                            'exit_price': exec_price,
+                            'position': shares_to_sell,
+                            'return': trade_return,
+                            'holding_days': holding_days,
+                            'exit_reason': 'signal'
+                        })
+
+                        in_position = 0.0
+                        shares_held = 0.0
 
             # 计算当日持仓市值和总权益
-            if in_position:
+            if in_position > 0:
                 position_value[i] = shares_held * price
             else:
                 position_value[i] = 0.0
@@ -196,7 +216,7 @@ class BacktestEngine:
             equity[i] = cash + position_value[i]
 
         # 回测结束时如果仍持有仓位，强制平仓
-        if in_position:
+        if in_position > 0:
             final_price = close[-1] * (1 - self.slippage)
             cash += shares_held * final_price * (1 - self.commission)
 
@@ -249,6 +269,8 @@ class BacktestEngine:
             'sharpe_ratio': metrics['sharpe_ratio'],
             'win_rate': metrics['win_rate'],
             'total_trades': metrics['total_trades'],
+            'buy_count': buy_count,
+            'sell_count': sell_count,
             'profit_trades': metrics['profit_trades'],
             'loss_trades': metrics['loss_trades'],
             'avg_profit': metrics['avg_profit'],

@@ -66,7 +66,7 @@ class MACrossStrategy(Strategy):
         slow_ma = calc_ma(df, self.slow_period)
 
         # 初始化信号序列，全部为 0（持有）
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 检测金叉（快线上穿慢线）：买入信号
         # 条件：上一期快线 <= 上一期慢线，且当期快线 > 当期慢线
@@ -76,13 +76,14 @@ class MACrossStrategy(Strategy):
         # 条件：上一期快线 >= 上一期慢线，且当期快线 < 当期慢线
         death_cross = (fast_ma.shift(1) >= slow_ma.shift(1)) & (fast_ma < slow_ma)
 
-        # 增强级别 1：额外要求短期均线（快线）方向确认
+        # 基础版条件 → 弱信号
+        signals[golden_cross] = self.signal_value(1)
+        signals[death_cross] = self.signal_value(-1)
+
+        # 增强级别 1：额外要求短期均线（快线）方向确认 → 强信号
         if self.enhance >= 1:
             fast_slope = fast_ma.diff()  # 当前快线值 - 上一期值
-            golden_cross = golden_cross & (fast_slope > 0)
-            death_cross = death_cross & (fast_slope < 0)
-
-        signals[golden_cross] = 1
-        signals[death_cross] = -1
+            signals[golden_cross & (fast_slope > 0)] = self.signal_value(1, strong=True)
+            signals[death_cross & (fast_slope < 0)] = self.signal_value(-1, strong=True)
 
         return signals

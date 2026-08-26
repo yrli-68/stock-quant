@@ -32,6 +32,23 @@ class Strategy(ABC):
         self.name = name
         self.enhance = enhance
 
+    def signal_value(self, direction, strong=False):
+        """
+        返回带方向的信号值：
+
+            - 弱信号 (strong=False)：±0.5（符合基础版条件）
+            - 强信号 (strong=True)：±1.0（符合增强版条件）
+
+        Args:
+            direction (int): +1 表示买入方向，-1 表示卖出方向
+            strong (bool): True 返回强信号 ±1.0，False 返回弱信号 ±0.5
+
+        Returns:
+            float: 信号值（±0.5 或 ±1.0）
+        """
+        magnitude = 1.0 if strong else 0.5
+        return magnitude * direction
+
     @abstractmethod
     def generate_signals(self, df):
         """
@@ -45,9 +62,11 @@ class Strategy(ABC):
 
         Returns:
             pd.Series: 交易信号序列，索引与 df 对齐
-                       1  = 买入信号（做多）
-                       -1 = 卖出信号（平仓/做空）
-                       0  = 持有（不操作）
+                        1   = 强买入（做多）
+                        0.5 = 弱买入
+                        0   = 持有（不操作）
+                       -0.5 = 弱卖出
+                       -1   = 强卖出（平仓/做空）
         """
         pass
 
@@ -55,8 +74,8 @@ class Strategy(ABC):
         """
         根据信号计算持仓状态
 
-        将交易信号转换为持仓状态序列。默认实现为：信号1转为持仓1，
-        信号-1转为持仓0，信号0保持前一日持仓状态。
+        将交易信号转换为持仓状态序列。默认实现为：买入信号(>0)转为持仓1，
+        卖出信号(<0)转为持仓0，其余(0)保持前一日持仓状态。
 
         Args:
             df (pd.DataFrame): 行情数据
@@ -68,6 +87,9 @@ class Strategy(ABC):
                        0 = 空仓
         """
         # 将信号转换为持仓：买入信号=1，卖出信号=0，其他信号保持前值
-        position = signals.replace(-1, 0).replace(0, np.nan)
+        position = signals.copy()
+        position[position > 0] = 1
+        position[position < 0] = 0
+        position = position.replace(0, np.nan)
         position = position.fillna(method='ffill').fillna(0).astype(int)
         return position

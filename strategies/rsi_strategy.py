@@ -65,16 +65,16 @@ class RSIStrategy(Strategy):
         rsi = calc_rsi(df, period=self.period)
 
         # 初始化信号序列
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 超卖反弹买入：上一期 RSI < 超卖阈值，当期 RSI > 超卖阈值
         # 即 RSI 从超卖区域向上突破超卖线
         buy_signal = (rsi.shift(1) < self.oversold) & (rsi > self.oversold)
-        signals[buy_signal] = 1
+        signals[buy_signal] = self.signal_value(1)
 
         # 超买回落卖出：上一期 RSI > 超买阈值，当期 RSI < 超买阈值
         # 即 RSI 从超买区域向下突破超买线
         sell_signal = (rsi.shift(1) > self.overbought) & (rsi < self.overbought)
-        signals[sell_signal] = -1
+        signals[sell_signal] = self.signal_value(-1)
 
         return signals

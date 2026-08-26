@@ -100,7 +100,7 @@ class VolatilityTimingStrategy(Strategy):
         ma = calc_ma(df, self.ma_period)
 
         # 初始化信号
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 买入信号：低波动且价格突破布林上轨
         # 条件：上一期波动率 < 低阈值，当期波动率也 < 低阈值，
@@ -111,7 +111,7 @@ class VolatilityTimingStrategy(Strategy):
             (volatility < self.vol_low) &
             (close > bb_upper)
         )
-        signals[low_vol_breakout] = 1
+        signals[low_vol_breakout] = self.signal_value(1)
 
         # 卖出信号：高波动且价格跌破 MA20
         # 条件：波动率 > 高阈值，且收盘价 < MA20
@@ -119,6 +119,6 @@ class VolatilityTimingStrategy(Strategy):
             (volatility > self.vol_high) &
             (close < ma)
         )
-        signals[high_vol_breakdown] = -1
+        signals[high_vol_breakdown] = self.signal_value(-1)
 
         return signals

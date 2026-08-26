@@ -85,14 +85,14 @@ class MomentumTieredStrategy(Strategy):
         ma_slow = calc_ma(df, self.ma_slow)
 
         # 初始化信号
-        signals = pd.Series(0, index=df.index, dtype=int)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 买入信号：动量 > 0 且 MA20 > MA60（趋势+动量共振）
         buy_condition = (momentum > 0) & (ma_fast > ma_slow)
-        signals[buy_condition] = 1
+        signals[buy_condition] = self.signal_value(1)
 
         # 卖出信号：动量转负（趋势衰竭，无论均线排列如何）
         sell_condition = momentum < 0
-        signals[sell_condition] = -1
+        signals[sell_condition] = self.signal_value(-1)
 
         return signals

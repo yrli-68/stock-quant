@@ -80,6 +80,8 @@ FP_REGULAR, FP_BOLD = _setup_chinese_font()
 # 配色方案：采用柔和的颜色搭配，保证图表美观
 COLOR_UP = '#e74c3c'        # 上涨红色
 COLOR_DOWN = '#2ecc71'      # 下跌绿色
+COLOR_UP_LIGHT = '#f1948a'  # 浅红色（弱买）
+COLOR_DOWN_LIGHT = '#82e0aa'  # 浅绿色（弱卖）
 COLOR_BLUE = '#3498db'      # 蓝色主色调
 COLOR_ORANGE = '#e67e22'    # 橙色
 COLOR_PURPLE = '#9b59b6'    # 紫色
@@ -496,8 +498,8 @@ class ChartGenerator:
                     other_sig.index = pd.to_datetime(other_sig.index)
                 other_aligned = other_sig.loc[other_sig.index.intersection(df_aligned.index)]
 
-                buy_sig = other_aligned[other_aligned == 1]
-                sell_sig = other_aligned[other_aligned == -1]
+                buy_sig = other_aligned[other_aligned > 0]
+                sell_sig = other_aligned[other_aligned < 0]
 
                 if len(buy_sig) > 0:
                     buy_prices = df_aligned.loc[buy_sig.index, 'close']
@@ -513,18 +515,32 @@ class ChartGenerator:
         ax.plot(df_aligned.index, df_aligned['close'], color=COLOR_BLUE, linewidth=1.2, label='收盘价', alpha=0.8)
 
         # 标注买入信号
-        buy_signals = signals_aligned[signals_aligned == 1]
-        sell_signals = signals_aligned[signals_aligned == -1]
+        buy_signals = signals_aligned[signals_aligned > 0]
+        weak_buy_signals = signals_aligned[signals_aligned == 0.5]
+        strong_buy_signals = signals_aligned[signals_aligned == 1]
+        sell_signals = signals_aligned[signals_aligned < 0]
+        weak_sell_signals = signals_aligned[signals_aligned == -0.5]
+        strong_sell_signals = signals_aligned[signals_aligned == -1]
 
-        if len(buy_signals) > 0:
-            buy_prices = df_aligned.loc[buy_signals.index, 'close']
-            ax.scatter(buy_signals.index, buy_prices, color=COLOR_UP, marker='^',
-                       s=75, zorder=5, label=f'买入 ({len(buy_signals)}次)', edgecolors='white', linewidth=0.5)
+        if len(strong_buy_signals) > 0:
+            buy_prices = df_aligned.loc[strong_buy_signals.index, 'close']
+            ax.scatter(strong_buy_signals.index, buy_prices, color=COLOR_UP, marker='^',
+                       s=60, zorder=5, label=f'买入 ({len(strong_buy_signals)}次)', edgecolors='white', linewidth=0.5)
 
-        if len(sell_signals) > 0:
-            sell_prices = df_aligned.loc[sell_signals.index, 'close']
-            ax.scatter(sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
-                       s=75, zorder=5, label=f'卖出 ({len(sell_signals)}次)', edgecolors='white', linewidth=0.5)
+        if len(weak_buy_signals) > 0:
+            buy_prices = df_aligned.loc[weak_buy_signals.index, 'close']
+            ax.scatter(weak_buy_signals.index, buy_prices, facecolors='none', edgecolors=COLOR_UP_LIGHT, marker='^',
+                       s=60, zorder=5, label=f'弱买 ({len(weak_buy_signals)}次)', linewidth=1.2)
+
+        if len(strong_sell_signals) > 0:
+            sell_prices = df_aligned.loc[strong_sell_signals.index, 'close']
+            ax.scatter(strong_sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
+                       s=60, zorder=5, label=f'卖出 ({len(strong_sell_signals)}次)', edgecolors='white', linewidth=0.5)
+
+        if len(weak_sell_signals) > 0:
+            sell_prices = df_aligned.loc[weak_sell_signals.index, 'close']
+            ax.scatter(weak_sell_signals.index, sell_prices, facecolors='none', edgecolors=COLOR_DOWN_LIGHT, marker='v',
+                       s=60, zorder=5, label=f'弱卖 ({len(weak_sell_signals)}次)', linewidth=1.2)
 
         ax.set_title(" ", fontsize=11, fontproperties=FP_BOLD, color=COLOR_DARK)
         ax.set_ylabel('价格', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
@@ -625,12 +641,24 @@ class ChartGenerator:
         if signals is not None and len(signals) > 0:
             buy_val, sell_val = self._indicator_marker_values(df, ind_type)
             if buy_val is not None and sell_val is not None:
-                buy_marker = pd.Series(buy_val, index=df.index).where(signals == 1)
-                sell_marker = pd.Series(sell_val, index=df.index).where(signals == -1)
-                plots.append(mpf.make_addplot(buy_marker, type='scatter', panel=panel,
-                                              marker='^', markersize=90, color=COLOR_UP, secondary_y=False))
-                plots.append(mpf.make_addplot(sell_marker, type='scatter', panel=panel,
-                                              marker='v', markersize=90, color=COLOR_DOWN, secondary_y=False))
+                strong_buy = pd.Series(buy_val, index=df.index).where(signals == 1)
+                weak_buy = pd.Series(buy_val, index=df.index).where(signals == 0.5)
+                strong_sell = pd.Series(sell_val, index=df.index).where(signals == -1)
+                weak_sell = pd.Series(sell_val, index=df.index).where(signals == -0.5)
+                # 强买：实心向上三角；弱买：空心向上三角（浅红）
+                plots.append(mpf.make_addplot(strong_buy, type='scatter', panel=panel,
+                                              marker='^', markersize=72, color=COLOR_UP,
+                                              label='买入', secondary_y=False))
+                plots.append(mpf.make_addplot(weak_buy, type='scatter', panel=panel,
+                                              marker='^', markersize=72, color='none', edgecolors=COLOR_UP_LIGHT,
+                                              linewidths=1.5, label='弱买', secondary_y=False))
+                # 强卖：实心向下三角；弱卖：空心向下三角（浅绿）
+                plots.append(mpf.make_addplot(strong_sell, type='scatter', panel=panel,
+                                              marker='v', markersize=72, color=COLOR_DOWN,
+                                              label='卖出', secondary_y=False))
+                plots.append(mpf.make_addplot(weak_sell, type='scatter', panel=panel,
+                                              marker='v', markersize=72, color='none', edgecolors=COLOR_DOWN_LIGHT,
+                                              linewidths=1.5, label='弱卖', secondary_y=False))
 
         return plots
 
@@ -778,7 +806,7 @@ class ChartGenerator:
         _sig_attrs = getattr(signals, 'attrs', None)
         if not isinstance(signals.index, pd.DatetimeIndex):
             signals.index = pd.to_datetime(signals.index)
-        signals = signals.reindex(df.index).fillna(0).astype(int)
+        signals = signals.reindex(df.index).fillna(0).astype(float)
         if _sig_attrs:
             try:
                 signals.attrs = _sig_attrs
@@ -967,10 +995,10 @@ class ChartGenerator:
             if signals is not None and len(signals) > 0:
                 if not isinstance(signals.index, pd.DatetimeIndex):
                     signals.index = pd.to_datetime(signals.index)
-                signals = signals.reindex(df.index).fillna(0).astype(int)
+                signals = signals.reindex(df.index).fillna(0).astype(float)
                 sd['signals'] = signals
             else:
-                sd['signals'] = pd.Series(0, index=df.index, dtype=int)
+                sd['signals'] = pd.Series(0.0, index=df.index, dtype=float)
             sk = sd.get('key', '')
             ind_plots = self._strategy_indicator_addplots(df, sk, next_panel, signals=sd['signals'])
             if ind_plots:

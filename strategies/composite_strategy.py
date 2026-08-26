@@ -103,13 +103,13 @@ class CompositeStrategy(Strategy):
             weighted_sum += signal.values * weight
 
         # 根据阈值生成最终信号
-        final_signals = pd.Series(0, index=df.index, dtype=int)
+        final_signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 加权信号 > 正阈值 → 买入
-        final_signals[weighted_sum > self.threshold] = 1
+        final_signals[weighted_sum > self.threshold] = self.signal_value(1)
 
         # 加权信号 < 负阈值 → 卖出
-        final_signals[weighted_sum < -self.threshold] = -1
+        final_signals[weighted_sum < -self.threshold] = self.signal_value(-1)
 
         # 附加加权分数曲线与阈值，供图表展示
         final_signals.attrs['weighted_sum'] = pd.Series(weighted_sum, index=df.index)
