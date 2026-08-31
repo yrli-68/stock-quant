@@ -7,3 +7,5 @@ mplfinance>=0.12.10b0
 scipy>=1.10.0
 click>=8.1.0
 tabulate>=0.9.0
+requests>=2.28.0
+PyMySQL>=1.0.0

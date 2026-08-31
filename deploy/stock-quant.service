@@ -1,0 +1,17 @@
+[Unit]
+Description=Stock Quant Analysis Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/abc/myproj/stock-quant
+ExecStart=/home/abc/myproj/stock-quant/venv/bin/python /home/abc/myproj/stock-quant/deploy/service_runner.py
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=SQ_RUN_TIME=1500
+Environment=SQ_STRATEGY=all
+
+[Install]
+WantedBy=default.target

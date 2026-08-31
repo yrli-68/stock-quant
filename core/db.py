@@ -26,7 +26,9 @@ _DB_CONFIG = None
 #   0 = 忽略数据库缓存（纯网络，不读不写）
 #   1 = 读缓存，不写数据库
 #   2 = 不读缓存，直接走网络获取，获取的数据覆盖写入数据库
-_DB_MODE = 1
+# 默认 0（纯网络）：与 CLI 的 -db 缺省一致；未显式 set_db_mode 的命令（scan/backtest/compare）
+# 不会尝试连接数据库，避免无数据库环境下的告警噪声。
+_DB_MODE = 0
 
 
 def set_db_mode(mode: int):
@@ -85,7 +87,10 @@ def _open_connection():
     """建立数据库连接（不含模式判断）"""
     cfg = _load_db_config()
     if not cfg:
-        raise RuntimeError("数据库配置未找到, 请检查 input/stock-quant.json")
+        # 未配置数据库：静默跳过（数据库为可选基础设施，不应报错）
+        logger.debug("未配置数据库配置(input/stock-quant.json)，跳过数据库读写")
+        yield None
+        return
 
     try:
         import pymysql

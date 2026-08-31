@@ -94,6 +94,9 @@ COLOR_GOLD = '#f39c12'      # 金色
 # 多策略配色列表
 STRATEGY_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#e67e22', '#9b59b6', '#1abc9c', '#f39c12', '#34495e']
 
+# 信号点图表中策略因子子图的高度比例（原 1.2，调整为原来的 4/5）
+FACTOR_PANEL_RATIO = 1.2 * 4 / 5
+
 # ============================================================================
 # 图表生成器类
 # ============================================================================
@@ -202,13 +205,13 @@ class ChartGenerator:
 
         # 设置面板比例
         if has_boll and 'RSI' in df.columns:
-            panel_ratios = (3, 1, 1.2, 1.2, 1.2)
+            panel_ratios = (3, 1, FACTOR_PANEL_RATIO, FACTOR_PANEL_RATIO, FACTOR_PANEL_RATIO)
         elif has_boll:
-            panel_ratios = (3, 1, 1.2, 1.2)
+            panel_ratios = (3, 1, FACTOR_PANEL_RATIO, FACTOR_PANEL_RATIO)
         elif 'RSI' in df.columns:
-            panel_ratios = (3, 1, 1.2, 1.2)
+            panel_ratios = (3, 1, FACTOR_PANEL_RATIO, FACTOR_PANEL_RATIO)
         else:
-            panel_ratios = (3, 1, 1.2)
+            panel_ratios = (3, 1, FACTOR_PANEL_RATIO)
 
         # 自定义样式
         mc = mpf.make_marketcolors(
@@ -571,6 +574,7 @@ class ChartGenerator:
         'volatility': 'volatility',
         'breadth': 'volume',
         'quality_value': 'quality_value',
+        'composite': 'composite',
     }
 
     def _strategy_indicator_addplots(self, df, strategy_key, panel, signals=None):
@@ -624,18 +628,42 @@ class ChartGenerator:
                 ratio = df['Volume'] / vol_ma
                 plots.append(mpf.make_addplot(ratio, panel=panel, color=COLOR_BLUE, width=1.0, ylabel='量比', label='量比', secondary_y=False))
         elif ind_type == 'quality_value':
+            z_score = None
             combined = None
             buy_threshold = 0.55
             sell_threshold = 0.45
             if signals is not None and hasattr(signals, 'attrs'):
+                z_score = signals.attrs.get('z_score')
                 combined = signals.attrs.get('combined_score')
-                buy_threshold = getattr(self, 'qv_buy_threshold', 0.55)
-                sell_threshold = getattr(self, 'qv_sell_threshold', 0.45)
-            if combined is not None:
+                buy_threshold = signals.attrs.get('z_buy', 0.55)
+                sell_threshold = signals.attrs.get('z_sell', 0.45)
+            if z_score is not None:
+                z_score = z_score.reindex(df.index)
+                plots.append(mpf.make_addplot(z_score, panel=panel, color=COLOR_BLUE, width=1.1, ylabel='Z分数', label='综合得分Z', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(buy_threshold, index=df.index), panel=panel, color=COLOR_UP, width=0.8, linestyle='--', label='买入阈值', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(sell_threshold, index=df.index), panel=panel, color=COLOR_DOWN, width=0.8, linestyle='--', label='卖出阈值', secondary_y=False))
+            elif combined is not None:
                 combined = combined.reindex(df.index)
                 plots.append(mpf.make_addplot(combined, panel=panel, color=COLOR_BLUE, width=1.1, ylabel='质价分', label='综合得分', secondary_y=False))
                 plots.append(mpf.make_addplot(pd.Series(buy_threshold, index=df.index), panel=panel, color=COLOR_UP, width=0.8, linestyle='--', label='买入阈值', secondary_y=False))
                 plots.append(mpf.make_addplot(pd.Series(sell_threshold, index=df.index), panel=panel, color=COLOR_DOWN, width=0.8, linestyle='--', label='卖出阈值', secondary_y=False))
+        elif ind_type == 'composite':
+            z_score = None
+            z_buy = 1.0
+            z_sell = -1.0
+            if signals is not None and hasattr(signals, 'attrs'):
+                z_score = signals.attrs.get('z_score')
+                z_buy = signals.attrs.get('z_buy', 1.0)
+                z_sell = signals.attrs.get('z_sell', -1.0)
+            if z_score is None:
+                z_score = signals.attrs.get('weighted_sum') if signals is not None and hasattr(signals, 'attrs') else None
+                z_buy = 0.3
+                z_sell = -0.3
+            if z_score is not None:
+                z_score = z_score.reindex(df.index)
+                plots.append(mpf.make_addplot(z_score, panel=panel, color=COLOR_BLUE, width=1.1, ylabel='Z分数', label='Z分数', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(z_buy, index=df.index), panel=panel, color=COLOR_UP, width=0.8, linestyle='--', label='买入阈值', secondary_y=False))
+                plots.append(mpf.make_addplot(pd.Series(z_sell, index=df.index), panel=panel, color=COLOR_DOWN, width=0.8, linestyle='--', label='卖出阈值', secondary_y=False))
 
         # 买卖点标注在指标子图（panel）上，位置依据指标量纲选取
         if signals is not None and len(signals) > 0:
@@ -727,6 +755,8 @@ class ChartGenerator:
         if ind_type == 'volume':
             return 1.0, 0.0
         if ind_type == 'quality_value':
+            return 0.8, 0.2
+        if ind_type == 'composite':
             return 0.8, 0.2
         return None, None
 
@@ -837,7 +867,7 @@ class ChartGenerator:
         has_indicator = bool(ind_plots)
         if has_indicator:
             add_plots.extend(ind_plots)
-            panel_ratios.append(1.2)
+            panel_ratios.append(FACTOR_PANEL_RATIO)
 
         # 权益曲线子图（最后）
         eq_series = None
@@ -1003,7 +1033,7 @@ class ChartGenerator:
             ind_plots = self._strategy_indicator_addplots(df, sk, next_panel, signals=sd['signals'])
             if ind_plots:
                 add_plots.extend(ind_plots)
-                panel_ratios.append(1.2)
+                panel_ratios.append(FACTOR_PANEL_RATIO)
                 indicator_panels.append((next_panel, sk))
                 next_panel += 1
 
@@ -1032,7 +1062,7 @@ class ChartGenerator:
 
         fig, axes = mpf.plot(
             df, type='candle', style=s, volume=True, addplot=add_plots,
-            panel_ratios=tuple(panel_ratios), figsize=(16, 6 + 1.2 * len(indicator_panels)),
+            panel_ratios=tuple(panel_ratios), figsize=(16, 6 + FACTOR_PANEL_RATIO * len(indicator_panels)),
             returnfig=True, warn_too_much_data=len(df) + 1,
             datetime_format='%Y-%m', xrotation=0
         )

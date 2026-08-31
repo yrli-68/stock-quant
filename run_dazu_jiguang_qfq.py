@@ -91,7 +91,7 @@ all_signal_names = {}
 for sk, (sname, s) in stock_strategies.items():
     sig = s.generate_signals(df)
     engine = BacktestEngine(initial_capital=100000)
-    r = engine.run(df, sig)
+    r = engine.run(df, sig, position_style='fraction')
     risk = risk_report(r['daily_returns'].dropna(), r['equity_curve'])
     r.update(risk)
     all_results[sk] = r
@@ -102,7 +102,7 @@ for sk, (sname, s) in stock_strategies.items():
 for sk, (sname, s) in index_strategies.items():
     sig = s.generate_signals(df)
     engine = BacktestEngine(initial_capital=100000)
-    r = engine.run(df, sig)
+    r = engine.run(df, sig, position_style='fraction')
     risk = risk_report(r['daily_returns'].dropna(), r['equity_curve'])
     r.update(risk)
     all_results[sk] = r
@@ -112,7 +112,7 @@ for sk, (sname, s) in index_strategies.items():
 
 sig_all = composite_all.generate_signals(df)
 engine = BacktestEngine(initial_capital=100000)
-r_all = engine.run(df, sig_all)
+r_all = engine.run(df, sig_all, position_style='fraction')
 risk_all = risk_report(r_all['daily_returns'].dropna(), r_all['equity_curve'])
 r_all.update(risk_all)
 all_results['composite_all'] = r_all

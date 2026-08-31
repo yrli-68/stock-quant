@@ -1075,26 +1075,37 @@ class DataFetcher:
         return candidates
 
 
-    def get_stock_list(self) -> pd.DataFrame:
+    def get_stock_list(self, sort_key: str = 'changepercent', max_pages: int = 10) -> pd.DataFrame:
         """
         获取A股股票列表
 
+        Args:
+            sort_key: 排序依据，新浪行情中心支持的字段，如
+                      'changepercent'(涨跌幅) / 'turnoverratio'(换手率) /
+                      'amount'(成交额) / 'mktcap'(总市值) / 'pe'(市盈率)，
+                      默认 'changepercent'
+            max_pages: 最大翻页数（每页 100 条）。默认 10（约前 1000 只）；
+                       取全部市场（约 5000+ 只）时设为较大值（如 60），
+                       翻到空页自动停止
+
         Returns:
-            pd.DataFrame: 包含代码、名称等信息的股票列表
+            pd.DataFrame: 包含代码、名称等信息的股票列表（按 sort_key 降序）
         """
-        logger.info("获取A股股票列表")
+        logger.info("获取A股股票列表: sort_key=%s, max_pages=%d", sort_key, max_pages)
 
         all_stocks = []
         try:
-            for page in range(1, 11):
+            for page in range(1, max_pages + 1):
                 url = (
                     f'http://vip.stock.finance.sina.com.cn/quotes_service/'
                     f'api/json_v2.php/Market_Center.getHQNodeData?'
-                    f'page={page}&num=100&sort=changepercent&asc=0&'
+                    f'page={page}&num=100&sort={sort_key}&asc=0&'
                     f'node=hs_a&symbol=&_s_r_a=auto'
                 )
                 resp = self._session.get(url, timeout=15)
                 data = json.loads(resp.text)
+                if not data:
+                    break
 
                 for item in data:
                     code = item.get('code', '')
@@ -1108,6 +1119,8 @@ class DataFetcher:
                             'volume': float(item.get('volume', 0) or 0),
                             'amount': float(item.get('amount', 0) or 0),
                             'turnover_rate': float(item.get('turnoverratio', 0) or 0),
+                            'mktcap': float(item.get('mktcap', 0) or 0),
+                            'pe': float(item.get('pe', 0) or 0),
                         })
 
             df = pd.DataFrame(all_stocks)

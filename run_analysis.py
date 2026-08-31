@@ -131,7 +131,7 @@ def run_single_strategy(strategy_key, df, capital):
     strategy = create_strategy(strategy_key)
     signals = strategy.generate_signals(df)
     engine = BacktestEngine(initial_capital=capital)
-    result = engine.run(df, signals)
+    result = engine.run(df, signals, position_style='fraction')
     result['strategy_name'] = strategy_name
     result['strategy_key'] = strategy_key
     

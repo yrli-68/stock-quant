@@ -32,8 +32,9 @@
 
 计算逻辑：
     1. 分别计算四个维度的分位数得分（均为 0~1）
-    2. 按配置权重组合加权
-    3. combined ≥ buy_threshold → 买入, combined ≤ sell_threshold → 卖出
+    2. 按配置权重组合加权得到综合得分 combined
+    3. 对 combined 做轻度平滑 + 滚动窗口 Z-score 标准化（z_t = (smooth_t - μ_window) / σ_window）
+    4. z ≥ z_buy(1.0) → 买入, z ≤ z_sell(-1.0) → 卖出, 中间观望（增强级别用更严格 ±2.0 出强信号）
 
 支持四类标的的差异化估值因子权重：
     - 宽基指数：PE-TTM、PB
@@ -139,6 +140,9 @@ class QualityValueFactorStrategy(Strategy):
                  value_weight=0.35, quality_weight=0.30,
                  shareholder_weight=0.15, insider_weight=0.10,
                  volatility_weight=0.10,
+                 score_smooth_window=3, score_z_window=20,
+                 z_buy=1.0, z_sell=-1.0,
+                 z_strong_buy=2.0, z_strong_sell=-2.0,
                  name='QualityValueFactor'):
         super().__init__(name=name)
         self.stock_type = stock_type
@@ -151,6 +155,12 @@ class QualityValueFactorStrategy(Strategy):
         self.shareholder_weight = shareholder_weight
         self.insider_weight = insider_weight
         self.volatility_weight = volatility_weight
+        self.score_smooth_window = score_smooth_window
+        self.score_z_window = score_z_window
+        self.z_buy = z_buy
+        self.z_sell = z_sell
+        self.z_strong_buy = z_strong_buy
+        self.z_strong_sell = z_strong_sell
         self._valuation_cache = {}
         self._financials_cache = {}
         self._shareholder_cache = {}
@@ -858,17 +868,17 @@ class QualityValueFactorStrategy(Strategy):
     # 综合打分 & 信号生成
     # =========================================================================
 
-    def _score_to_signal(self, score):
-        # 增强级别：更严格阈值 → 强信号
+    def _z_to_signal(self, z):
+        # 增强级别：更严格的 Z 值阈值 → 强信号
         if self.enhance >= 1:
-            if score >= self.enhance_buy_threshold:
+            if z >= self.z_strong_buy:
                 return self.signal_value(1, strong=True)
-            elif score <= self.enhance_sell_threshold:
+            elif z <= self.z_strong_sell:
                 return self.signal_value(-1, strong=True)
         # 基础版条件 → 弱信号
-        if score >= self.buy_threshold:
+        if z >= self.z_buy:
             return self.signal_value(1)
-        elif score <= self.sell_threshold:
+        elif z <= self.z_sell:
             return self.signal_value(-1)
         return 0.0
 
@@ -937,14 +947,24 @@ class QualityValueFactorStrategy(Strategy):
 
             combined.iloc[i] = (vs * vw + qs * qw + ss * sw + ins * iw + vos * vw2) / total_w
 
-        # 3. 转换为交易信号
+        # 3. 滚动 Z-score 标准化：先轻度平滑综合得分，再做滚动 Z-score（与综合策略一致）
+        combined_smooth = combined.rolling(self.score_smooth_window, min_periods=1).mean()
+        mu = combined_smooth.rolling(self.score_z_window, min_periods=1).mean()
+        sigma = combined_smooth.rolling(self.score_z_window, min_periods=1).std()
+        z = (combined_smooth - mu) / sigma.where(sigma > 1e-9, np.nan)
+        z = z.fillna(0.0).clip(-3.0, 3.0)
+
+        # 4. 转换为交易信号（基于 Z 值阈值）
         signals = pd.Series(0.0, index=df.index, dtype=float)
         for i in range(len(df.index)):
-            s = combined.iloc[i]
-            if pd.notna(s):
-                signals.iloc[i] = self._score_to_signal(s)
+            zv = z.iloc[i]
+            if pd.notna(zv):
+                signals.iloc[i] = self._z_to_signal(zv)
 
         signals.attrs['stock_type'] = self.STOCK_TYPES.get(stock_type, {}).get('name', '')
         signals.attrs['combined_score'] = combined
+        signals.attrs['z_score'] = z
+        signals.attrs['z_buy'] = self.z_buy
+        signals.attrs['z_sell'] = self.z_sell
 
         return signals

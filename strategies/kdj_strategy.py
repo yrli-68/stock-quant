@@ -64,8 +64,8 @@ class KDJStrategy(Strategy):
             - 其余情况 → 持有(0)
 
         增强级别 1（enhance>=1）时：
-            - 买入额外要求 close > MA60
-            - 卖出条件同基础（死叉）
+            - 买入额外要求 close > MA60 → 强买(1)
+            - 卖出条件同基础（死叉）→ 按增强信号处理，死叉即强卖(-1)
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'high'、'low'、'close' 列
@@ -91,10 +91,11 @@ class KDJStrategy(Strategy):
         signals[golden_cross] = self.signal_value(1)
         signals[death_cross] = self.signal_value(-1)
 
-        # 增强级别 1：买入额外要求 close > MA60 → 强信号
+        # 增强级别 1：买入额外要求 close > MA60 → 强信号；卖出条件与基础一致（死叉）→ 按增强信号处理
         if self.enhance >= 1:
             ma_slow = calc_ma(df, self.ma_slow)
             close = df['close']
             signals[golden_cross & (close > ma_slow)] = self.signal_value(1, strong=True)
+            signals[death_cross] = self.signal_value(-1, strong=True)
 
         return signals

@@ -131,7 +131,7 @@ for i, (code, name, vol) in enumerate(candidates):
                         s = SM[sk]()
                     sig = s.generate_signals(df)
                     e = BacktestEngine(initial_capital=100000)
-                    r = e.run(df, sig)
+                    r = e.run(df, sig, position_style='fraction')
                     results[sk] = r
                 except:
                     pass

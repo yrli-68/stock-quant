@@ -310,7 +310,7 @@ for i, cand in enumerate(selected):
         
         sig_all = composite_all.generate_signals(df)
         engine = BacktestEngine(initial_capital=100000)
-        r_all = engine.run(df, sig_all)
+        r_all = engine.run(df, sig_all, position_style='fraction')
         risk_all = risk_report(r_all['daily_returns'].dropna(), r_all['equity_curve'])
         r_all.update(risk_all)
         
@@ -326,7 +326,7 @@ for i, cand in enumerate(selected):
         for sk, s in {**stock_strategies, **index_strategies}.items():
             sig = s.generate_signals(df)
             e = BacktestEngine(initial_capital=100000)
-            r = e.run(df, sig)
+            r = e.run(df, sig, position_style='fraction')
             strategy_returns[sk] = r.get('total_return', 0) or 0
         cand['strategy_returns'] = strategy_returns
         

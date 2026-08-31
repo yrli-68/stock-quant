@@ -1,4 +1,8 @@
 {
+  "WEBHOOK": {
+    "URL": "https://oapi.dingtalk.com/robot/send?access_token=f9c9cc753feb5fedb3e59bcb15e2282201f1715aeaafab90900eb7b0f2f8d205",
+    "key": "quant"
+  },
   "database": {
     "host": "localhost",
     "port": 3306,
@@ -12,7 +16,7 @@
       "ma_cross": 0.15,
       "ema_cross": 0.15,
       "macd": 0.2,
-      "kdj": 0.15
+      "kdj": 0.15,
       "rsi": 0.15,
       "bollinger": 0.1,
       "quality_value": 0.1

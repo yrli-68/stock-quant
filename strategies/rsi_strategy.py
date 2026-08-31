@@ -29,9 +29,12 @@ class RSIStrategy(Strategy):
         period (int): RSI 计算周期，默认 14
         oversold (float): 超卖阈值，默认 30
         overbought (float): 超买阈值，默认 70
+        enh_oversold (float): 增强级超卖阈值（更深超卖区），默认 25
+        enh_overbought (float): 增强级超买阈值（更深超买区），默认 75
     """
 
-    def __init__(self, period=14, oversold=30, overbought=70, name='RSI'):
+    def __init__(self, period=14, oversold=30, overbought=70,
+                 enh_oversold=25, enh_overbought=75, name='RSI'):
         """
         初始化 RSI 策略
 
@@ -39,12 +42,16 @@ class RSIStrategy(Strategy):
             period (int): RSI 计算周期，默认 14
             oversold (float): 超卖阈值，RSI 低于此值视为超卖，默认 30
             overbought (float): 超买阈值，RSI 高于此值视为超买，默认 70
+            enh_oversold (float): 增强级超卖阈值，默认 25
+            enh_overbought (float): 增强级超买阈值，默认 75
             name (str): 策略名称
         """
         super().__init__(name=name)
         self.period = period
         self.oversold = oversold
         self.overbought = overbought
+        self.enh_oversold = enh_oversold
+        self.enh_overbought = enh_overbought
 
     def generate_signals(self, df):
         """
@@ -54,6 +61,11 @@ class RSIStrategy(Strategy):
             - RSI 从超卖区（< oversold）上穿 oversold 阈值 → 买入(1)
             - RSI 从超买区（> overbought）下穿 overbought 阈值 → 卖出(-1)
             - 其余情况 → 持有(0)
+
+        增强级别 1（enhance>=1）时，改用更深超卖/超买阈值判定（超卖 25、超买 75）：
+            - 买入：RSI 从更超卖区（< 25）上穿 25 → 强买(1)
+            - 卖出：RSI 从更超买区（> 75）下穿 75 → 强卖(-1)
+            增强条件与基础条件不同，因此仅满足基础条件（30/70）时仍出弱信号（±0.5）。
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
@@ -76,5 +88,12 @@ class RSIStrategy(Strategy):
         # 即 RSI 从超买区域向下突破超买线
         sell_signal = (rsi.shift(1) > self.overbought) & (rsi < self.overbought)
         signals[sell_signal] = self.signal_value(-1)
+
+        # 增强级别 1：改用更深超卖/超买阈值（25/75）→ 强信号
+        if self.enhance >= 1:
+            buy_enhanced = (rsi.shift(1) < self.enh_oversold) & (rsi > self.enh_oversold)
+            sell_enhanced = (rsi.shift(1) > self.enh_overbought) & (rsi < self.enh_overbought)
+            signals[buy_enhanced] = self.signal_value(1, strong=True)
+            signals[sell_enhanced] = self.signal_value(-1, strong=True)
 
         return signals

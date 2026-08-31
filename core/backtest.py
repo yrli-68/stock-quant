@@ -45,7 +45,7 @@ class BacktestEngine:
         self.risk_free = 0.03  # 无风险利率，用于夏普比率计算
         self.trading_days = 252  # 年交易日数
 
-    def run(self, df, signals, position_style='full'):
+    def run(self, df, signals, position_style='fraction'):
         """
         执行回测
 

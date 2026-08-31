@@ -46,7 +46,7 @@ def run(sk, df, cap):
     s = mk_strategy(sk)
     sig = s.generate_signals(df)
     e = BacktestEngine(initial_capital=cap)
-    r = e.run(df, sig)
+    r = e.run(df, sig, position_style='fraction')
     r['sname'] = SM[sk][0]
     r['skey'] = sk
     r2 = risk_report(r['daily_returns'].dropna(), r['equity_curve'])

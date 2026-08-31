@@ -55,7 +55,7 @@ def run_strategy(sk, df, capital):
     strategy = create_strategy(sk)
     signals = strategy.generate_signals(df)
     engine = BacktestEngine(initial_capital=capital)
-    result = engine.run(df, signals)
+    result = engine.run(df, signals, position_style='fraction')
     result['strategy_name'] = STRATEGY_MAP[sk][0]
     result['strategy_key'] = sk
     risk = risk_report(result['daily_returns'].dropna(), result['equity_curve'])
