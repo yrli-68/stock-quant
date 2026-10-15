@@ -21,8 +21,8 @@ class MACrossStrategy(Strategy):
     """
     双均线交叉策略
 
-    使用两条不同周期的简单移动平均线（SMA），当快线从下方上穿慢线时
-    产生买入信号，当快线从上方下穿慢线时产生卖出信号。
+    使用两条不同周期的简单移动平均线（SMA），当快线从下方上穿慢线且
+    快线向上（slope>0）时产生买入信号，当快线从上方下穿慢线时产生卖出信号。
 
     Attributes:
         fast_period (int): 快线周期，默认 10
@@ -47,13 +47,12 @@ class MACrossStrategy(Strategy):
         生成双均线交叉交易信号
 
         计算快线和慢线的移动平均，然后检测交叉点：
-            - 金叉：快线上穿慢线（上一期快线 <= 上一期慢线 且 当期快线 > 当期慢线）→ 买入(1)
+            - 金叉：快线上穿慢线（上一期快线 <= 上一期慢线 且 当期快线 > 当期慢线）
+              且 slope(快线) > 0（快线向上）→ 买入(1)
             - 死叉：快线下穿慢线（上一期快线 >= 上一期慢线 且 当期快线 < 当期慢线）→ 卖出(-1)
             - 其余情况 → 持有(0)
 
-        增强级别 1（enhance>=1）时，额外要求短期均线（快线）方向确认：
-            - 金叉还需 slope(快线) > 0（短期均线向上）
-            - 死叉还需 slope(快线) < 0（短期均线向下）
+        本策略不区分增强级别，买入信号已固定包含快线斜率向上确认。
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
@@ -76,14 +75,10 @@ class MACrossStrategy(Strategy):
         # 条件：上一期快线 >= 上一期慢线，且当期快线 < 当期慢线
         death_cross = (fast_ma.shift(1) >= slow_ma.shift(1)) & (fast_ma < slow_ma)
 
-        # 基础版条件 → 弱信号
-        signals[golden_cross] = self.signal_value(1)
-        signals[death_cross] = self.signal_value(-1)
+        # 买入要求快线斜率向上（slope(快线) > 0）
+        fast_slope = fast_ma.diff()  # 当前快线值 - 上一期值
 
-        # 增强级别 1：额外要求短期均线（快线）方向确认 → 强信号
-        if self.enhance >= 1:
-            fast_slope = fast_ma.diff()  # 当前快线值 - 上一期值
-            signals[golden_cross & (fast_slope > 0)] = self.signal_value(1, strong=True)
-            signals[death_cross & (fast_slope < 0)] = self.signal_value(-1, strong=True)
+        signals[golden_cross & (fast_slope > 0)] = self.signal_value(1)
+        signals[death_cross] = self.signal_value(-1)
 
         return signals

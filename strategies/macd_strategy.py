@@ -62,23 +62,21 @@ class MACDStrategy(Strategy):
             - DIF 下穿 DEA → 卖出(-1)
             - 其余情况 → 持有(0)
 
-        增强级别 1（enhance>=1）时：
-            - 买入额外要求 close > MA60 → 强买(1)
-            - 卖出条件同基础（死叉）→ 按增强信号处理，死叉即强卖(-1)
+        增强级别 1（enhance>=1，`-g1 macd`）：金叉分级 + 金叉/死叉次日延续确认
+            - 金叉日（满足 MA60/放量/次日确认等任一条件）→ 买入(1)
+            - 死叉日（满足 MA60/放量/次日确认等任一条件）→ 卖出(-1)
+        （弱买/强买已合并为「买」1，弱卖/强卖已合并为「卖」-1）
 
         Args:
-            df (pd.DataFrame): 行情数据，必须包含 'close' 列
+            df (pd.DataFrame): 行情数据，必须包含 'close' 列（增强级还需 'volume' 列）
 
         Returns:
-            pd.Series: 交易信号序列，索引与 df 对齐
+            pd.Series: 交易信号序列（1/0/-1），索引与 df 对齐
         """
         # 计算 MACD 指标
         macd_df = calc_macd(df, fast=self.fast, slow=self.slow, signal=self.signal)
         dif = macd_df['DIF']
         dea = macd_df['DEA']
-
-        # 初始化信号序列
-        signals = pd.Series(0.0, index=df.index, dtype=float)
 
         # 金叉买入：DIF 上穿 DEA
         # 条件：上一期 DIF <= 上一期 DEA，当期 DIF > 当期 DEA
@@ -87,19 +85,52 @@ class MACDStrategy(Strategy):
             (dif.shift(1) <= dea.shift(1)) &
             (dif > dea)
         )
-        # 死叉卖出：DIF 下穿 DEA（基本与增强一致）
+        # 死叉卖出：DIF 下穿 DEA
         # 条件：上一期 DIF >= 上一期 DEA，当期 DIF < 当期 DEA
         death_cross = (dif.shift(1) >= dea.shift(1)) & (dif < dea)
 
-        # 基础版条件 → 弱信号
-        signals[golden_cross] = self.signal_value(1)
-        signals[death_cross] = self.signal_value(-1)
+        # 基础版（enhance==0）→ 简单金叉/死叉信号
+        if self.enhance < 1:
+            signals = pd.Series(0.0, index=df.index, dtype=float)
+            signals[golden_cross] = self.signal_value(1)     # +1
+            signals[death_cross] = self.signal_value(-1)     # -1
+            return signals
 
-        # 增强级别 1：买入额外要求 close > MA60 → 强信号；卖出条件与基础一致（死叉）→ 按增强信号处理
-        if self.enhance >= 1:
-            ma_slow = calc_ma(df, self.ma_slow)
-            close = df['close']
-            signals[golden_cross & (close > ma_slow)] = self.signal_value(1, strong=True)
-            signals[death_cross] = self.signal_value(-1, strong=True)
+        # ===== 增强级别 1：金叉分级 + 逐日延续确认（逐日顺序计算）=====
+        close = df['close']
+        ma_slow = calc_ma(df, self.ma_slow)
+        if 'volume' in df.columns:
+            vol_ma20 = df['volume'].rolling(20).mean()
+            vol_ok = df['volume'] > vol_ma20
+        else:
+            vol_ok = pd.Series(False, index=df.index)
+        ret = close.pct_change()  # (close-close.shift)/close.shift
+
+        up_ma = close > ma_slow          # 买入确认：站上 MA60
+        down_ma = close < ma_slow        # 卖出确认：跌破 MA60
+
+        # 前一天是否为金叉/死叉（次日延续确认的触发条件）
+        golden_yest = golden_cross.shift(1).fillna(False)
+        death_yest = death_cross.shift(1).fillna(False)
+
+        n = len(df)
+        signals = pd.Series(0.0, index=df.index, dtype=float)
+        for i in range(n):
+            if golden_cross.iloc[i]:
+                signals.iloc[i] = 1.0                       # 买入
+            elif death_cross.iloc[i]:
+                signals.iloc[i] = -1.0                      # 卖出
+            elif golden_yest.iloc[i]:
+                # 金叉次日延续确认 → 买入
+                prev = signals.iloc[i - 1] if i > 0 else 0.0
+                small_chg = ret.iloc[i] < 0.03
+                if small_chg and ((up_ma.iloc[i] and bool(vol_ok.iloc[i])) or prev >= 1.0):
+                    signals.iloc[i] = 1.0
+            elif death_yest.iloc[i]:
+                # 死叉次日延续确认 → 卖出
+                prev = signals.iloc[i - 1] if i > 0 else 0.0
+                small_chg = ret.iloc[i] < 0.03
+                if small_chg and ((down_ma.iloc[i] and bool(vol_ok.iloc[i])) or prev <= -1.0):
+                    signals.iloc[i] = -1.0
 
         return signals

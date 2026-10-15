@@ -37,6 +37,9 @@ from strategies.volatility_timing import VolatilityTimingStrategy
 from strategies.breadth_confirmation import BreadthConfirmationStrategy
 from strategies.composite_strategy import CompositeStrategy
 from strategies.hold_strategy import HoldStrategy
+from strategies.sg1_strategy import SG1Strategy
+from strategies.sg2_strategy import SG2Strategy
+from strategies.sg3_strategy import SG3Strategy
 from visualization.charts import ChartGenerator
 
 # 导入表格格式化库
@@ -54,12 +57,15 @@ warnings.filterwarnings('ignore')
 # ============================================================================
 
 STRATEGY_MAP = {
-    'ma_cross': ('均线', MACrossStrategy),
-    'ema_cross': ('EMA', EMACrossStrategy),
-    'macd': ('MACD', MACDStrategy),
+    'ma1030': ('MA10/30', MACrossStrategy),
+    'ema1030': ('EMA10/30', EMACrossStrategy),
+    'macd1226': ('MACD12/26', MACDStrategy),
     'rsi': ('RSI', RSIStrategy),
     'bollinger': ('BOLL', BollingerStrategy),
     'kdj': ('KDJ', KDJStrategy),
+    'ma310': ('MA3/10', SG1Strategy),
+    'ma520': ('MA5/20', SG2Strategy),
+    'ema520': ('EMA5/20', SG3Strategy),
     'quality_value': ('多因子', QualityValueFactorStrategy),
     'composite': ('综合', CompositeStrategy),
     'hold': ('持有', HoldStrategy),
@@ -71,17 +77,20 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma_cross', 'ema_cross', 'macd', 'rsi', 'bollinger', 'kdj', 'composite', 'hold']
+ALL_STRATEGIES = ['ma1030', 'ema1030', 'macd1226', 'rsi', 'bollinger', 'kdj', 'ma310', 'ma520', 'ema520', 'composite', 'hold']
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 
 # scan 多策略汇总信号表使用的短栏名（仅用于汇总表列头，不影响其它输出）
 _SCAN_SHORT_NAMES = {
-    'ma_cross': '均线',
-    'ema_cross': 'EMA',
-    'macd': 'MACD',
+    'ma1030': 'MA10/30',
+    'ema1030': 'EMA10/30',
+    'macd1226': 'MACD12/26',
     'rsi': 'RSI',
     'bollinger': 'BOLL',
     'kdj': 'KDJ',
+    'ma310': 'MA3/10',
+    'ma520': 'MA5/20',
+    'ema520': 'EMA5/20',
     'quality_value': '多因子',
     'composite': '综合',
     'hold': '持有',
@@ -89,26 +98,32 @@ _SCAN_SHORT_NAMES = {
 
 # ETF/指数基金专用策略（适配低波动、趋势跟随特性）
 ETF_STRATEGY_MAP = {
-    'ma_cross': ('ETF均线', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
-    'ema_cross': ('ETF EMA', lambda: EMACrossStrategy(fast_period=10, slow_period=40, name='ETF EMACross')),
-    'macd': ('ETF MACD', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
+    'ma1030': ('ETF均线', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
+    'ema1030': ('ETF EMA', lambda: EMACrossStrategy(fast_period=10, slow_period=40, name='ETF EMACross')),
+    'macd1226': ('ETF MACD', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
     'rsi': ('ETF RSI', lambda: RSIStrategy(period=14, oversold=35, overbought=65, name='ETF RSI')),
     'bollinger': ('ETF BOLL', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
     'kdj': ('ETF KDJ', lambda: KDJStrategy(n=9, m1=3, m2=3, oversold=20, overbought=80, name='ETF KDJ')),
+    'ma310': ('ETF SG1', lambda: SG1Strategy(name='ETF SG1')),
+    'ma520': ('ETF SG2', lambda: SG2Strategy(name='ETF SG2')),
+    'ema520': ('ETF SG3', lambda: SG3Strategy(name='ETF SG3')),
     'quality_value': ('ETF多因子', lambda: QualityValueFactorStrategy(stock_type='auto', name='ETF QualityValue')),
     'composite': ('ETF综合', lambda: CompositeStrategy([], name='ETF Composite')),
     'hold': ('ETF持有', lambda: HoldStrategy(name='ETF Hold')),
 }
-ALL_ETF_STRATEGIES = ['ma_cross', 'ema_cross', 'macd', 'rsi', 'bollinger', 'kdj', 'quality_value', 'composite', 'hold']
+ALL_ETF_STRATEGIES = ['ma1030', 'ema1030', 'macd1226', 'rsi', 'bollinger', 'kdj', 'ma310', 'ma520', 'ema520', 'quality_value', 'composite', 'hold']
 
 # 策略 key 到类的映射
 _STRATEGY_CLASS_MAP = {
-    'ma_cross': MACrossStrategy,
-    'ema_cross': EMACrossStrategy,
-    'macd': MACDStrategy,
+    'ma1030': MACrossStrategy,
+    'ema1030': EMACrossStrategy,
+    'macd1226': MACDStrategy,
     'rsi': RSIStrategy,
     'bollinger': BollingerStrategy,
     'kdj': KDJStrategy,
+    'ma310': SG1Strategy,
+    'ma520': SG2Strategy,
+    'ema520': SG3Strategy,
     'quality_value': QualityValueFactorStrategy,
     'composite': CompositeStrategy,
     'hold': HoldStrategy,
@@ -132,6 +147,18 @@ def _load_quant_config():
     except Exception:
         _quant_config = {}
     return _quant_config
+
+
+def _get_position_style():
+    """从 stock-quant.json 读取回测持仓模式（position_style），默认 'full'
+
+    合法值：'full'（全仓）/ 'fraction'（按信号比例），非法时回退默认并告警。
+    """
+    style = str(_load_quant_config().get('position_style', 'full')).strip().lower()
+    if style not in ('full', 'fraction'):
+        click.echo(click.style(f'  警告: 配置 position_style="{style}" 非法，使用默认 full', fg='yellow'))
+        style = 'full'
+    return style
 
 
 # 判断是否为 ETF/指数基金（5开头上海ETF / 159开头深圳ETF / 16开头LOF等）
@@ -193,14 +220,14 @@ def _print_metric(name, value, color='white'):
 def _run_strategy(strategy_key, df, capital=100000, is_index=False, enhance=0):
     """运行单个策略并返回回测结果"""
     strategy_map = INDEX_STRATEGY_MAP if is_index else STRATEGY_MAP
-    strategy_name, strategy_class = strategy_map[strategy_key]
+    strategy_name = _strat_label(strategy_key, strategy_map)
     strategy = _build_strategy_instance(strategy_key, strategy_map, enhance)
     signals = _mask_signal_warmup(strategy.generate_signals(df))
     engine = BacktestEngine(initial_capital=capital)
-    result = engine.run(df, signals, position_style='fraction')
+    result = engine.run(df, signals, position_style=_get_position_style())
     result['strategy_name'] = strategy_name
     result['strategy_key'] = strategy_key
-    result['enhance'] = enhance
+    result['enhance'] = _strat_enh(strategy_key) if enhance == 0 else enhance
     result['signals'] = signals
 
     # 运行风险分析
@@ -215,13 +242,13 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strate
     """运行单个策略的完整分析流程（图表在外部统一生成）"""
     if strategy_map is None:
         strategy_map = STRATEGY_MAP
-    strategy_name, strategy_class = strategy_map[strategy_key]
+    strategy_name = _strat_label(strategy_key, strategy_map)
     strategy = _build_strategy_instance(strategy_key, strategy_map, enhance)
 
     signals = _mask_signal_warmup(strategy.generate_signals(df))
 
     engine = BacktestEngine(initial_capital=capital)
-    result = engine.run(df, signals, position_style='fraction')
+    result = engine.run(df, signals, position_style=_get_position_style())
 
     risk = risk_report(result['daily_returns'].dropna(), result['equity_curve'])
     result.update(risk)
@@ -231,6 +258,9 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strate
 
 # 未指定 -st 时的默认分析时段长度（日历天，start = end 前推 180 天）
 _DEFAULT_PERIOD_DAYS = 180
+
+# backtest 命令默认回测时段长度（日历天，start = end 前推 730 天）
+_BACKTEST_PERIOD_DAYS = 730
 
 # 数据获取预热天数：在 start 前再多取 N 天，供因子/指标正确计算
 _ANALYSIS_WARMUP_DAYS = 90
@@ -248,11 +278,11 @@ def _truncate_analysis_df(df, start_date):
     return df[df.index >= pd.Timestamp(start_date)]
 
 
-def _parse_dates(start, end):
+def _parse_dates(start, end, default_days=_DEFAULT_PERIOD_DAYS):
     """解析日期字符串，返回默认值
 
     - 缺少 -e 时，结束日期默认为今天。
-    - 缺少 -st 时，开始日期默认为结束日期前 _DEFAULT_PERIOD_DAYS(100) 天。
+    - 缺少 -st 时，开始日期默认为结束日期前 default_days 天（默认 _DEFAULT_PERIOD_DAYS）。
     对 start/end 做格式校验并统一为 YYYY-MM-DD，非法时抛出明确错误。
     start/end 输入格式为 YYYYMMDD（如 20240815）。
     """
@@ -275,7 +305,7 @@ def _parse_dates(start, end):
     if start is not None:
         start_date = _normalize_date(start)
     else:
-        start_date = (end_dt - timedelta(days=_DEFAULT_PERIOD_DAYS)).strftime('%Y-%m-%d')
+        start_date = (end_dt - timedelta(days=default_days)).strftime('%Y-%m-%d')
     return start_date, end_date
 
 
@@ -316,13 +346,8 @@ def _calc_sharpe_drawdown(equity_curve):
 
 
 def _build_report_filename(source, end_date, days, strategy, mode, profit=None):
-    """构建报告文件名: source_yyyymmdd_days_strategy_mode_profit.html"""
-    d2 = end_date.replace('-', '') if end_date else datetime.now().strftime('%Y%m%d')
-    strategy_tag = str(strategy).replace('|', '_')
-    parts = [str(source), d2, f'{days}d', strategy_tag, f'm{mode}']
-    if profit is not None:
-        parts.append(str(profit))
-    return '_'.join(parts) + '.html'
+    """构建 analyze 报告文件名: analyze_mmdd_hh.html（月日_小时）"""
+    return f'analyze_{datetime.now().strftime("%m%d_%H")}.html'
 
 
 def _format_cmd_params(symbol, symbol_file, hot, start, end, strategy, is_index,
@@ -378,7 +403,7 @@ def _format_risk_report_rows(risk):
     rows.append(['最大回撤', _safe_pct(risk.get('max_drawdown'))])
     rows.append(['夏普比率', _safe_float(risk.get('sharpe_ratio'))])
     rows.append(['胜率', _safe_pct(risk.get('win_rate'))])
-    rows.append(['买入/卖出次数', _fmt_trade_count(risk)])
+    rows.append(['交易次数', _fmt_trade_count(risk)])
     rows.append(['盈利因子', _safe_float(risk.get('profit_factor'))])
 
     return rows
@@ -389,22 +414,81 @@ def _get_signal_text(sig_series):
     if sig_series is None or len(sig_series) == 0:
         return 'N/A'
     last_sig = sig_series.iloc[-1] if hasattr(sig_series, 'iloc') else sig_series[-1]
-    sig_map = {1.0: '买入', 0.5: '弱买', 0.0: '观望', -0.5: '弱卖', -1.0: '卖出'}
+    sig_map = {1.0: '买入', 0.0: '观望', -1.0: '卖出'}
     return sig_map.get(float(last_sig), str(last_sig))
 
 
 def _get_signal_color(sig_text):
     """获取信号对应的颜色"""
-    return {'买入': 'green', '弱买': 'green', '卖出': 'red', '弱卖': 'red', '观望': 'yellow'}.get(sig_text, 'white')
+    return {'买入': 'green', '买': 'green', '卖出': 'red', '卖': 'red', '观望': 'yellow'}.get(sig_text, 'white')
 
 
-def _fmt_trade_count(risk, avg_buy=None, avg_sell=None):
-    """格式化买入/卖出次数为 '买入/卖出'（如 2.0/3.2）"""
-    buy = avg_buy if avg_buy is not None else risk.get('buy_count')
-    sell = avg_sell if avg_sell is not None else risk.get('sell_count')
-    if buy is None or sell is None:
-        return str(risk.get('total_trades', 'N/A'))
-    return f'{buy:.1f}/{sell:.1f}'
+def _fmt_trade_count(risk, *args, **kwargs):
+    """交易次数（精简为单一数值）"""
+    return str(risk.get('total_trades', 'N/A'))
+
+
+def _signal_reason(strategy_key, signal, enhance=0):
+    """按策略与信号方向给出买卖原因的文字描述（signal: >0 买 / <0 卖）"""
+    base = _strat_base(strategy_key)
+    buy = signal is not None and signal > 0
+    if base in ('ma1030', 'ema1030'):
+        ma = 'EMA' if base == 'ema1030' else 'MA'
+        return f'{ma}快线上穿慢线（金叉）' if buy else f'{ma}快线下穿慢线（死叉）'
+    if base == 'macd1226':
+        return 'DIF 上穿 DEA（金叉）' if buy else 'DIF 下穿 DEA（死叉）'
+    if base == 'rsi':
+        if buy:
+            return f'RSI 上穿 {25 if enhance >= 1 else 30}（超卖反弹）'
+        return f'RSI 下穿 {75 if enhance >= 1 else 70}（超买回落）'
+    if base == 'bollinger':
+        return '跌破下轨后反弹' if buy else '触及上轨后回落'
+    if base == 'kdj':
+        return 'K 上穿 D（金叉）' if buy else 'K 下穿 D（死叉）'
+    if base in ('ma310', 'ma520', 'ema520'):
+        pair = {'ma310': 'MA3/MA10', 'ma520': 'MA5/MA20', 'ema520': 'EMA5/EMA20'}[base]
+        return f'{pair} 快线上穿慢线（金叉）且当日上涨' if buy else f'{pair} 快线下穿慢线（死叉）或回撤止损'
+    if base == 'quality_value':
+        return '综合得分 Z 值≥阈值（买）' if buy else '综合得分 Z 值≤阈值（卖）'
+    if base == 'composite':
+        return '加权信号 Z 值≥阈值（买）' if buy else '加权信号 Z 值≤阈值（卖）'
+    if base == 'hold':
+        return '买入持有'
+    if base == 'momentum':
+        return '动量>0 且均线多头排列' if buy else '动量转负'
+    if base == 'volatility':
+        return '低波动后向上突破' if buy else '高波动且跌破 MA20'
+    if base == 'breadth':
+        return '涨跌比/量比走强' if buy else '涨跌比/量比走弱'
+    return '买入信号' if buy else '卖出信号'
+
+
+def _build_trades_detail_table(trades_df):
+    """由回测交易记录构建「买卖时间与盈亏」明细表，返回 (headers, rows)
+
+    每笔（完整买入→卖出）记录：买入日期/卖出日期/买入价/卖出价/持股数/持仓天数/
+    收益率/盈亏额/退出原因。entry_price 为持仓加权平均成本。
+    """
+    headers = ['买入日期', '卖出日期', '买入价', '卖出价', '持股数', '持仓天数', '收益率', '盈亏额', '退出原因']
+    rows = []
+    if trades_df is None or len(trades_df) == 0:
+        return headers, rows
+    reason_map = {'signal': '信号', 'end': '期末平仓'}
+    for _, t in trades_df.iterrows():
+        ed = t.get('entry_date')
+        xd = t.get('exit_date')
+        ed = ed.strftime('%Y-%m-%d') if hasattr(ed, 'strftime') else str(ed)
+        xd = xd.strftime('%Y-%m-%d') if hasattr(xd, 'strftime') else str(xd)
+        ep = float(t.get('entry_price', 0) or 0)
+        xp = float(t.get('exit_price', 0) or 0)
+        pos = float(t.get('position', 0) or 0)
+        ret = float(t.get('return', 0) or 0)
+        hd = int(t.get('holding_days', 0) or 0)
+        pnl = (xp - ep) * pos
+        reason = reason_map.get(t.get('exit_reason'), t.get('exit_reason'))
+        rows.append([ed, xd, f'{ep:.4f}', f'{xp:.4f}', f'{pos:.0f}',
+                     hd, f'{ret * 100:.2f}%', f'{pnl:,.2f}', reason])
+    return headers, rows
 
 
 # 买卖点分析：忽略时间段最前面 N 天（根数）的信号，统一标注为观望
@@ -432,7 +516,7 @@ _FILTER_SIGNAL_TEXT = {'b': '买入', 's': '卖出', 'w': '观望'}
 
 
 def _has_actionable_signal(all_signals):
-    """判断是否存在至少一个策略的最新信号不是观望（买/卖/弱买/弱卖）"""
+    """判断是否存在至少一个策略的最新信号不是观望（买/卖）"""
     for sig in all_signals.values():
         if sig is None or len(sig) == 0:
             continue
@@ -450,7 +534,7 @@ def _get_primary_signal_value(all_signals, all_risks=None):
         all_risks: {策略key: 风险指标dict}，用于选出最佳策略
 
     Returns:
-        float: 主信号值 1/0.5/0/-0.5/-1，无法确定时返回 None
+        float: 主信号值 1/0/-1，无法确定时返回 None
     """
     if not all_signals:
         return None
@@ -471,7 +555,7 @@ def _get_primary_signal_value(all_signals, all_risks=None):
 def _match_filter(filter_signal, all_signals, all_risks=None):
     """判断股票是否满足 -f 信号过滤条件（未设置过滤时恒为 True）
 
-    b=买入(强买1/弱买0.5)，s=卖出(强卖-1/弱卖-0.5)，w=观望(0)。
+    b=买入(1)，s=卖出(-1)，w=观望(0)。
     """
     if not filter_signal:
         return True
@@ -522,15 +606,17 @@ def _notify_signals(all_stock_data):
 
     第一行（title）：key: |<策略1> |<策略2> |<策略3> ...
     后续行（data）：<股票代码> <股票名称前4字>, |<信号1> |<信号2> |<信号3> ...
-    （如 "quant: |MACD |KDJ |均线 " / "600089 特变, |买 |弱买 |观望 "）
+    （如 "quant: |MACD |KDJ |均线 " / "600089 特变, |买 |卖 |观望 "）
     """
     _, key = _get_webhook_config()
-    sig_text_map = {1.0: '买', 0.5: '弱买', 0: '观望', -1.0: '卖', -0.5: '弱卖'}
+    sig_text_map = {1.0: '买', 0: '观望', -1.0: '卖'}
 
-    # 汇总所有策略（按出现顺序去重）作为列顺序
+    # 汇总所有策略（按出现顺序去重）作为列顺序（持有 hold 为基准对照，不进入通知）
     strategy_keys = []
     for d in all_stock_data:
         for sk in d.get('strategies_to_run', []):
+            if sk == 'hold':
+                continue
             if sk not in strategy_keys:
                 strategy_keys.append(sk)
 
@@ -644,12 +730,11 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
         r = all_risks.get(sk, {})
         sig_text = _get_signal_text(all_signals.get(sk))
         rankings.append((
-            strategy_map[sk][0],
+            _strat_label(sk, strategy_map),
             r.get('total_return'),
             r.get('sharpe_ratio'),
             r.get('max_drawdown'),
-            r.get('buy_count'),
-            r.get('sell_count'),
+            r.get('total_trades'),
             r.get('annual_return'),
             r.get('win_rate'),
             r.get('profit_factor'),
@@ -658,11 +743,11 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
     rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
     rank_rows_html = ''
-    for i, (name, tr, sh, dd, bc, sc, ar, wr, pf, sig) in enumerate(rankings, 1):
+    for i, (name, tr, sh, dd, nt, ar, wr, pf, sig) in enumerate(rankings, 1):
         rank_rows_html += f'''<tr>
             <td>{i}</td><td>{name}</td>
             <td>{_safe_pct_html(tr)}</td><td>{_safe_float_html(sh)}</td>
-            <td>{_safe_pct_html(dd)}</td><td>{f'{bc or 0:.1f}/{sc or 0:.1f}'}</td>
+            <td>{_safe_pct_html(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
             <td>{_safe_pct_html(ar)}</td><td>{_safe_pct_html(wr)}</td>
             <td>{_safe_float_html(pf)}</td>
             <td style="font-weight:bold;color:{'#27ae60' if sig == '买入' else '#e74c3c' if sig == '卖出' else '#f39c12'}">{sig}</td>
@@ -674,7 +759,7 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
     embedded_chart_paths = set()
 
     for sk in strategies_to_run:
-        name = strategy_map[sk][0]
+        name = _strat_label(sk, strategy_map)
         risk = all_risks.get(sk, {})
         charts = all_charts.get(sk, {})
 
@@ -692,7 +777,7 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
             ('最大回撤', lambda: _safe_pct_html(risk.get('max_drawdown'))),
             ('夏普比率', lambda: _safe_float_html(risk.get('sharpe_ratio'))),
             ('胜率', lambda: _safe_pct_html(risk.get('win_rate'))),
-            ('买入/卖出次数', lambda: _fmt_trade_count(risk)),
+            ('交易次数', lambda: _fmt_trade_count(risk)),
             ('盈利因子', lambda: _safe_float_html(risk.get('profit_factor'))),
         ]:
             detail_html += f'<tr><td>{label}</td><td>{func()}</td></tr>'
@@ -747,7 +832,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 
 <h2>策略对比排名</h2>
 <table class="rank">
-<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>买入/卖出次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th></tr>
+<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th></tr>
 {rank_rows_html}
 </table>
 
@@ -815,6 +900,7 @@ def _generate_scan_stock_charts(top_results, strat_keys, name_map, prefix_tag=''
             df, _, _, _ = _apply_realtime_to_df(df, symbol, fetcher, end_date, verbose=False)
             df = add_all_indicators(df)
             df = _truncate_analysis_df(df, start_date)
+            df.attrs['symbol'] = symbol
 
             # 运行各策略，收集信号与权益曲线
             strategies_data = []
@@ -828,7 +914,7 @@ def _generate_scan_stock_charts(top_results, strat_keys, name_map, prefix_tag=''
                         continue
                     strategies_data.append({
                         'key': sk,
-                        'name': STRATEGY_MAP[sk][0],
+                        'name': _strat_label(sk),
                         'signals': signals,
                         'equity_curve': result.get('equity_curve'),
                     })
@@ -911,7 +997,7 @@ tr:nth-child(even) {{ background: #f5f6fa; }}
 </html>'''
 
     if not report_filename:
-        report_filename = f'scan_{dt.now().strftime("%Y%m%d_%H%M%S")}.html'
+        report_filename = f'scan_{dt.now().strftime("%m%d_%H")}.html'
     os.makedirs('report', exist_ok=True)
     report_path = os.path.join('report', report_filename)
     with open(report_path, 'w', encoding='utf-8') as f:
@@ -919,7 +1005,86 @@ tr:nth-child(even) {{ background: #f5f6fa; }}
     return report_path
 
 
-def _build_signal_table(all_stock_data, include_all=False):
+def _img_to_b64(path):
+    """将图片文件转为 base64 data URI，失败返回空串"""
+    import base64
+    if not path or not os.path.exists(path):
+        return ''
+    try:
+        with open(path, 'rb') as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return ''
+
+
+def _generate_backtest_html(symbol_label, start_date, end_date, capital, tables, charts_html='',
+                            report_filename=None):
+    """生成回测结果的 HTML 报告
+
+    Args:
+        symbol_label: 标题（如 "600089 特变电工" 或 "批量回测(5只)"）
+        start_date / end_date: 分析区间
+        capital: 初始资金
+        tables: [(表格标题, headers, rows), ...]
+        charts_html: 已拼接好的图表 <img> 片段（可空）
+        report_filename: 输出文件名（默认自动生成）
+    Returns:
+        报告文件路径
+    """
+    from datetime import datetime as dt
+    report_time = dt.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    tables_html = ''
+    for title, headers, rows in tables:
+        tr = ''
+        for row in rows:
+            cells = ''.join(f'<td>{v}</td>' for v in row)
+            tr += f'<tr>{cells}</tr>\n'
+        th = ''.join(f'<th>{h}</th>' for h in headers)
+        tables_html += f'<h2>{title}</h2><table><tr>{th}</tr>{tr}</table>'
+
+    html = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>回测报告 - {symbol_label}</title>
+<style>
+body {{ font-family: "Microsoft YaHei", sans-serif; margin: 20px; color: #333; }}
+h1 {{ color: #1a5276; }}
+h2 {{ color: #1a5276; border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 30px; }}
+.info {{ color: #666; margin-bottom: 10px; }}
+.info span {{ margin-right: 25px; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 15px; font-size: 14px; }}
+th, td {{ border: 1px solid #ccc; padding: 8px; text-align: center; }}
+th {{ background: #1a5276; color: #fff; }}
+tr:nth-child(even) {{ background: #f5f6fa; }}
+.chart {{ margin: 15px 0; text-align: center; }}
+.chart img {{ max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }}
+</style>
+</head>
+<body>
+<h1>策略回测报告</h1>
+<div class="info">
+    <span><strong>标的:</strong> {symbol_label}</span>
+    <span><strong>区间:</strong> {start_date} ~ {end_date}</span>
+    <span><strong>初始资金:</strong> {capital:,.0f}</span>
+    <span><strong>生成时间:</strong> {report_time}</span>
+</div>
+{tables_html}
+<div class="chart">{charts_html}</div>
+</body>
+</html>'''
+
+    if not report_filename:
+        report_filename = f'backtest_{dt.now().strftime("%m%d_%H")}.html'
+    os.makedirs('report', exist_ok=True)
+    report_path = os.path.join('report', report_filename)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    return report_path
+
+
+def _build_signal_table(all_stock_data, include_all=False, sort_by_signal=False):
     """构建最新信号表数据，返回 (strategy_keys, strategy_names, rows, excluded)
 
     rows 每行为 [股票标签, 最新价格, 各策略最新信号文本(买/卖/-/N/A)...]
@@ -927,6 +1092,8 @@ def _build_signal_table(all_stock_data, include_all=False):
     include_all=True 时列出所有股票（不隐藏全部观望的股票）。
     excluded 为被过滤掉的股票数。
     观望单元格附带次日触发涨跌幅阈值（若启用 --forecast），如 "买≥1%/卖≤-1%"。
+    sort_by_signal=True 时按信号排序：买入信号多的排前面，卖出信号多的排中间，
+    所有策略均为观望的排后面。
     """
     strategy_keys = []
     for d in all_stock_data:
@@ -947,14 +1114,10 @@ def _build_signal_table(all_stock_data, include_all=False):
         if sig_series is None or len(sig_series) == 0:
             return 'N/A'
         last = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
-        if last == 1.0:
+        if last > 0:
             return '买'
-        if last == 0.5:
-            return '弱买'
-        if last == -1.0:
+        if last < 0:
             return '卖'
-        if last == -0.5:
-            return '弱卖'
         # 观望：附带次日触发涨跌百分比阈值
         if th:
             parts = []
@@ -977,11 +1140,26 @@ def _build_signal_table(all_stock_data, include_all=False):
         sigs = d.get('all_signals', {})
         fcs = d.get('forecast_thresholds', {})
         cells = [_signal_text(sigs.get(sk), fcs.get(sk)) for sk in strategy_keys]
-        if not any(c in ('买', '卖', '弱买', '弱卖') for c in cells):
+        if not any(c in ('买', '卖') for c in cells):
             excluded += 1
             if not include_all:
                 continue
         rows.append([label, price_str] + cells)
+
+    if sort_by_signal:
+        def _sort_key(row):
+            cells = row[2:]
+            buy = sum(1 for c in cells if c == '买')
+            sell = sum(1 for c in cells if c == '卖')
+            if buy > 0:
+                group = 0  # 买入信号 → 排前面
+            elif sell > 0:
+                group = 1  # 卖出信号 → 排中间
+            else:
+                group = 2  # 全部观望 → 排后面
+            return (group, -buy, -sell)
+
+        rows.sort(key=_sort_key)
 
     return strategy_keys, strategy_names, rows, excluded
 
@@ -1004,6 +1182,24 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
     report_time = dt.now().strftime('%Y-%m-%d %H:%M:%S')
     mode_label = '指数专属' if is_index else '个股通用'
 
+    def _is_all_watch(d):
+        """判断某股票是否所有（非 hold）策略的最新信号均为观望"""
+        sigs = d.get('all_signals', {})
+        for sk in d.get('strategies_to_run', []):
+            if sk == 'hold':
+                continue  # 持有为基准对照策略，不参与判断
+            series = sigs.get(sk)
+            if series is None or len(series) == 0:
+                continue
+            last = float(series.iloc[-1]) if hasattr(series, 'iloc') else float(series[-1])
+            if last != 0:
+                return False
+        return True
+
+    # 所有表格中删除全部策略均为观望信号的股票记录，不予输出
+    report_data = [d for d in all_stock_data if not _is_all_watch(d)]
+    removed_count = len(all_stock_data) - len(report_data)
+
     def _safe_pct(v):
         return f'{v * 100:.2f}%' if v is not None else 'N/A'
 
@@ -1017,18 +1213,14 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
             return base64.b64encode(f.read()).decode()
 
     # 最新信号表：每行一只股票，每列一个策略，单元格为该股票该策略的最新信号
-    strategy_keys, strategy_names, signal_table_rows, excluded = _build_signal_table(all_stock_data, include_all=True)
-    excluded = 0  # include_all 模式下已展示全部股票，不再显示隐藏备注
+    strategy_keys, strategy_names, signal_table_rows, excluded = _build_signal_table(report_data, include_all=True, sort_by_signal=True)
+    excluded = 0  # 全部观望的股票已在 report_data 中剔除，不再显示隐藏备注
 
     def _signal_cell(text):
         if text == '买':
             return '<td style="color:#e74c3c;font-weight:bold">买</td>'
-        if text == '弱买':
-            return '<td style="color:#e74c3c">弱买</td>'
         if text == '卖':
             return '<td style="color:#27ae60;font-weight:bold">卖</td>'
-        if text == '弱卖':
-            return '<td style="color:#27ae60">弱卖</td>'
         if text == 'N/A':
             return '<td style="color:#000000">N/A</td>'
         if text.startswith('观(') or ('≥' in text or '≤' in text):
@@ -1052,7 +1244,7 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
 
     # 各股票详情
     detail_sections = ''
-    for d in all_stock_data:
+    for d in report_data:
         s = d['symbol']
         sn = d['stock_name']
         lc = d.get('latest_close')
@@ -1084,23 +1276,23 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
                     fc_str = ' / '.join(parts)
             rankings.append((
                 smap[sk], r.get('total_return'), r.get('sharpe_ratio'),
-                r.get('max_drawdown'), r.get('buy_count'), r.get('sell_count'),
+                r.get('max_drawdown'), r.get('total_trades'),
                 _get_signal_text(sigs.get(sk)),
                 fc_str,
             ))
         rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
         rank_rows = ''
-        for i, (name, tr, sh, dd, bc, sc, sg, fc) in enumerate(rankings, 1):
+        for i, (name, tr, sh, dd, nt, sg, fc) in enumerate(rankings, 1):
             rank_rows += f'''<tr>
                 <td>{i}</td><td>{name}</td>
                 <td>{_safe_pct(tr)}</td><td>{_safe_float(sh)}</td>
-                <td>{_safe_pct(dd)}</td><td>{f'{bc or 0:.1f}/{sc or 0:.1f}'}</td>
+                <td>{_safe_pct(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
                 <td style="font-weight:bold;color:{'#27ae60' if sg == '买入' else '#e74c3c' if sg == '卖出' else '#f39c12'}">{sg}</td>
                 <td>{fc}</td>
             </tr>'''
         detail_sections += f'''<table>
-            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>买入/卖出次数</th><th>最新信号</th><th>次日触发价位</th></tr>
+            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th><th>次日触发价位</th></tr>
             {rank_rows}
         </table>'''
 
@@ -1117,54 +1309,6 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
                 if b64:
                     ext = os.path.splitext(cpath)[1].lstrip('.')
                     detail_sections += f'<div class="chart"><img src="data:image/{ext};base64,{b64}" alt="{cname}"></div>'
-
-    # 计算各策略收益率排名
-    from collections import defaultdict
-    strategy_all_returns = defaultdict(list)
-    strategy_all_drawdowns = defaultdict(list)
-    strategy_all_buys = defaultdict(list)
-    strategy_all_sells = defaultdict(list)
-    for d in all_stock_data:
-        smap = d['strategy_map']
-        risks = d.get('all_risks', {})
-        for sk in d.get('strategies_to_run', []):
-            r = risks.get(sk, {})
-            name = smap[sk]
-            tr = r.get('total_return')
-            dd = r.get('max_drawdown')
-            bc = r.get('buy_count')
-            sc = r.get('sell_count')
-            if tr is not None:
-                strategy_all_returns[name].append(tr)
-            if dd is not None:
-                strategy_all_drawdowns[name].append(dd)
-            if bc is not None:
-                strategy_all_buys[name].append(bc)
-            if sc is not None:
-                strategy_all_sells[name].append(sc)
-
-    strategy_avg = []
-    for name, rets in strategy_all_returns.items():
-        avg = sum(rets) / len(rets)
-        med = float(np.median(rets))
-        wr = sum(1 for r in rets if r > 0) / len(rets) * 100
-        dds = strategy_all_drawdowns.get(name, [])
-        avg_dd = sum(dds) / len(dds) if dds else None
-        buys = strategy_all_buys.get(name, [])
-        sells = strategy_all_sells.get(name, [])
-        avg_buy = sum(buys) / len(buys) if buys else None
-        avg_sell = sum(sells) / len(sells) if sells else None
-        strategy_avg.append((name, avg, med, wr, max(rets), min(rets), avg_dd, avg_buy, avg_sell))
-    strategy_avg.sort(key=lambda x: x[1], reverse=True)
-
-    strategy_rank_html = '<table><tr><th>排名</th><th>策略</th><th>平均收益率</th><th>中位数收益率</th><th>正收益占比</th><th>最高</th><th>最低</th><th>最大回撤</th><th>平均买入/卖出次数</th></tr>'
-    for i, (name, avg, med, wr, mx, mn, avg_dd, avg_buy, avg_sell) in enumerate(strategy_avg, 1):
-        if avg_buy is not None and avg_sell is not None:
-            trades_str = f'{avg_buy:.1f}/{avg_sell:.1f}'
-        else:
-            trades_str = 'N/A'
-        strategy_rank_html += f'<tr><td>{i}</td><td>{name}</td><td>{_safe_pct(avg)}</td><td>{_safe_pct(med)}</td><td>{wr:.0f}%</td><td>{_safe_pct(mx)}</td><td>{_safe_pct(mn)}</td><td>{_safe_pct(avg_dd)}</td><td>{trades_str}</td></tr>'
-    strategy_rank_html += '</table>'
 
     html = f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1190,11 +1334,12 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 <body>
 <h1>股票量化分析报告（批量）</h1>
 <div class="info">
-    <span><strong>股票数:</strong> {len(all_stock_data)}</span>
+    <span><strong>股票数:</strong> {len(report_data)}</span>
     <span><strong>初始资金:</strong> {capital:,.0f}</span>
     <span><strong>模式:</strong> {mode_label}</span>
-    <span><strong>分析周期:</strong> {all_stock_data[0]['start_date'] if all_stock_data else 'N/A'} ~ {all_stock_data[0]['end_date'] if all_stock_data else 'N/A'}</span>
+    <span><strong>分析周期:</strong> {report_data[0]['start_date'] if report_data else 'N/A'} ~ {report_data[0]['end_date'] if report_data else 'N/A'}</span>
     <span><strong>生成时间:</strong> {report_time}</span>
+    {'<span><strong>已剔除全部观望信号股票:</strong> ' + str(removed_count) + ' 只</span>' if removed_count else ''}
 </div>
 <div class="info">
     <span><strong>命令参数:</strong> {cmd_params}</span>
@@ -1204,10 +1349,6 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 {signal_table_html}
 {signal_remark_html}
 
-<h2>各策略收益率排名</h2>
-{strategy_rank_html}
-</table>
-
 {detail_sections}
 
 <div class="footer"><p>报告由 stock-quant 自动生成 | {report_time}</p></div>
@@ -1216,7 +1357,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 
     # 平均收益率（各股票最佳策略收益率的均值，用于文件名）
     best_returns = []
-    for d in all_stock_data:
+    for d in report_data:
         risks = d.get('all_risks', {})
         best_ret = None
         for sk in d.get('strategies_to_run', []):
@@ -1251,7 +1392,7 @@ class _StrategyEnhanceGroup(click.Group):
     例如：
         -g  macd, rsi   ->  -g macd, rsi      （基础判定）
         -g1 macd, rsi   ->  -g macd1, rsi1    （增强级别 1）
-        -g2 macd        ->  -g macd2          （增强级别 2）
+        -gN macd        ->  -g macdN          （增强级别 N）
     """
 
     def parse_args(self, ctx, args):
@@ -1405,13 +1546,22 @@ def _split_strategies(s):
 def _parse_strategy_spec(spec):
     """解析 -g 策略说明：支持 <STRATEGY>[N] 形式（N 为信号增强判定级别）
 
-    - 'macd'  -> ('macd', 0)   基本判定
-    - 'macd1' -> ('macd', 1)   在 macd 基础上增加增强判定条件 1
+    - 'ma1030'   -> ('ma1030', 0)   基本判定
+    - 'ma10301'  -> ('ma1030', 1)   在 ma1030 基础上增加增强判定条件 1
 
     Returns:
         (base_key, enhance): base_key 为策略基础 key，enhance 为增强级别（0=不增强）
     """
     spec = spec.strip()
+    # 已注册的基础键可能以数字结尾（如 'ma310'），故先按"最长基础键前缀 + 可选数字增强级"解析
+    known_bases = set(STRATEGY_MAP) | set(INDEX_STRATEGY_MAP) | set(ETF_STRATEGY_MAP)
+    for k in sorted((b for b in known_bases if spec.startswith(b)), key=len, reverse=True):
+        if spec == k:
+            return k, 0
+        rest = spec[len(k):]
+        if rest.isdigit():
+            return k, int(rest)
+    # 回退：未匹配已知基础键 → 按末尾数字拆分
     m = re.match(r'^(.*?)(\d+)$', spec)
     if m:
         base, num = m.group(1), int(m.group(2))
@@ -1419,22 +1569,58 @@ def _parse_strategy_spec(spec):
     return spec, 0
 
 
+def _strat_base(key):
+    """策略键的基础 key（去掉增强级后缀）：'ma10301'→'ma1030'，'ma1030'→'ma1030'"""
+    return _parse_strategy_spec(str(key))[0]
+
+
+def _strat_enh(key):
+    """策略键的增强级别：'ma10301'→1，'ma1030'→0"""
+    return _parse_strategy_spec(str(key))[1]
+
+
+def _strat_label(key, strategy_map=None):
+    """策略显示名：基础显示原名，增强级>0 追加等级后缀（如 MACD / MACD1 / MACD2）"""
+    smap = strategy_map if strategy_map is not None else STRATEGY_MAP
+    base, enh = _parse_strategy_spec(str(key))
+    name = smap[base][0]
+    return name if enh == 0 else f'{name}{enh}'
+
+
+def _strat_short(key):
+    """scan 汇总表短栏名：基础用 _SCAN_SHORT_NAMES，增强级>0 追加等级后缀"""
+    base, enh = _parse_strategy_spec(str(key))
+    name = _SCAN_SHORT_NAMES.get(base, STRATEGY_MAP[base][0])
+    return name if enh == 0 else f'{name}{enh}'
+
+
+def _build_report_strategy_map(strategy_map, tokens):
+    """构建报告用的 {键: 显示名} 映射：基础键名 + 增强变体 token 的带等级显示名"""
+    m = {k: v[0] for k, v in strategy_map.items()}
+    for t in tokens:
+        m[t] = _strat_label(t, strategy_map)
+    return m
+
+
 def _build_strategy_instance(base_key, strategy_map, enhance=0):
-    """构建策略实例，并注入增强级别 enhance（与 _run_strategy 的实例化逻辑一致）"""
-    strategy_name, strategy_class = strategy_map[base_key]
-    if base_key == 'composite':
+    """构建策略实例，并注入增强级别 enhance（与 _run_strategy 的实例化逻辑一致）
+
+    base_key 可为基础键（'ma1030'）或带增强级的变体键（'ma10301'）；变体键的增强级别在
+    enhance 参数未显式给定时生效。
+    """
+    base, spec_enh = _parse_strategy_spec(str(base_key))
+    strategy_name, strategy_class = strategy_map[base]
+    if base == 'composite':
         strategy = _build_composite_from_config(strategy_map)
     else:
         strategy = strategy_class()
-    strategy.enhance = enhance
+    strategy.enhance = spec_enh if enhance == 0 else enhance
     return strategy
 
 
 # 综合策略（composite）默认配置：stock-quant.json 缺失时回退
-_DEFAULT_COMPOSITE_STRATEGIES = ['ma_cross', 'macd', 'rsi', 'bollinger']
-_DEFAULT_COMPOSITE_WEIGHTS = {'ma_cross': 0.25, 'macd': 0.25, 'rsi': 0.2, 'bollinger': 0.18, 'quality_value': 0.12}
-_DEFAULT_SIGNAL_WEIGHT = 0.7
-_DEFAULT_POSITION_WEIGHT = 0.3
+_DEFAULT_COMPOSITE_STRATEGIES = ['ma1030', 'macd1226', 'rsi', 'bollinger']
+_DEFAULT_COMPOSITE_WEIGHTS = {'ma1030': 0.25, 'macd1226': 0.25, 'rsi': 0.2, 'bollinger': 0.18, 'quality_value': 0.12}
 _DEFAULT_COMPOSITE_SMOOTH_WINDOW = 3
 _DEFAULT_COMPOSITE_WINDOW = 20
 _DEFAULT_Z_BUY = 1.0
@@ -1447,7 +1633,6 @@ def _build_composite_from_config(strategy_map):
     配置项：
         - composite.strategies: 参与加权的子策略 key 列表
         - composite.weights:    {策略key: 权重} 字典（或与 strategies 平行的权重列表）
-        - composite.signal_weight / position_weight: 原始值组成占比（信号*占比 + 仓位水平*占比）
         - composite.smooth_window: 原始加权信号的轻度平滑窗口（默认 3）
         - composite.window:     滚动 Z-score 标准化窗口
         - composite.z_buy / z_sell: Z 值买卖阈值
@@ -1457,8 +1642,6 @@ def _build_composite_from_config(strategy_map):
     config = _load_quant_config().get('composite', {})
     sub_keys = config.get('strategies', _DEFAULT_COMPOSITE_STRATEGIES)
     weights_cfg = config.get('weights', _DEFAULT_COMPOSITE_WEIGHTS)
-    signal_weight = config.get('signal_weight', _DEFAULT_SIGNAL_WEIGHT)
-    position_weight = config.get('position_weight', _DEFAULT_POSITION_WEIGHT)
     smooth_window = config.get('smooth_window', _DEFAULT_COMPOSITE_SMOOTH_WINDOW)
     window = config.get('window', _DEFAULT_COMPOSITE_WINDOW)
     z_buy = config.get('z_buy', _DEFAULT_Z_BUY)
@@ -1481,12 +1664,11 @@ def _build_composite_from_config(strategy_map):
                 weights.append(1.0)
 
     if not strategies:
-        click.echo(click.style('  警告: 综合策略无有效子策略，回退为 ma_cross', fg='yellow'))
+        click.echo(click.style('  警告: 综合策略无有效子策略，回退为 ma1030', fg='yellow'))
         strategies = [MACrossStrategy()]
         weights = [1.0]
 
     return CompositeStrategy(strategies, weights=weights,
-                             signal_weight=signal_weight, position_weight=position_weight,
                              smooth_window=smooth_window, window=window, z_buy=z_buy, z_sell=z_sell)
 
 
@@ -1670,7 +1852,7 @@ def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1
 @click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYYMMDD')
-@click.option('--strategy', '-g', default='macd', help='策略选择 [ma_cross|ema_cross|macd|rsi|bollinger|kdj|quality_value|composite|hold|all]，多个用逗号分隔（默认macd）；-gN 表示全部启用增强级别N（如 -g1 macd,rsi 即 macd1,rsi1）')
+@click.option('--strategy', '-g', default='macd1226', help='策略选择 [ma1030|ema1030|macd1226|rsi|bollinger|kdj|ma310|ma520|ema520|quality_value|composite|hold|all]，多个用逗号分隔（默认macd1226）；-gN 表示全部启用增强级别N（如 -g1 ma1030,rsi 即 ma10301,rsi1）')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
@@ -2006,7 +2188,8 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                     'date', 'MA5', 'MA10', 'MA20', 'MA30', 'MA60',
                     'EMA10', 'EMA12', 'EMA26', 'EMA30', 'MACD_DIF', 'MACD_DEA', 'MACD_BAR',
                     'RSI14', 'BOLL_UPPER', 'BOLL_MIDDLE', 'BOLL_LOWER',
-                    'KDJ_K', 'KDJ_D', 'KDJ_J', 'ATR14', 'OBV', 'CCI20', 'WR14',
+                    'KDJ_K', 'KDJ_D', 'KDJ_J', 'ADX14', 'PLUS_DI', 'MINUS_DI',
+                    'ATR14', 'OBV', 'CCI20', 'WR14',
                     'VOL_MA5', 'VWAP', 'HV20', 'MOM60'
                 ]
                 df_indi = pd.DataFrame(db_rows, columns=indi_cols)
@@ -2071,9 +2254,11 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                     avail = ', '.join(strategy_map.keys())
                     click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {avail}, all', fg='red'))
                     return
-                if base_key not in strategies_to_run:
-                    strategies_to_run.append(base_key)
-                strategy_enhance[base_key] = enh
+                # 变体键：基础键或 基础键+增强级（如 macd / macd1），允许同基础不同增强级并存
+                token = base_key if enh == 0 else f'{base_key}{enh}'
+                if token not in strategies_to_run:
+                    strategies_to_run.append(token)
+                strategy_enhance[token] = enh
 
         # 报告展示用策略列表：全部策略均展示（含质价融合策略）
         strategies_to_report = strategies_to_run
@@ -2085,7 +2270,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
         all_signals = {}
 
         for sk in strategies_to_run:
-            click.echo(click.style(f'  正在运行策略: {strategy_map[sk][0]}...', fg='blue'))
+            click.echo(click.style(f'  正在运行策略: {_strat_label(sk, strategy_map)}...', fg='blue'))
             result, chart_paths, sname, signals = _run_single_analysis(
                 df, sk, capital, chart_gen, prefix=stock_label, strategy_map=strategy_map,
                 enhance=strategy_enhance.get(sk, 0)
@@ -2118,7 +2303,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 if signals is not None and len(signals) > 0:
                     try:
                         sk_chart_gen = ChartGenerator(output_dir=chart_gen.output_dir, prefix=f'{symbol}_{sk}', date_tag=date_tag)
-                        strategy_name = strategy_map[sk][0]
+                        strategy_name = _strat_label(sk, strategy_map)
                         equity_curve = all_risks[sk].get('equity_curve') if all_risks.get(sk) else None
                         signal_path = sk_chart_gen.plot_signal_composite(
                             df, signals, strategy_key=sk,
@@ -2137,7 +2322,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                         continue
                     strategies_data.append({
                         'key': sk,
-                        'name': strategy_map[sk][0],
+                        'name': _strat_label(sk, strategy_map),
                         'signals': signals,
                         'equity_curve': all_risks[sk].get('equity_curve') if all_risks.get(sk) else None,
                     })
@@ -2156,7 +2341,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
         # 输出每个策略的回测结果
         for sk in strategies_to_report:
-            sname = strategy_map[sk][0]
+            sname = _strat_label(sk, strategy_map)
             risk = all_risks[sk]
             charts = all_charts[sk]
             sig = all_signals[sk]
@@ -2197,20 +2382,19 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 rank_total_return = all_risks[sk].get('total_return')
                 rank_sharpe = all_risks[sk].get('sharpe_ratio')
                 rank_drawdown = all_risks[sk].get('max_drawdown')
-                rank_buy = all_risks[sk].get('buy_count')
-                rank_sell = all_risks[sk].get('sell_count')
+                rank_trades = all_risks[sk].get('total_trades')
                 rank_signal = _get_signal_text(all_signals.get(sk))
-                rankings.append((strategy_map[sk][0], rank_total_return, rank_sharpe,
-                                 rank_drawdown, rank_buy, rank_sell, rank_signal))
+                rankings.append((_strat_label(sk, strategy_map), rank_total_return, rank_sharpe,
+                                 rank_drawdown, rank_trades, rank_signal))
             rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
-            headers = ['排名', '策略', '总收益率', '夏普比率', '最大回撤', '买入/卖出次数', '最新信号']
+            headers = ['排名', '策略', '总收益率', '夏普比率', '最大回撤', '交易次数', '最新信号']
             table_rows = []
-            for i, (name, total_ret, sharpe, drawdown, buy_c, sell_c, signal) in enumerate(rankings, 1):
+            for i, (name, total_ret, sharpe, drawdown, trades, signal) in enumerate(rankings, 1):
                 ret_str = f'{total_ret * 100:.2f}%' if total_ret is not None else 'N/A'
                 shp_str = f'{sharpe:.2f}' if sharpe is not None else 'N/A'
                 dd_str = f'{drawdown * 100:.2f}%' if drawdown is not None else 'N/A'
-                tr_str = f'{buy_c or 0:.1f}/{sell_c or 0:.1f}'
+                tr_str = str(trades) if trades is not None else 'N/A'
                 table_rows.append([i, name, ret_str, shp_str, dd_str, tr_str, signal])
             _print_table(headers, table_rows)
 
@@ -2255,8 +2439,8 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             'trading_days': len(df),
             'capital': capital,
             'is_index': is_index,
-            # 仅保留策略名（类/闭包不可跨进程 pickle）
-            'strategy_map': {k: v[0] for k, v in strategy_map.items()},
+            # 仅保留策略名（类/闭包不可跨进程 pickle）；含增强变体 token 的显示名
+            'strategy_map': _build_report_strategy_map(strategy_map, strategies_to_report),
             'strategies_to_run': strategies_to_report,
             'all_results': all_results,
             'all_risks': all_risks,
@@ -2303,7 +2487,7 @@ def _run_rotation_analysis(symbols, start, end, strategy, capital, output, outpu
 
     # 确定轮动所用策略
     if strategy == 'all':
-        strategy_key = 'ma_cross'
+        strategy_key = 'ma1030'
         strategy_enhance = 0
     else:
         strategy_key, strategy_enhance = _parse_strategy_spec(_split_strategies(strategy)[0])
@@ -2556,7 +2740,7 @@ def _run_portfolio_analysis(symbols, start, end, strategy, capital, output, outp
 
     # 确定策略
     if strategy == 'all':
-        strategy_key = 'ma_cross'
+        strategy_key = 'ma1030'
         strategy_enhance = 0
     else:
         strategy_key, strategy_enhance = _parse_strategy_spec(_split_strategies(strategy)[0])
@@ -2970,7 +3154,7 @@ def _generate_portfolio_html(pool_symbols, strategy_name, start_date, end_date, 
             try:
                 cg = ChartGenerator(output_dir=output, prefix=f'{sym}_portfolio', date_tag=date_tag)
                 chart_path = cg.plot_signal_composite(
-                    df, sig, strategy_key='macd', title=f'{label} K线与买卖点'
+                    df, sig, strategy_key='macd1226', title=f'{label} K线与买卖点'
                 )
                 b64 = _img_to_b64(chart_path)
                 if b64:
@@ -3078,7 +3262,7 @@ def _random_pick_by_board(stock_list, total):
 
     Args:
         stock_list: 股票列表（DataFrame 或 dict 列表）
-        total: 抽样总数（通常为 top*20）
+        total: 抽样总数（通常为 top*30）
 
     Returns:
         pd.DataFrame: 抽样后的股票列表（顺序已打乱）
@@ -3135,10 +3319,11 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
         df, latest_close, _, _ = _apply_realtime_to_df(df, symbol, fetcher, end_date, verbose=False)
         df = add_all_indicators(df)
         df = _truncate_analysis_df(df, start_date)
+        df.attrs['symbol'] = symbol
         result = _run_strategy(strategy, df, capital=capital, enhance=enhance)
         risk = result  # 结果已包含风险指标
 
-        # 取最新信号值（1=强买, 0.5=弱买, 0=观望, -0.5=弱卖, -1=强卖）
+        # 取最新信号值（1=买, 0=观望, -1=卖）
         sig_series = result.get('signals')
         signal_value = None
         if sig_series is not None and len(sig_series) > 0:
@@ -3158,14 +3343,13 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
             'symbol': symbol,
             'latest_close': latest_close,
             'signal': signal_value,
+            'reason': _signal_reason(strategy, signal_value, enhance) if signal_value else '',
             'forecast': forecast_val,
             'total_return': risk.get('total_return'),
             'sharpe': risk.get('sharpe_ratio'),
             'max_dd': risk.get('max_drawdown'),
             'win_rate': risk.get('win_rate'),
             'trades': risk.get('total_trades'),
-            'buy_count': risk.get('buy_count'),
-            'sell_count': risk.get('sell_count'),
         }
     except Exception:
         return None
@@ -3194,6 +3378,7 @@ def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=No
         df, latest_close, _, _ = _apply_realtime_to_df(df, symbol, fetcher, end_date, verbose=False)
         df = add_all_indicators(df)
         df = _truncate_analysis_df(df, start_date)
+        df.attrs['symbol'] = symbol
         sig_map = {}
         forecast_map = {}
         for sk in strategies:
@@ -3250,10 +3435,40 @@ def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None)
     return results
 
 
+def _scan_single_batch(symbols, sk, forecast, sk_enhance, threads):
+    """对一批股票运行单个策略扫描（串行/并行），返回结果列表"""
+    results = []
+    if len(symbols) > 1 and threads > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        n_workers = min(threads, len(symbols))
+        tasks = [(s, sk, 100000, forecast, sk_enhance) for s in symbols]
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_scan_single_worker, task): i for i, task in enumerate(tasks)}
+            for fut in as_completed(futures):
+                data = fut.result()
+                if data is not None:
+                    results.append(data)
+    else:
+        for s in symbols:
+            data = _scan_single(s, sk, 100000, forecast, sk_enhance)
+            if data is not None:
+                results.append(data)
+    return results
+
+
+def _scan_has_buy(result):
+    """判断扫描结果是否至少含一个买入信号（多策略看 signals，单策略看 signal）"""
+    if result is None:
+        return False
+    if 'signals' in result:
+        return any(v is not None and v > 0 for v in result['signals'].values())
+    return result.get('signal') is not None and result['signal'] > 0
+
+
 @cli.command('scan')
-@click.option('--symbol-file', '-sf', default=None, help='从文件顺序读取股票代码（空格/逗号/换行分隔），最多取前 20*N 只（N 为 -tN 值）')
-@click.option('--strategy', '-g', default='macd', help='策略选择，多个策略用逗号分隔，all表示全部（默认macd）；-gN 表示全部启用增强级别N（如 -g1 macd,rsi 即 macd1,rsi1）')
-@click.option('--top', '-t', default=10, type=click.IntRange(1, 100), help='筛选排名前N只股票 -tN（N=1~100，默认10）')
+@click.option('--symbol-file', '-sf', default=None, help='从文件顺序读取股票代码（空格/逗号/换行分隔），最多取前 30*N 只（N 为 -tN 值）')
+@click.option('--strategy', '-g', default='macd1226', help='策略选择，多个策略用逗号分隔，all表示全部（默认macd1226）；-gN 表示全部启用增强级别N（如 -g1 ma1030,rsi 即 ma10301,rsi1）')
+@click.option('--top', '-t', default=5, type=click.IntRange(1, 100), help='筛选排名前N只股票 -tN（N=1~100，默认10）')
 @click.option('--offset', '-o', default=0, type=click.IntRange(0, 1000000), help='从获取到的股票中第N条记录开始分析 -oN（N=0起始，默认0=第一条）')
 @click.option('--min-volume', default=None, type=float, help='最小成交量过滤')
 @click.option('--threads', '-x', default=5, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认5）')
@@ -3263,16 +3478,17 @@ def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None)
 @click.option('--amount', 'sort_key', flag_value='amount', default=False, help='获取股票列表排序方式：按成交额')
 @click.option('--mktcap', 'sort_key', flag_value='mktcap', default=False, help='获取股票列表排序方式：按总市值')
 @click.option('--pe', 'sort_key', flag_value='pe', default='changepercent', help='获取股票列表排序方式：按市盈率')
-@click.option('--random', is_flag=True, default=False, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 20*N 只股票分析（忽略排序与 -o 偏移）')
-def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, sort_key, random):
+@click.option('--random', is_flag=True, default=False, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 30*N 只股票分析（忽略排序与 -o 偏移）')
+@click.option('--notify', is_flag=True, default=False, help='对扫描出的 Top N 股票通过钉钉机器人发送买卖信号通知')
+def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, sort_key, random, notify):
     """股票筛选：从给定股票集中，重点输出符合要求或最佳的股票
 
     流程：获取股票列表 -> 筛选 -> 逐个运行策略（可用 -x 并行）-> 输出结果
-    指定 -sf 时直接从文件顺序读取股票代码（最多 20*N 只）进行分析。
+    指定 -sf 时直接从文件顺序读取股票代码（最多 30*N 只）进行分析。
     指定多个策略（逗号分隔）或 all 时，输出多策略汇总信号表（每只股票一行，
     列为策略名，值为买/卖/观，按信号合计值降序排序）。
     未指定排序选项时默认按涨跌幅（--changepercent）获取股票列表；
-    指定 --random 时按板块比例随机抽样 20*N 只。
+    指定 --random 时按板块比例随机抽样 30*N 只。
     """
     try:
         # 解析策略列表
@@ -3288,14 +3504,20 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
                 if base_key not in STRATEGY_MAP:
                     click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {", ".join(STRATEGY_MAP.keys())}', fg='red'))
                     return
-                if base_key not in strat_keys:
-                    strat_keys.append(base_key)
-                strat_enhance[base_key] = enh
+                token = base_key if enh == 0 else f'{base_key}{enh}'
+                if token not in strat_keys:
+                    strat_keys.append(token)
+                strat_enhance[token] = enh
+
+        # 持有 hold 为基准对照策略，不参与扫描信号表/排序；仅当用户显式只指定 hold 时保留
+        if len(strat_keys) > 1:
+            strat_keys = [k for k in strat_keys if _strat_base(k) != 'hold']
+            strat_enhance = {k: v for k, v in strat_enhance.items() if _strat_base(k) != 'hold'}
 
         multi = len(strat_keys) > 1
-        strat_names = [STRATEGY_MAP[k][0] for k in strat_keys]
+        strat_names = [_strat_label(k) for k in strat_keys]
         # 汇总信号表使用的短栏名（其余策略沿用完整名称）
-        strat_cols = [_SCAN_SHORT_NAMES.get(k, STRATEGY_MAP[k][0]) for k in strat_keys]
+        strat_cols = [_strat_short(k) for k in strat_keys]
 
         _print_header('股票扫描筛选')
         click.echo(click.style(f'  策略: {", ".join(strat_names)}', fg='cyan', bold=True))
@@ -3308,21 +3530,17 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
         fetcher = DataFetcher()
 
         if symbol_file:
-            # -sf 模式：直接从文件顺序读取股票代码，跳过前 offset 条，最多取 20*N 只
+            # -sf 模式：从文件顺序读取，跳过前 offset 条后作为候选池（供增量扩样）
             file_symbols = _read_symbols_file(symbol_file)
             if not file_symbols:
                 return
-            file_symbols = file_symbols[offset:]
-            scan_symbols = file_symbols[:top * 20]
-            click.echo(click.style(f'  从文件读取 {len(file_symbols)} 只股票（跳过前 {offset} 条），取前 {len(scan_symbols)} 只', fg='green'))
-            name_map = {s: s for s in scan_symbols}
+            pool = file_symbols[offset:]
+            click.echo(click.style(f'  从文件读取 {len(pool)} 只股票（跳过前 {offset} 条）', fg='green'))
+            name_map = {s: s for s in pool}
         else:
             click.echo(click.style('  正在获取股票列表...', fg='blue'))
-            if random:
-                # 随机模式：拉取全部A股后按板块比例抽样 20*N 只
-                stock_list = fetcher.get_stock_list(sort_key='changepercent', max_pages=60)
-            else:
-                stock_list = fetcher.get_stock_list(sort_key=sort_key)
+            stock_list = fetcher.get_stock_list(
+                sort_key='changepercent' if random else sort_key, max_pages=60)
 
             if stock_list is None or len(stock_list) == 0:
                 click.echo(click.style('  错误: 未能获取股票列表', fg='red'))
@@ -3337,53 +3555,61 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
                 click.echo(click.style(f'  过滤后剩余 {len(stock_list)} 只股票', fg='green'))
 
             if random:
-                # 随机抽样 20*N 只（忽略 -o 偏移）
-                stock_list = _random_pick_by_board(stock_list, top * 20)
-                click.echo(click.style(f'  按 沪市主板:深市主板:创业板:科创板=6:5:5:2 随机抽取 {len(stock_list)} 只股票', fg='green'))
+                # 随机模式：按板块比例随机排列全部候选（供增量扩样）
+                picked = _random_pick_by_board(stock_list, len(stock_list))
+                recs = picked.to_dict('records') if hasattr(picked, 'to_dict') else picked
+                click.echo(click.style(f'  按 沪市主板:深市主板:创业板:科创板=6:5:5:2 随机排列 {len(recs)} 只股票', fg='green'))
             else:
-                # 限制扫描数量（先跳过前 offset 条，再取前 top*20 只）
-                stock_list = stock_list[offset:]
-                if len(stock_list) > top * 20:
-                    stock_list = stock_list[:top * 20]
-                    click.echo(click.style(f'  跳过前 {offset} 条后，限制扫描范围为前 {len(stock_list)} 只股票', fg='yellow'))
+                recs = stock_list[offset:].to_dict('records') if hasattr(stock_list, 'to_dict') else list(stock_list[offset:])
+                click.echo(click.style(f'  跳过前 {offset} 条，候选 {len(recs)} 只股票', fg='green'))
 
-            # get_stock_list 返回 DataFrame，转成记录列表以便逐行迭代
-            scan_records = stock_list.to_dict('records') if hasattr(stock_list, 'to_dict') else stock_list
-            scan_symbols = [(s.get('symbol', '') or s.get('code', '')) for s in scan_records]
-            scan_symbols = [s for s in scan_symbols if s]
-
+            pool = [(r.get('symbol', '') or r.get('code', '')) for r in recs]
+            pool = [s for s in pool if s]
             # 代码 -> 名称 映射（用于输出展示）
             name_map = {}
-            for stock_info in scan_records:
-                sym = stock_info.get('symbol', '') or stock_info.get('code', '')
-                name_map[sym] = stock_info.get('name', sym)
+            for r in recs:
+                sym = r.get('symbol', '') or r.get('code', '')
+                name_map[sym] = r.get('name', sym)
 
+        batch = max(1, top * 30)
         if multi:
-            # 多策略：运行所有策略并输出汇总信号表
+            # 多策略：对候选池运行所有策略并输出汇总信号表；
+            # 若含买入信号的股票不足 Top N（即 Top N 会混入全为观望信号的记录），
+            # 则扩大扫描范围继续扫描，确保 Top N 股票都含有买入信号。
+            # -sf 文件输入模式不扩大扫描范围。
             click.echo(click.style(f'  正在扫描股票（策略: {", ".join(strat_names)}）...', fg='blue'))
-            results = _run_scan(scan_symbols, strat_keys, threads, forecast, strat_enhance)
+            results = []
+            scanned = 0
+            while True:
+                chunk = pool[scanned:scanned + batch]
+                if not chunk:
+                    break
+                scanned += len(chunk)
+                results.extend(_run_scan(chunk, strat_keys, threads, forecast, strat_enhance))
+                buy_count = sum(1 for r in results if _scan_has_buy(r))
+                if buy_count >= top or scanned >= len(pool) or symbol_file:
+                    break
+                click.echo(click.style(
+                    f'  含买入信号股票不足（{buy_count}/{top}），已扫描 {scanned} 只，继续扩大扫描范围...', fg='yellow'))
+            results = [r for r in results if _scan_has_buy(r)]
         else:
-            # 单策略：运行单个策略，返回信号及风险指标
+            # 单策略：仅筛选「买入」信号；不足 -t 只时逐步扩大扫描范围（-sf 文件输入模式不扩大）
             sk = strat_keys[0]
             sk_enhance = strat_enhance.get(sk, 0)
-            click.echo(click.style(f'  正在扫描股票（策略: {strat_names[0]}）...', fg='blue'))
+            click.echo(click.style(f'  正在扫描股票（策略: {strat_names[0]}，目标买入信号 ≥ {top} 只）...', fg='blue'))
             results = []
-            if len(scan_symbols) > 1 and threads > 1:
-                from concurrent.futures import ProcessPoolExecutor, as_completed
-                n_workers = min(threads, len(scan_symbols))
-                click.echo(click.style(f'  使用 {n_workers} 个进程并行扫描...', fg='blue'))
-                tasks = [(s, sk, 100000, forecast, sk_enhance) for s in scan_symbols]
-                with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                    futures = {executor.submit(_scan_single_worker, task): i for i, task in enumerate(tasks)}
-                    for fut in as_completed(futures):
-                        data = fut.result()
-                        if data is not None:
-                            results.append(data)
-            else:
-                for s in scan_symbols:
-                    data = _scan_single(s, sk, 100000, forecast, sk_enhance)
-                    if data is not None:
-                        results.append(data)
+            scanned = 0
+            while True:
+                chunk = pool[scanned:scanned + batch]
+                if not chunk:
+                    break
+                scanned += len(chunk)
+                chunk_results = _scan_single_batch(chunk, sk, forecast, sk_enhance, threads)
+                results.extend([r for r in chunk_results if r.get('signal') and r['signal'] > 0])
+                if len(results) >= top or scanned >= len(pool) or symbol_file:
+                    break
+                click.echo(click.style(
+                    f'  买入信号不足（{len(results)}/{top}），已扫描 {scanned} 只，继续扩大扫描范围...', fg='yellow'))
 
         if not results:
             click.echo(click.style('  未找到符合条件的股票', fg='yellow'))
@@ -3403,14 +3629,10 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
                 row = [i, r['symbol'], name_map.get(r['symbol'], r['symbol']), price_str]
                 for sk in strat_keys:
                     v = r['signals'].get(sk)
-                    if v == 1:
+                    if v is not None and v > 0:
                         cell = '买'
-                    elif v == 0.5:
-                        cell = '弱买'
-                    elif v == -1:
+                    elif v is not None and v < 0:
                         cell = '卖'
-                    elif v == -0.5:
-                        cell = '弱卖'
                     elif v == 0:
                         th = r.get('forecasts', {}).get(sk)
                         if th:
@@ -3433,46 +3655,28 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
 
             _print_table(headers, table_rows)
         else:
-            # 单策略：按信号值排序（1=买入 优先，其次 0=观望，最后 -1=卖出），同级按总收益率降序
+            # 单策略：剔除观望股票，按信号（买优先）→ 总收益率排序
+            results = [r for r in results if r.get('signal') not in (None, 0)]
+            if not results:
+                click.echo(click.style('  未找到非观望信号的股票', fg='yellow'))
+                click.echo()
+                click.echo(click.style('  扫描完成!', fg='green', bold=True))
+                click.echo()
+                return
             results.sort(key=lambda x: (x['signal'] if x['signal'] is not None else -99,
                                         x['total_return'] if x['total_return'] is not None else -999),
                          reverse=True)
             top_results = results[:top]
             _print_section(f'扫描结果 - Top {len(top_results)}')
 
-            headers = ['排名', '代码', '名称', '最新价格', '信号', '总收益率', '夏普比率', '最大回撤', '胜率', '买入/卖出次数']
+            headers = ['排名', '代码', '名称', '最新价格', '信号', '信号详情']
             table_rows = []
             for i, r in enumerate(top_results, 1):
                 lc = r.get('latest_close')
                 price_str = f'{lc:.2f}' if lc is not None else 'N/A'
-                if r['signal'] == 1:
-                    sig_text = '买入'
-                elif r['signal'] == 0.5:
-                    sig_text = '弱买'
-                elif r['signal'] == -1:
-                    sig_text = '卖出'
-                elif r['signal'] == -0.5:
-                    sig_text = '弱卖'
-                else:
-                    th = r.get('forecast')
-                    if th:
-                        parts = []
-                        if th.get('buy') is not None:
-                            parts.append(f'买≥{th["buy"]:.0f}%')
-                        if th.get('sell') is not None:
-                            parts.append(f'卖≤{th["sell"]:.0f}%')
-                        if parts:
-                            sig_text = '/'.join(parts)
-                        else:
-                            sig_text = '观望'
-                    else:
-                        sig_text = '观望'
-                ret_str = f'{r["total_return"] * 100:.2f}%' if r['total_return'] is not None else 'N/A'
-                shp_str = f'{r["sharpe"]:.2f}' if r['sharpe'] is not None else 'N/A'
-                dd_str = f'{r["max_dd"] * 100:.2f}%' if r['max_dd'] is not None else 'N/A'
-                wr_str = f'{r["win_rate"] * 100:.2f}%' if r['win_rate'] is not None else 'N/A'
-                tr_str = f"{r.get('buy_count') or 0:.1f}/{r.get('sell_count') or 0:.1f}"
-                table_rows.append([i, r['symbol'], name_map.get(r['symbol'], r['symbol']), price_str, sig_text, ret_str, shp_str, dd_str, wr_str, tr_str])
+                sig_text = '买入' if r['signal'] > 0 else '卖出'
+                table_rows.append([i, r['symbol'], name_map.get(r['symbol'], r['symbol']),
+                                   price_str, sig_text, r.get('reason', '')])
 
             _print_table(headers, table_rows)
 
@@ -3493,10 +3697,48 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
             charts_by_symbol = _generate_scan_stock_charts(top_results, strat_keys, name_map, prefix_tag=strat_tag, strat_enhance=strat_enhance)
             html_path = _generate_scan_html_report(headers, table_rows, strat_names, strat_cols,
                                                    charts_by_symbol=charts_by_symbol, name_map=name_map,
-                                                   report_filename=f'scan_{strat_tag}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html')
+                                                   report_filename=f'scan_{datetime.now().strftime("%m%d_%H")}.html')
             click.echo(click.style(f'  HTML报告已保存到: {html_path}', fg='green'))
         except Exception as e:
             click.echo(click.style(f'  保存HTML失败: {e}', fg='yellow'))
+
+        # --notify：将扫描 Top N 股票按策略信号合成一条钉钉消息发送
+        if notify:
+            click.echo(click.style('\n  发送钉钉通知...', fg='blue'))
+            try:
+                stock_entries = []
+                if multi:
+                    # 多策略：每只 Top 股票携带各策略最新信号值
+                    for r in top_results:
+                        sigs = r.get('signals') or {}
+                        stock_entries.append({
+                            'symbol': r['symbol'],
+                            'stock_name': name_map.get(r['symbol'], r['symbol']),
+                            'all_signals': {sk: [v] for sk, v in sigs.items() if v is not None},
+                            'all_risks': {},
+                            'strategy_map': {sk: _strat_label(sk) for sk in strat_keys},
+                            'strategies_to_run': list(strat_keys),
+                        })
+                else:
+                    # 单策略：每只 Top 股票携带该策略最新信号值
+                    sk = strat_keys[0]
+                    for r in top_results:
+                        if r.get('signal') is None:
+                            continue
+                        stock_entries.append({
+                            'symbol': r['symbol'],
+                            'stock_name': name_map.get(r['symbol'], r['symbol']),
+                            'all_signals': {sk: [r['signal']]},
+                            'all_risks': {},
+                            'strategy_map': {sk: _strat_label(sk)},
+                            'strategies_to_run': [sk],
+                        })
+                if stock_entries:
+                    _notify_signals(stock_entries)
+                else:
+                    click.echo(click.style('  没有可通知的信号', fg='yellow'))
+            except Exception as e:
+                click.echo(click.style(f'  发送钉钉通知失败: {e}', fg='yellow'))
 
         click.echo()
         click.echo(click.style('  扫描完成!', fg='green', bold=True))
@@ -3516,51 +3758,80 @@ def scan_cmd(symbol_file, strategy, top, offset, min_volume, threads, forecast, 
 @cli.command('backtest')
 @click.option('--symbol', '-s', default=None, help='股票代码（与 -sf 至少指定一个）')
 @click.option('--symbol-file', '-sf', default=None, help='从指定文件读取多个股票代码进行批量回测（空格/逗号/换行分隔），与 -s 同时使用时合并')
-@click.option('--strategy', '-g', default='macd', help='策略选择 [ma_cross|macd|rsi|bollinger]，多个用逗号分隔（默认macd）；-gN 表示全部启用增强级别N（如 -g1 macd,rsi 即 macd1,rsi1）')
-@click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
+@click.option('--random', is_flag=True, default=False, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 100 只股票回测（忽略 -s 和 -sf），完成后将代码写入 input/random.txt')
+@click.option('--strategy', '-g', default='macd1226', help='策略选择 [ma1030|ema1030|macd1226|rsi|bollinger|kdj|ma310|ma520|ema520|quality_value|composite|hold|all]，多个用逗号分隔，all表示全部（默认macd1226）；-gN 表示全部启用增强级别N（如 -g1 ma1030,rsi 即 ma10301,rsi1）')
+@click.option('--start', '-st', default=None, help='开始日期（默认730天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期，格式: YYYYMMDD')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--chart', is_flag=True, default=False, help='生成K线图等图形（默认仅输出表格报告）')
-def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, chart):
+def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, output, chart):
     """回测：重点输出开始日期至结束日期之间的买卖点及收益率、夏普比率、回撤等信息
 
     流程：获取数据 -> 运行策略 -> 回测 -> 展示详细结果 -> 生成图表
     指定 -sf 时对多个股票批量回测，输出表格（每只股票一行，各项指标作为列）。
+    指定 --random 时按板块比例随机抽样 100 只股票批量回测，并写入 input/random.txt。
     -g 支持多个策略（逗号或竖线分隔）。
     """
     try:
         capital = capital * 10000  # -c 单位为万元，内部换算为元
         strat_specs = _split_strategies(strategy)
-        strat_keys = []
-        strat_enhance = {}
-        for spec in strat_specs:
-            base_key, enh = _parse_strategy_spec(spec)
-            if base_key not in STRATEGY_MAP:
-                click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {", ".join(STRATEGY_MAP.keys())}', fg='red'))
-                return
-            if base_key not in strat_keys:
-                strat_keys.append(base_key)
-            strat_enhance[base_key] = enh
+        if any(s == 'all' for s in strat_specs):
+            strat_keys = ALL_STRATEGIES
+            strat_enhance = {k: 0 for k in strat_keys}
+        else:
+            strat_keys = []
+            strat_enhance = {}
+            for spec in strat_specs:
+                base_key, enh = _parse_strategy_spec(spec)
+                if base_key not in STRATEGY_MAP:
+                    click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {", ".join(STRATEGY_MAP.keys())}', fg='red'))
+                    return
+                token = base_key if enh == 0 else f'{base_key}{enh}'
+                if token not in strat_keys:
+                    strat_keys.append(token)
+                strat_enhance[token] = enh
 
-        start_date, end_date = _parse_dates(start, end)
-        strat_names = [STRATEGY_MAP[k][0] for k in strat_keys]
+        start_date, end_date = _parse_dates(start, end, default_days=_BACKTEST_PERIOD_DAYS)
+        strat_names = [_strat_label(k) for k in strat_keys]
+
+        # 随机抽样模式：忽略 -s 与 -sf，按板块比例随机抽取 100 只股票
+        random_symbols = []
+        if random:
+            click.echo(click.style('  正在获取股票列表（随机抽样）...', fg='blue'))
+            fetcher0 = DataFetcher()
+            stock_list = fetcher0.get_stock_list(sort_key='changepercent', max_pages=60)
+            if stock_list is None or len(stock_list) == 0:
+                click.echo(click.style('  错误: 未能获取股票列表', fg='red'))
+                return
+            picked = _random_pick_by_board(stock_list, 100)
+            recs = picked.to_dict('records') if hasattr(picked, 'to_dict') else picked
+            random_symbols = [r.get('symbol', '') or r.get('code', '') for r in recs]
+            random_symbols = [s for s in random_symbols if s]
+            click.echo(click.style(
+                f'  按 沪市主板:深市主板:创业板:科创板=6:5:5:2 随机抽取 {len(random_symbols)} 只股票', fg='green'))
+            if not random_symbols:
+                click.echo(click.style('  错误: 随机抽样未获得任何股票', fg='red'))
+                return
 
         # 收集股票代码（-s 与 -sf 合并去重）
         symbols = []
-        if symbol:
-            symbols.extend(s.strip() for s in symbol.split() if s.strip())
-        if symbol_file:
-            file_symbols = _read_symbols_file(symbol_file)
-            symbols.extend(file_symbols)
-        symbols = list(dict.fromkeys(symbols))
+        if random:
+            symbols = list(random_symbols)
+        else:
+            if symbol:
+                symbols.extend(s.strip() for s in symbol.split() if s.strip())
+            if symbol_file:
+                file_symbols = _read_symbols_file(symbol_file)
+                symbols.extend(file_symbols)
+            symbols = list(dict.fromkeys(symbols))
 
         if not symbols:
             click.echo(click.style('  错误: 请使用 -s 或 -sf 指定至少一个股票代码', fg='red'))
             return
 
-        # -sf 批量回测：每只股票每策略一行，各项指标作为列
-        if symbol_file:
+        # -sf / --random 批量回测：每只股票每策略一行，各项指标作为列
+        if symbol_file or random:
             _print_header('批量回测', f'{len(symbols)} 只股票 - {", ".join(strat_names)}')
             click.echo(click.style(f'  回测区间: {start_date} ~ {end_date}', fg='white'))
             click.echo(click.style(f'  初始资金: {capital:,.0f}', fg='white'))
@@ -3583,9 +3854,10 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
                         df, _, _, _ = _apply_realtime_to_df(df, sym, fetcher, end_date, verbose=False)
                         df = add_all_indicators(df)
                         df = _truncate_analysis_df(df, start_date)
+                        df.attrs['symbol'] = sym
                         for sk in strat_keys:
                             result = _run_strategy(sk, df, capital, enhance=strat_enhance.get(sk, 0))
-                            batch_results.append({'symbol': sym, 'strategy': STRATEGY_MAP[sk][0], 'risk': result})
+                            batch_results.append({'symbol': sym, 'strategy': _strat_label(sk), 'risk': result})
                     except Exception:
                         continue
 
@@ -3593,31 +3865,167 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
                 click.echo(click.style('  未获取到任何可回测的股票', fg='yellow'))
                 return
 
-            _print_section('批量回测结果')
-
-            headers = ['代码', '策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '买入/卖出次数', '盈利因子', '结束信号']
-            table_rows = []
+            # 汇总统计（按策略 + 全部 / 按股票）
+            from collections import defaultdict as _dd
+            _by_strat = _dd(list)
+            _strt_trades = _dd(int)
+            _strt_hold = _dd(list)
+            _all_rets = []
+            _all_trades = 0
+            _all_hold = []
             for r in batch_results:
-                risk = r['risk']
-                sig_series = risk.get('signals')
-                sig_value = None
-                if sig_series is not None and len(sig_series) > 0:
-                    sig_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
-                sig_text = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig_value, 'N/A')
-                table_rows.append([
-                    r['symbol'],
-                    r['strategy'],
-                    _pct(risk.get('total_return')),
-                    _pct(risk.get('annual_return')),
-                    _pct(risk.get('max_drawdown')),
-                    _f(risk.get('sharpe_ratio')),
-                    _pct(risk.get('win_rate')),
-                    _fmt_trade_count(risk),
-                    _f(risk.get('profit_factor')),
-                    sig_text,
-                ])
+                _nt = r['risk'].get('total_trades')
+                if _nt:
+                    _strt_trades[r['strategy']] += _nt
+                    _all_trades += _nt
+                _tdf = r['risk'].get('trades_df')
+                if _tdf is not None and len(_tdf) and 'holding_days' in _tdf.columns:
+                    _hd = [float(x) for x in _tdf['holding_days'].dropna().tolist()]
+                    _strt_hold[r['strategy']].extend(_hd)
+                    _all_hold.extend(_hd)
+                _tr = r['risk'].get('total_return')
+                if _tr is None:
+                    continue
+                _by_strat[r['strategy']].append(_tr)
+                _all_rets.append(_tr)
 
-            _print_table(headers, table_rows)
+            def _agg(rets):
+                n = len(rets)
+                return (n, sum(rets) / n, float(np.median(rets)),
+                        sum(1 for x in rets if x > 0) / n * 100, max(rets), min(rets))
+
+            def _fmt_avg_trades(v):
+                """平均交易次数：不带百分号，固定一位小数显示"""
+                return f'{v:.1f}'
+
+            def _fmt_hold(days):
+                """持股天数：一个股票在一个策略下多次交易的总持股天数；无成交记录时显示 N/A"""
+                return str(int(sum(days))) if days else 'N/A'
+
+            # ---- 构建报告表格 ----
+            # 1) 批量回测结果：按代码分组，同代码内按总收益率降序，去除"结束信号"栏
+            html_batch_headers = ['代码', '策略', '总收益率', '年化收益率', '最大回撤',
+                                  '夏普比率', '胜率', '交易次数', '盈利因子']
+            _grp = {}
+            _grp_order = []
+            for r in batch_results:
+                if r['symbol'] not in _grp:
+                    _grp[r['symbol']] = []
+                    _grp_order.append(r['symbol'])
+                _grp[r['symbol']].append(r)
+
+            def _ret_key(x):
+                v = x['risk'].get('total_return')
+                return v if v is not None else float('-inf')
+
+            html_batch_rows = []
+            for _sym in _grp_order:
+                for r in sorted(_grp[_sym], key=_ret_key, reverse=True):
+                    risk = r['risk']
+                    html_batch_rows.append([
+                        r['symbol'], r['strategy'],
+                        _pct(risk.get('total_return')),
+                        _pct(risk.get('annual_return')),
+                        _pct(risk.get('max_drawdown')),
+                        _f(risk.get('sharpe_ratio')),
+                        _pct(risk.get('win_rate')),
+                        _fmt_trade_count(risk),
+                        _f(risk.get('profit_factor')),
+                    ])
+
+            # 2) 策略收益分析：平均交易次数、持股天数（置于股票数后面）
+            html_strat_headers = ['策略', '股票数', '平均交易次数', '持股天数', '平均总收益率',
+                                  '中位数收益率', '正收益占比', '最高', '最低']
+            html_strat_rows = []
+            for _name in sorted(_by_strat):
+                n, avg, med, wr, mx, mn = _agg(_by_strat[_name])
+                avg_tr = _strt_trades.get(_name, 0) / n if n else 0
+                html_strat_rows.append([_name, n, _fmt_avg_trades(avg_tr),
+                                        _fmt_hold(_strt_hold.get(_name, [])),
+                                        f'{avg * 100:.2f}%', f'{med * 100:.2f}%',
+                                        f'{wr:.0f}%', f'{mx * 100:.2f}%', f'{mn * 100:.2f}%'])
+            if _all_rets:
+                n, avg, med, wr, mx, mn = _agg(_all_rets)
+                avg_tr = _all_trades / n if n else 0
+                html_strat_rows.append(['全部', n, _fmt_avg_trades(avg_tr),
+                                        _fmt_hold(_all_hold),
+                                        f'{avg * 100:.2f}%', f'{med * 100:.2f}%',
+                                        f'{wr:.0f}%', f'{mx * 100:.2f}%', f'{mn * 100:.2f}%'])
+
+            # 3) 个股收益分析：每只股票一行（类似策略收益分析表）
+            _by_sym = _dd(list)
+            _sym_trades = _dd(int)
+            _sym_hold = _dd(list)
+            for r in batch_results:
+                _nt = r['risk'].get('total_trades')
+                if _nt:
+                    _sym_trades[r['symbol']] += _nt
+                _tdf = r['risk'].get('trades_df')
+                if _tdf is not None and len(_tdf) and 'holding_days' in _tdf.columns:
+                    _sym_hold[r['symbol']].extend(
+                        float(x) for x in _tdf['holding_days'].dropna().tolist())
+                _tr = r['risk'].get('total_return')
+                if _tr is not None:
+                    _by_sym[r['symbol']].append(_tr)
+            stock_headers = ['股票代码', '策略数', '平均交易次数', '持股天数', '平均总收益率',
+                             '中位数收益率', '正收益占比', '最高', '最低']
+            stock_rows = []
+            for _sym in sorted(_by_sym):
+                n, avg, med, wr, mx, mn = _agg(_by_sym[_sym])
+                avg_tr = _sym_trades.get(_sym, 0) / n if n else 0
+                stock_rows.append([_sym, n, _fmt_avg_trades(avg_tr),
+                                   _fmt_hold(_sym_hold.get(_sym, [])),
+                                   f'{avg * 100:.2f}%', f'{med * 100:.2f}%',
+                                   f'{wr:.0f}%', f'{mx * 100:.2f}%', f'{mn * 100:.2f}%'])
+            if _all_rets:
+                n, avg, med, wr, mx, mn = _agg(_all_rets)
+                avg_tr = _all_trades / n if n else 0
+                stock_rows.append(['全部', n, _fmt_avg_trades(avg_tr),
+                                   _fmt_hold(_all_hold),
+                                   f'{avg * 100:.2f}%', f'{med * 100:.2f}%',
+                                   f'{wr:.0f}%', f'{mx * 100:.2f}%', f'{mn * 100:.2f}%'])
+
+            # 打印输出：仅策略收益分析与个股收益分析（与 HTML 一致）
+            _print_section('策略收益分析')
+            _print_table(html_strat_headers, html_strat_rows)
+            _print_section('个股收益分析')
+            _print_table(stock_headers, stock_rows)
+
+            # 表格：策略收益分析、个股收益分析、批量回测结果
+            html_tables = [('策略收益分析', html_strat_headers, html_strat_rows),
+                           ('个股收益分析', stock_headers, stock_rows),
+                           ('批量回测结果', html_batch_headers, html_batch_rows)]
+            # 某股票在某策略下回测的总收益率 < 0 时，追加该股票+策略的详细交易信息
+            for r in batch_results:
+                tr = r['risk'].get('total_return')
+                if tr is None or tr >= 0:
+                    continue
+                _th, _tr = _build_trades_detail_table(r['risk'].get('trades_df'))
+                if _tr:
+                    html_tables.append(
+                        (f'详细交易信息 - {r["symbol"]} {r["strategy"]}', _th, _tr))
+
+            # 生成 HTML 报告
+            try:
+                html_path = _generate_backtest_html(
+                    f'批量回测({len(symbols)}只)', start_date, end_date, capital,
+                    tables=html_tables,
+                )
+                click.echo(click.style(f'  HTML报告已保存到: {html_path}', fg='green'))
+            except Exception as e:
+                click.echo(click.style(f'  HTML报告生成失败: {e}', fg='yellow'))
+
+            # 随机抽样模式：将本次抽取的股票代码写入 input/random.txt
+            if random:
+                try:
+                    os.makedirs('input', exist_ok=True)
+                    random_path = os.path.join('input', 'random.txt')
+                    with open(random_path, 'w', encoding='utf-8') as f:
+                        f.write('\n'.join(symbols) + '\n')
+                    click.echo(click.style(
+                        f'  随机抽样股票代码已写入: {random_path} ({len(symbols)} 只)', fg='green'))
+                except Exception as e:
+                    click.echo(click.style(f'  写入 random.txt 失败: {e}', fg='yellow'))
 
             click.echo()
             click.echo(click.style('  回测完成!', fg='green', bold=True))
@@ -3655,9 +4063,10 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
         # 运行策略（支持多策略）
         if len(strat_keys) > 1:
             # 多策略：输出对比表（每策略一行）
+            df.attrs['symbol'] = symbol
             all_results = {}
             for sk in strat_keys:
-                click.echo(click.style(f'  正在运行策略: {STRATEGY_MAP[sk][0]}...', fg='blue'))
+                click.echo(click.style(f'  正在运行策略: {_strat_label(sk)}...', fg='blue'))
                 all_results[sk] = _run_strategy(sk, df, capital, enhance=strat_enhance.get(sk, 0))
 
             _print_section('多策略回测结果')
@@ -3668,7 +4077,7 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
             def _f(v):
                 return f'{v:.2f}' if v is not None else 'N/A'
 
-            headers = ['策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '买入/卖出次数', '盈利因子', '结束信号']
+            headers = ['策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '交易次数', '盈利因子', '结束信号']
             table_rows = []
             for sk in strat_keys:
                 risk = all_results[sk]
@@ -3676,9 +4085,9 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
                 sig_value = None
                 if sig_series is not None and len(sig_series) > 0:
                     sig_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
-                sig_text = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig_value, 'N/A')
+                sig_text = {1.0: '买入', 0.0: '观望', -1.0: '卖出'}.get(sig_value, 'N/A')
                 table_rows.append([
-                    STRATEGY_MAP[sk][0],
+                    _strat_label(sk),
                     _pct(risk.get('total_return')),
                     _pct(risk.get('annual_return')),
                     _pct(risk.get('max_drawdown')),
@@ -3689,6 +4098,41 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
                     sig_text,
                 ])
             _print_table(headers, table_rows)
+
+            # 生成多策略合并对比图并嵌入 HTML 报告
+            charts_html = ''
+            try:
+                date_tag = _build_date_tag(start_date, end_date)
+                multi_chart_gen = ChartGenerator(output_dir=output, prefix=f'{symbol}_multi', date_tag=date_tag)
+                strategies_data = []
+                for sk in strat_keys:
+                    strategies_data.append({
+                        'key': sk,
+                        'name': _strat_label(sk),
+                        'signals': all_results[sk].get('signals'),
+                        'equity_curve': all_results[sk].get('equity_curve'),
+                    })
+                multi_path = multi_chart_gen.plot_multi_strategy_composite(df, strategies_data,
+                                                                           title=f'{symbol} 多策略回测对比')
+                b64 = _img_to_b64(multi_path)
+                if b64:
+                    charts_html = f'<img src="data:image/png;base64,{b64}" alt="多策略对比">'
+            except Exception:
+                pass
+
+            try:
+                tables = [('多策略回测结果', headers, table_rows)]
+                for sk in strat_keys:
+                    th, tr = _build_trades_detail_table(all_results[sk].get('trades_df'))
+                    if tr:
+                        tables.append((f'交易明细 - {_strat_label(sk)}', th, tr))
+                html_path = _generate_backtest_html(
+                    symbol, start_date, end_date, capital,
+                    tables=tables, charts_html=charts_html,
+                )
+                click.echo(click.style(f'  HTML报告已保存到: {html_path}', fg='green'))
+            except Exception as e:
+                click.echo(click.style(f'  HTML报告生成失败: {e}', fg='yellow'))
 
             click.echo()
             click.echo(click.style('  回测完成!', fg='green', bold=True))
@@ -3701,6 +4145,7 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
         click.echo(click.style(f'  正在运行策略: {strategy_name}...', fg='blue'))
         date_tag = _build_date_tag(start_date, end_date)
         chart_gen = ChartGenerator(output_dir=output, date_tag=date_tag)
+        df.attrs['symbol'] = symbol
         result, chart_paths, sname, sig_series = _run_single_analysis(df, strategy_key, capital, chart_gen,
                                                                       enhance=strat_enhance.get(strategy_key, 0))
         # 为 backtest 命令单独生成信号图表（无其他策略背景）
@@ -3727,11 +4172,44 @@ def backtest_cmd(symbol, symbol_file, strategy, start, end, capital, output, cha
 
         _print_table(headers, rows)
 
+        # 交易明细：每笔买卖的时间与该时段盈亏
+        trade_headers, trade_rows = _build_trades_detail_table(risk.get('trades_df'))
+        if trade_rows:
+            _print_section('交易明细（买卖时间与盈亏）')
+            _print_table(trade_headers, trade_rows)
+
         # 图表路径
         if chart_paths:
             click.echo(click.style(f'\n    生成的图表:', fg='white'))
             for chart_name, chart_path in chart_paths.items():
                 click.echo(click.style(f'      - {chart_name}: {chart_path}', fg='green'))
+
+        # 生成 HTML 报告（含信号图表）
+        charts_html = ''
+        try:
+            bt_chart_gen = ChartGenerator(output_dir=output, prefix=f'{symbol}_{strategy_key}', date_tag=date_tag)
+            eq_curve = risk.get('equity_curve')
+            sig_path = bt_chart_gen.plot_signal_composite(
+                df, sig_series, strategy_key=strategy_key,
+                title=f'{symbol} {strategy_name} - 回测效果', equity_curve=eq_curve,
+            )
+            b64 = _img_to_b64(sig_path)
+            if b64:
+                charts_html = f'<img src="data:image/png;base64,{b64}" alt="信号图">'
+        except Exception:
+            pass
+
+        try:
+            tables = [('回测结果', headers, rows)]
+            if trade_rows:
+                tables.append(('交易明细（买卖时间与盈亏）', trade_headers, trade_rows))
+            html_path = _generate_backtest_html(
+                f'{symbol} {sname}'.strip(), start_date, end_date, capital,
+                tables=tables, charts_html=charts_html,
+            )
+            click.echo(click.style(f'\n  HTML报告已保存到: {html_path}', fg='green'))
+        except Exception as e:
+            click.echo(click.style(f'  HTML报告生成失败: {e}', fg='yellow'))
 
         click.echo()
         click.echo(click.style('  回测完成!', fg='green', bold=True))
@@ -3789,13 +4267,14 @@ def compare_cmd(symbol, start, end, capital, chart):
 
         # 信号分析/对比从 start 日期开始：忽略预热期数据
         df = _truncate_analysis_df(df, start_date)
+        df.attrs['symbol'] = symbol
 
         # 运行所有策略
         all_results = {}
         all_risks = {}
 
         for sk in ALL_STRATEGIES:
-            click.echo(click.style(f'  正在运行策略: {STRATEGY_MAP[sk][0]}...', fg='blue'))
+            click.echo(click.style(f'  正在运行策略: {_strat_label(sk)}...', fg='blue'))
             result = _run_strategy(sk, df, capital)
             risk = result  # 结果已包含风险指标
             all_results[sk] = result
@@ -3804,18 +4283,18 @@ def compare_cmd(symbol, start, end, capital, chart):
         # 输出对比表格
         _print_section('策略对比结果')
 
-        headers = ['策略', '结束信号', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '买入/卖出次数', '盈利因子']
+        headers = ['策略', '结束信号', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '交易次数', '盈利因子']
         table_rows = []
         for sk in ALL_STRATEGIES:
             risk = all_risks[sk]
-            name = STRATEGY_MAP[sk][0]
+            name = _strat_label(sk)
 
-            # 结束日期信号值（1=强买, 0.5=弱买, 0=观望, -0.5=弱卖, -1=强卖）
+            # 结束日期信号值（1=买, 0=观望, -1=卖）
             sig_series = all_results[sk].get('signals')
             sig_value = None
             if sig_series is not None and len(sig_series) > 0:
                 sig_value = float(sig_series.iloc[-1]) if hasattr(sig_series, 'iloc') else float(sig_series[-1])
-            sig_text = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig_value, 'N/A')
+            sig_text = {1.0: '买入', 0.0: '观望', -1.0: '卖出'}.get(sig_value, 'N/A')
 
             def _pct(v):
                 return f'{v * 100:.2f}%' if v is not None else 'N/A'
@@ -3847,22 +4326,21 @@ def compare_cmd(symbol, start, end, capital, chart):
                 return v
             return None
 
-        rankings = [(STRATEGY_MAP[sk][0], all_risks[sk].get('sharpe_ratio'),
+        rankings = [(_strat_label(sk), all_risks[sk].get('sharpe_ratio'),
                      all_risks[sk].get('total_return'),
                      all_risks[sk].get('max_drawdown'),
-                     all_risks[sk].get('buy_count'),
-                     all_risks[sk].get('sell_count'),
+                     all_risks[sk].get('total_trades'),
                      _end_signal(sk)) for sk in ALL_STRATEGIES]
         rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
-        headers = ['排名', '策略', '夏普比率', '总收益率', '最大回撤', '买入/卖出次数', '结束信号']
+        headers = ['排名', '策略', '夏普比率', '总收益率', '最大回撤', '交易次数', '结束信号']
         rank_rows = []
-        for i, (name, sharpe, total_ret, drawdown, buy_c, sell_c, sig) in enumerate(rankings, 1):
+        for i, (name, sharpe, total_ret, drawdown, nt, sig) in enumerate(rankings, 1):
             shp_str = f'{sharpe:.2f}' if sharpe is not None else 'N/A'
             ret_str = f'{total_ret * 100:.2f}%' if total_ret is not None else 'N/A'
             dd_str = f'{drawdown * 100:.2f}%' if drawdown is not None else 'N/A'
-            tr_str = f'{buy_c or 0:.1f}/{sell_c or 0:.1f}'
-            sig_str = {1.0: '买入', 0.5: '弱买', -1.0: '卖出', -0.5: '弱卖', 0.0: '观望'}.get(sig, 'N/A')
+            tr_str = str(nt) if nt is not None else 'N/A'
+            sig_str = {1.0: '买入', 0.0: '观望', -1.0: '卖出'}.get(sig, 'N/A')
             rank_rows.append([i, name, shp_str, ret_str, dd_str, tr_str, sig_str])
         _print_table(headers, rank_rows)
 
@@ -3871,7 +4349,7 @@ def compare_cmd(symbol, start, end, capital, chart):
             click.echo(click.style('\n  正在生成策略对比图表...', fg='blue'))
             chart_gen = ChartGenerator(output_dir='./output', date_tag=_build_date_tag(start_date, end_date))
             try:
-                compare_data = {STRATEGY_MAP[sk][0]: all_results[sk] for sk in ALL_STRATEGIES}
+                compare_data = {_strat_label(sk): all_results[sk] for sk in ALL_STRATEGIES}
                 compare_path = chart_gen.plot_compare_strategies(compare_data)
                 click.echo(click.style(f'    策略对比图: {compare_path}', fg='green'))
             except Exception as e:
@@ -3897,10 +4375,12 @@ def compare_cmd(symbol, start, end, capital, chart):
 @click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期，格式: YYYYMMDD')
 @click.option('--output', '-o', default=None, help='输出CSV路径（可选，不指定则打印到屏幕）')
-def indicators_cmd(symbol, start, end, output):
+@click.option('--chart', is_flag=True, default=False, help='生成包含所有因子曲线子图的K线图并输出为HTML文件（保存到 report/）')
+def indicators_cmd(symbol, start, end, output, chart):
     """计算各个因子：重点输出各因子、指标的值
 
     流程：获取数据 -> 计算所有指标 -> 保存到CSV或打印
+    --chart 时额外生成全部因子子图K线图，输出为 HTML 文件。
     """
     try:
         start_date, end_date = _parse_dates(start, end)
@@ -3932,9 +4412,52 @@ def indicators_cmd(symbol, start, end, output):
         # 指标展示从 start 日期开始：忽略预热期数据
         df = _truncate_analysis_df(df, start_date)
 
+        indicator_cols = [c for c in df.columns if c not in ['Open', 'High', 'Low', 'Close', 'Volume', 'date']]
+
+        # --chart：生成全部因子子图K线图并输出为 HTML
+        html_path = None
+        if chart:
+            click.echo(click.style('\n  正在生成全部因子子图K线图...', fg='blue'))
+            try:
+                date_tag = _build_date_tag(start_date, end_date)
+                cg = ChartGenerator(output_dir='./output', prefix=f'{symbol}_indicators', date_tag=date_tag)
+                png_path = cg.plot_all_indicators(df, title=f'{symbol} 全部指标子图 ({start_date} ~ {end_date})')
+                click.echo(click.style(f'  因子K线图: {png_path}', fg='green'))
+
+                from datetime import datetime as dt
+                b64 = _img_to_b64(png_path)
+                html_path = os.path.join('report', f'indicators_{symbol}_{dt.now().strftime("%Y%m%d_%H%M%S")}.html')
+                os.makedirs('report', exist_ok=True)
+                img_html = f'<img src="data:image/png;base64,{b64}" alt="因子子图K线" style="width:100%;">' if b64 else '图表生成失败'
+                html_doc = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>指标因子图表 - {symbol}</title>
+<style>
+body {{ font-family: "Microsoft YaHei", sans-serif; margin: 20px; color: #333; }}
+h1 {{ color: #1a5276; }}
+.info {{ color: #666; margin-bottom: 10px; }}
+</style>
+</head>
+<body>
+<h1>{symbol} 全部因子子图K线</h1>
+<div class="info">
+    <span><strong>区间:</strong> {start_date} ~ {end_date}</span>
+    <span style="margin-left:20px;"><strong>指标数:</strong> {len(indicator_cols)}</span>
+    <span style="margin-left:20px;"><strong>生成时间:</strong> {dt.now().strftime("%Y-%m-%d %H:%M:%S")}</span>
+</div>
+{img_html}
+</body>
+</html>'''
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(html_doc)
+                click.echo(click.style(f'  HTML图表已保存到: {html_path}', fg='green'))
+            except Exception as e:
+                click.echo(click.style(f'  因子图表生成失败: {e}', fg='yellow'))
+
         # 列出所有指标
         _print_section('指标列表')
-        indicator_cols = [c for c in df.columns if c not in ['Open', 'High', 'Low', 'Close', 'Volume', 'date']]
         click.echo(click.style(f'  共 {len(indicator_cols)} 项指标:', fg='white'))
         for i, col in enumerate(indicator_cols):
             click.echo(f'    {i+1:>3d}. {col}')
