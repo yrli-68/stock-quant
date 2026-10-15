@@ -10,8 +10,6 @@ ExecStart=/home/abc/myproj/stock-quant/venv/bin/python /home/abc/myproj/stock-qu
 Restart=on-failure
 RestartSec=30
 Environment=PYTHONUNBUFFERED=1
-Environment=SQ_RUN_TIME=1500
-Environment=SQ_STRATEGY=all
 
 [Install]
 WantedBy=default.target

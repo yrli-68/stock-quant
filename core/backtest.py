@@ -79,6 +79,12 @@ class BacktestEngine:
                 - equity_curve (pd.Series): 权益曲线（净值序列）
                 - trades_df (pd.DataFrame): 交易记录明细
                 - daily_returns (pd.Series): 日收益率序列
+
+        交易收益率说明：
+            持仓成本 cost_basis 按加权平均计算（买入时累加含佣金成本，部分减仓时按比例
+            削减），平仓收益率 = (卖出净收入 - cost_basis) / cost_basis，
+            避免 fraction 模式下多次分批建仓使用首次入场价导致的收益率失真。
+            trades_df 中 entry_price 为持仓加权平均成本，exit_price 为卖出执行价。
         """
         # 确保数据对齐
         close = df['close'].values
@@ -103,10 +109,11 @@ class BacktestEngine:
         buy_count = 0  # 买入执行次数
         sell_count = 0  # 卖出执行次数
         in_position = 0.0  # 仓位水平（0~1 浮点数：0=空仓，1=满仓）
-        entry_price = 0.0  # 入场价格
+        entry_price = 0.0  # 入场价格（首次建仓价，仅用于展示）
         entry_date = None  # 入场日期
         entry_idx = 0  # 入场索引
         shares_held = 0.0  # 持有股数
+        cost_basis = 0.0  # 持仓成本（含买入佣金），用于按加权平均成本计算收益率
 
         for i in range(n):
             signal = signals[i]
@@ -131,22 +138,25 @@ class BacktestEngine:
 
                     in_position = 1.0
                     buy_count += 1
+                    cost_basis = shares * exec_price * (1 + self.commission)
                     entry_price = exec_price
                     entry_date = df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i
                     entry_idx = i
 
                 elif signal <= -0.5 and in_position > 0:
                     # 卖出信号（含弱卖/强卖）：全仓卖出
-                    cash += shares_held * exec_price * (1 - self.commission)
+                    proceeds = shares_held * exec_price * (1 - self.commission)
+                    cash += proceeds
 
-                    # 记录交易
-                    trade_return = (exec_price - entry_price) / entry_price
+                    # 记录交易（按加权平均成本计算收益率）
+                    trade_return = (proceeds - cost_basis) / cost_basis if cost_basis > 0 else 0.0
+                    avg_cost = cost_basis / shares_held if shares_held > 0 else entry_price
                     holding_days = i - entry_idx
 
                     trades.append({
                         'entry_date': entry_date,
                         'exit_date': df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i,
-                        'entry_price': entry_price,
+                        'entry_price': avg_cost,
                         'exit_price': exec_price,
                         'position': shares_held,
                         'return': trade_return,
@@ -157,6 +167,7 @@ class BacktestEngine:
                     in_position = 0.0
                     sell_count += 1
                     shares_held = 0.0
+                    cost_basis = 0.0
 
             elif position_style == 'fraction':
                 # ---- 按信号比例模式：in_position 为 0~1 的仓位水平 ----
@@ -168,6 +179,7 @@ class BacktestEngine:
                     shares = trade_amount / exec_price
                     shares_held += shares
                     cash -= shares * exec_price * (1 + self.commission)
+                    cost_basis += shares * exec_price * (1 + self.commission)
 
                     if in_position == 0.0:
                         # 空仓首次建仓，记录入场信息
@@ -182,6 +194,7 @@ class BacktestEngine:
                     decrement = min(abs(signal), in_position)
                     sell_fraction = min(1.0, decrement / in_position)
                     shares_to_sell = shares_held * sell_fraction
+                    shares_before = shares_held
                     cash += shares_to_sell * exec_price * (1 - self.commission)
                     shares_held -= shares_to_sell
 
@@ -189,14 +202,16 @@ class BacktestEngine:
                     sell_count += 1
 
                     if in_position <= 0.0:
-                        # 全部平仓：记录交易
-                        trade_return = (exec_price - entry_price) / entry_price
+                        # 全部平仓：记录交易（用持仓成本 cost_basis 计算加权收益率）
+                        proceeds = shares_before * exec_price * (1 - self.commission)
+                        trade_return = (proceeds - cost_basis) / cost_basis if cost_basis > 0 else 0.0
+                        avg_cost = cost_basis / shares_before if shares_before > 0 else entry_price
                         holding_days = i - entry_idx
 
                         trades.append({
                             'entry_date': entry_date,
                             'exit_date': df.index[i] if isinstance(df.index, pd.DatetimeIndex) else i,
-                            'entry_price': entry_price,
+                            'entry_price': avg_cost,
                             'exit_price': exec_price,
                             'position': shares_to_sell,
                             'return': trade_return,
@@ -206,6 +221,10 @@ class BacktestEngine:
 
                         in_position = 0.0
                         shares_held = 0.0
+                        cost_basis = 0.0
+                    else:
+                        # 部分减仓：按卖出比例削减持仓成本（保持加权平均成本不变）
+                        cost_basis -= cost_basis * (shares_to_sell / shares_before)
 
             # 计算当日持仓市值和总权益
             if in_position > 0:
@@ -218,15 +237,18 @@ class BacktestEngine:
         # 回测结束时如果仍持有仓位，强制平仓
         if in_position > 0:
             final_price = close[-1] * (1 - self.slippage)
-            cash += shares_held * final_price * (1 - self.commission)
+            proceeds = shares_held * final_price * (1 - self.commission)
+            cash += proceeds
 
-            trade_return = (final_price - entry_price) / entry_price
+            # 按加权平均成本计算收益率
+            trade_return = (proceeds - cost_basis) / cost_basis if cost_basis > 0 else 0.0
+            avg_cost = cost_basis / shares_held if shares_held > 0 else entry_price
             holding_days = n - 1 - entry_idx
 
             trades.append({
                 'entry_date': entry_date,
                 'exit_date': df.index[-1] if isinstance(df.index, pd.DatetimeIndex) else n - 1,
-                'entry_price': entry_price,
+                'entry_price': avg_cost,
                 'exit_price': final_price,
                 'position': shares_held,
                 'return': trade_return,

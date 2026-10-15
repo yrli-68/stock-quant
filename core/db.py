@@ -235,7 +235,8 @@ def fetch_indicators(code: str, start_date: str, end_date: str) -> list:
                 SELECT trade_date, ma5, ma10, ma20, ma30, ma60,
                        ema10, ema12, ema26, ema30, macd_dif, macd_dea, macd_bar,
                        rsi14, boll_upper, boll_middle, boll_lower,
-                       kdj_k, kdj_d, kdj_j, atr14, obv, cci20, wr14,
+                       kdj_k, kdj_d, kdj_j, adx14, plus_di, minus_di,
+                       atr14, obv, cci20, wr14,
                        vol_ma5, vwap, hv20, mom60
                 FROM daily_indicators
                 WHERE code = %s AND trade_date >= %s AND trade_date <= %s
@@ -259,6 +260,7 @@ def store_indicators(code: str, df):
         'RSI14': 'rsi14',
         'BOLL_UPPER': 'boll_upper', 'BOLL_MIDDLE': 'boll_middle', 'BOLL_LOWER': 'boll_lower',
         'KDJ_K': 'kdj_k', 'KDJ_D': 'kdj_d', 'KDJ_J': 'kdj_j',
+        'ADX14': 'adx14', 'PLUS_DI': 'plus_di', 'MINUS_DI': 'minus_di',
         'ATR14': 'atr14', 'OBV': 'obv', 'CCI20': 'cci20', 'WR14': 'wr14',
         'VOL_MA5': 'vol_ma5', 'VWAP': 'vwap',
         'HV20': 'hv20', 'MOM60': 'mom60',

@@ -450,14 +450,17 @@ def classify_trend(df, date=None):
 def add_all_indicators(df):
     """一次性添加所有技术指标到DataFrame"""
     df = df.copy()
+    df['MA3'] = calc_ma(df, 3)
     df['MA5'] = calc_ma(df, 5)
     df['MA10'] = calc_ma(df, 10)
     df['MA20'] = calc_ma(df, 20)
     df['MA30'] = calc_ma(df, 30)
     df['MA60'] = calc_ma(df, 60)
     df['MA120'] = calc_ma(df, 120)
+    df['EMA5'] = calc_ema(df, 5)
     df['EMA10'] = calc_ema(df, 10)
     df['EMA12'] = calc_ema(df, 12)
+    df['EMA20'] = calc_ema(df, 20)
     df['EMA26'] = calc_ema(df, 26)
     df['EMA30'] = calc_ema(df, 30)
     macd = calc_macd(df)

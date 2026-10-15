@@ -34,20 +34,19 @@ class Strategy(ABC):
 
     def signal_value(self, direction, strong=False):
         """
-        返回带方向的信号值：
+        返回带方向的信号值：统一为 ±1.0（买入 +1 / 卖出 -1）
 
-            - 弱信号 (strong=False)：±0.5（符合基础版条件）
-            - 强信号 (strong=True)：±1.0（符合增强版条件）
+        弱买/强买已合并为「买」(1)，弱卖/强卖已合并为「卖」(-1)；
+        `strong` 参数仅为兼容保留，不再影响取值。
 
         Args:
             direction (int): +1 表示买入方向，-1 表示卖出方向
-            strong (bool): True 返回强信号 ±1.0，False 返回弱信号 ±0.5
+            strong (bool): 已废弃，忽略
 
         Returns:
-            float: 信号值（±0.5 或 ±1.0）
+            float: 信号值（+1.0 或 -1.0）
         """
-        magnitude = 1.0 if strong else 0.5
-        return magnitude * direction
+        return 1.0 * direction
 
     @abstractmethod
     def generate_signals(self, df):
@@ -62,13 +61,36 @@ class Strategy(ABC):
 
         Returns:
             pd.Series: 交易信号序列，索引与 df 对齐
-                        1   = 强买入（做多）
-                        0.5 = 弱买入
-                        0   = 持有（不操作）
-                       -0.5 = 弱卖出
-                       -1   = 强卖出（平仓/做空）
+                        1  = 买入
+                        0  = 持有（不操作）
+                       -1  = 卖出
         """
         pass
+
+    def signal_residual(self, signals):
+        """
+        计算信号残值序列。
+
+        规则：
+            - 初始残值 = 0
+            - 出现买卖信号时，残值 = 信号值（强买 1 / 弱买 0.5 / 弱卖 -0.5 / 强卖 -1）
+            - 无买卖信号（信号为 0）时，残值 = 上一期残值 / 2（逐日衰减）
+
+        Args:
+            signals (pd.Series): 交易信号序列
+
+        Returns:
+            pd.Series: 信号残值序列，索引与 signals 对齐
+        """
+        residual = 0.0
+        values = []
+        for s in signals:
+            if s != 0:
+                residual = float(s)
+            else:
+                residual = residual / 2.0
+            values.append(residual)
+        return pd.Series(values, index=signals.index, name='signal_residual')
 
     def calculate_position(self, df, signals):
         """

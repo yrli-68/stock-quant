@@ -1,45 +1,239 @@
-# 质量价值融合策略 — 软件设计文档
+# 因子设计文档 — 所有因子的计算与用途
 
-> 基于 `strategies/quality_value_factor.py` 源码分析生成。
-> v2: 新增股东人数和增减持因子。
+> 基于 `core/indicators.py`（技术指标）、`core/indicators.classify_trend`（趋势状态）与
+> `strategies/quality_value_factor.py`（基本面/另类因子）源码分析生成。
+> 覆盖 `add_all_indicators(df)` 产出的全部技术指标列及质价融合策略的五维基本面因子。
 
 ---
 
-## 一、架构概览
+## 一、因子总览
+
+### 1.1 因子分层
+
+| 层级 | 来源 | 频率 | 用途 |
+|------|------|------|------|
+| 技术指标因子 | `core/indicators.add_all_indicators` | 逐日 | 技术类策略（均线/EMA/MACD/RSI/BOLL/KDJ）与指数专属策略 |
+| 趋势状态因子 | `classify_trend` | 逐日（基于 ADX/DMI/MA/斜率 综合） | 轮动/组合模式的风控与选股过滤 |
+| 基本面因子（估值/质量/筹码/增减持） | `quality_value_factor` 各 `_compute_*` | 日频(估值/波动) / 低频 ffill(其余) | 质价融合策略（`quality_value`） |
+| 另类因子（波动率低波异象） | `quality_value_factor._compute_volatility_score` | 逐日 | 质价融合策略第 5 维 |
+
+### 1.2 `add_all_indicators` 输出列清单（36 列指标 + OHLCV）
+
+| 族 | 列 |
+|----|----|
+| 均线 MA | MA5 MA10 MA20 MA30 MA60 MA120 |
+| 指数均线 EMA | EMA10 EMA12 EMA26 EMA30 |
+| MACD | MACD_DIF MACD_DEA MACD_BAR |
+| RSI | RSI14 |
+| 布林带 BOLL | BOLL_UPPER BOLL_MIDDLE BOLL_LOWER |
+| KDJ | KDJ_K KDJ_D KDJ_J |
+| DMI（趋势） | ADX14 PLUS_DI MINUS_DI |
+| ATR | ATR14 |
+| 量能 | OBV VOL_MA5 VWAP |
+| 摆动 | CCI20 WR14 |
+| 波动/动量 | HV20 MOM60 |
+
+---
+
+## 二、技术指标因子（计算与用途）
+
+> 计算函数见 `core/indicators.py`；`add_all_indicators(df)` 一次性为 DataFrame 追加全部列。
+
+### 2.1 均线族（MA / EMA）— 趋势跟随
+
+**MA（简单移动平均）**
+```
+MA_n = close.rolling(n).mean()          # n 期收盘价算术平均
+```
+- `MA5/10/20/30/60/120` 分别对应短/中/长周期市场成本。
+- 用途：
+  - `ma_cross`：MA10 上穿/下穿 MA30 → 金叉买/死叉卖（参数化，可改 MA5/MA20 等）。
+  - 增强过滤：`macd1`/`kdj1` 买入要求 `close > MA60`（站上 60 日线）。
+  - `volatility_timing`：跌破 MA20 为多头防线失守 → 卖出确认。
+  - `classify_trend`：`MA20 > MA60 > MA120`（多头排列）/反向（空头排列）。
+  - 图表主图叠加。
+
+**EMA（指数移动平均）**
+```
+EMA_n: α=2/(n+1)，EMA_t = α·close_t + (1−α)·EMA_{t-1}   # ewm(span=n, adjust=False)
+```
+- 对近期价格赋予更高权重，响应快于同周期 MA。
+- 用途：
+  - `ema_cross`：EMA10 上穿/下穿 EMA30 → 金叉买/死叉卖（增强加斜率确认）。
+  - `ema_cross1` 增强；MACD 内部即由 EMA12/EMA26 派生。
+  - 图表叠加。
+
+### 2.2 MACD（趋势动量）
 
 ```
-行情数据 df (OHLCV + 技术指标)
-         │
-         └──→ QualityValueFactorStrategy.generate_signals(df)
-                  │
-                  ├── 标的分类 (_classify_stock)
-                  │
-                  ├── 估值维度 → _compute_value_score      (逐日)
-                  │        └── akshare 东方财富/百度/乐咕乐股
-                  │
-                  ├── 质量维度 → _compute_quality_score     (报告期+ffill)
-                  │        └── akshare 财务分析指标
-                  │
-                  ├── 筹码维度 → _compute_shareholder_score (报告期+ffill)
-                  │        └── akshare 股东人数变化
-                  │
-                  ├── 增减持维度 → _compute_insider_score    (公告日+ffill)
-                  │        └── akshare 大股东增减持历史
-                  │
-                  └── 加权融合 → 阈值 → 信号 (1/0/-1)
+DIF      = EMA12 − EMA26
+DEA      = EMA9(DIF)
+MACD柱   = 2 × (DIF − DEA)
 ```
+- `macd_strategy`：DIF 上穿 DEA（金叉）→ 买；DIF 下穿 DEA（死叉）→ 卖。
+- `macd1`：金叉 + 次日延续确认（MA60/放量）→ 买；死叉 → 卖。
+- 柱状图为 DIF/DEA 距离的放大，直观反映动能强弱与背离（见 `calc_macd_divergence`）。
 
-## 二、因子配置
+### 2.3 布林带 BOLL（波动通道 / 均值回归）
 
-### 2.1 估值因子 (价值维度) — 权重 40%
+```
+MIDDLE = MA20
+UPPER  = MIDDLE + 2·std(close,20)
+LOWER  = MIDDLE − 2·std(close,20)
+```
+- `bollinger_strategy`：价格跌破下轨后回升上穿下轨 → 买；突破上轨后回落 → 卖。
+- `bollinger1`：以带宽 `BBW=(UPPER−LOWER)/MIDDLE` 过滤"挤压/极端宽"状态。
+- `volatility_timing` 亦参考布林通道。
+
+### 2.4 RSI（超买超卖 / 均值回归）
+
+```
+delta = close.diff()
+avg_gain = max(delta,0) 的 Wilder 平滑(α=1/14)
+avg_loss = |min(delta,0)| 的 Wilder 平滑(α=1/14)
+RS = avg_gain/avg_loss；RSI = 100 − 100/(1+RS)
+```
+- `rsi_strategy`：RSI 自超卖区(<30)上穿 30 → 买；自超买区(>70)下穿 70 → 卖。
+- `rsi1`：更严格阈值 25/75（从更深超卖/超买区穿越 → 强信号）。
+
+### 2.5 KDJ（随机指标 / 均值回归）
+
+```
+RSV = (close − Low9)/(High9 − Low9) × 100     # 空值填 50
+K   = RSV 的 EMA(α=1/3，即 com=2)
+D   = K 的 EMA(α=1/3)
+J   = 3K − 2D
+```
+- `kdj_strategy`：K 上穿 D（金叉）→ 买；K 下穿 D（死叉）→ 卖。
+- `kdj1`：买入需 `close > MA60` → 买；死叉卖出同基础。
+
+### 2.6 ATR（真实波幅 / 波动尺度）
+
+```
+TR = max(H−L, |H−close_t-1|, |L−close_t-1|)
+ATR14 = TR 的 ewm(span=14).mean()
+```
+- 衡量单日真实波动区间，天然价格量纲（可直接除价格归一化）。
+- 用途：
+  - `quality_value` 波动率维度子因子：`ATR14/close` 越低越好（低波异象）。
+  - 与 HV20 一起构成波动类辅助因子。
+
+### 2.7 ADX / DMI（趋势强度与方向）
+
+```
++DM = up_move 且 > down_move 且 >0 时取 up_move，否则 0   # up_move=H.diff()
+−DM = down_move 且 > up_move 且 >0 时取 down_move，否则 0 # down_move=−L.diff()
+TR  = max(H−L, |H−close_t-1|, |L−close_t-1|)
+ATR = TR 的 Wilder 平滑(α=1/14)
++DI = 100·smooth(+DM)/ATR
+−DI = 100·smooth(−DM)/ATR
+DX  = 100·|+DI−(−DI)| / (+DI + −DI)
+ADX = DX 的 Wilder 平滑(α=1/14)
+```
+- `ADX` 衡量趋势**强度**（>25 有趋势，<25 盘整）；`+DI/−DI` 衡量趋势**方向**。
+- 用途：
+  - `classify_trend`：强势需 `ADX≥25 且 +DI>−DI`；弱势需 `ADX≥25 且 −DI>+DI`；`ADX<25` 判横盘。
+  - 轮动/组合模式的风控与选股过滤（见 main.py 中 `classify_trend` 调用）。
+  - 保留为后续趋势类策略的辅助因子。
+
+### 2.8 OBV（能量潮 / 量价关系）
+
+```
+close 上涨日: OBV += volume
+close 下跌日: OBV -= volume
+close 平盘日: OBV 不变
+```
+- 累积量能方向，验证价格走势是否有量能配合（量价背离检测）。
+- 保留为后续量能辅助因子。
+
+### 2.9 CCI（顺势指标）
+
+```
+TP  = (H+L+C)/3
+MA  = TP 的 MA20
+MD  = TP 20 日窗口的 |TP−mean| 的均值
+CCI = (TP − MA) / (0.015·MD)
+```
+- 以统计偏差衡量价格偏离典型价格的幅度，正负超 ±100 表示进入强势/弱势区。
+- 与 WR 同为摆动类超买超卖辅助因子。
+
+### 2.10 WR（威廉指标）
+
+```
+WR14 = (High14 − close) / (High14 − Low14) × (−100)
+```
+- 类似 RSI 的超买超卖摆动指标（取值 −100~0），数值越接近 0 越超买、越接近 −100 越超卖。
+
+### 2.11 VOL_MA5 / VWAP（量能）
+
+```
+VOL_MA5 = volume.rolling(5).mean()
+TP       = (H+L+C)/3
+VWAP     = cumsum(TP·volume) / cumsum(volume)
+```
+- `VOL_MA5`：5 日量均线，配合成交量观察放量/缩量。
+- `VWAP`：全期成交量加权均价，衡量机构/主力资金的平均成本线。
+
+### 2.12 HV20（历史波动率）
+
+```
+HV20 = std(ln(close_t/close_t-1), 20) × √252     # 年化
+```
+- `volatility_timing`：`HV<15%` 低位缩量后突破 → 买；`HV>30%` 且跌破 MA20 → 卖。
+- `quality_value` 波动率维度子因子（HV20 越低越好）。
+- 低波动后的均值回归/突破是择时要点。
+
+### 2.13 MOM60（动量收益率）
+
+```
+MOM60 = close / close.shift(60) − 1
+```
+- `momentum_tiered`（指数专属）：`MOM60>0 且 MA20>MA60` → 买；`MOM60<0` → 卖。
+- 衡量 60 日累计涨幅，捕捉"强者恒强"。
+
+---
+
+## 三、趋势状态判定（classify_trend）
+
+> 综合多个技术因子输出三类状态：**强势 / 弱势 / 横盘震荡**。
+> 供轮动/组合模式在买入/卖出决策时过滤（例如避免在"弱势"状态买入）。
+
+| 状态 | 条件 |
+|------|------|
+| 强势 | `MA20>MA60>MA120` 且 `ADX14≥25` 且 `+DI>−DI` 且 60 日价格斜率>0 且 `MACD_DIF>0` |
+| 弱势 | `MA20<MA60<MA120` 且 `ADX14≥25` 且 `−DI>+DI` 且 60 日价格斜率<0 且 `MACD_DIF<0` |
+| 横盘震荡 | `ADX<25` / 均线缠绕(`|MA20−MA60|/MA60<3%`) / 归一化斜率≈0 / 60 日振幅<1.3 满足任意 2 条 |
+
+---
+
+## 四、基本面与另类因子（quality_value 五维）
+
+> 质价融合策略（`quality_value`）将五维分位数得分加权融合为综合得分，再做滚动 Z-score 标准化出信号。
+
+### 4.1 五维权重
+
+| 维度 | 权重 | 打分频率 |
+|------|:---:|---------|
+| 估值（价值） | 0.35 | 逐日 |
+| 质量 | 0.30 | 报告期 + ffill |
+| 筹码（股东人数） | 0.15 | 报告期 + ffill |
+| 增减持 | 0.10 | 公告日 + ffill |
+| 波动率（低波异象） | 0.10 | 逐日 |
+
+### 4.2 估值维度（价值因子）
+
+按标的类型选择因子及子权重：
 
 | 类型 | 判别 | 因子 | 子权重 |
 |------|------|------|:---:|
-| broad_index | 代码在 BROAD_INDEX_CODES | pe_ttm, pb | [0.55, 0.45] |
+| broad_index | 宽基指数代码/ETF | pe_ttm, pb | [0.55, 0.45] |
 | growth | 300/301/688 开头 | ps, pcf | [0.55, 0.45] |
 | dividend | 默认 | pe_ttm, pb, ps | [0.40, 0.35, 0.25] |
 
-### 2.2 质量因子 — 权重 35%
+数据源：`ak.stock_index_pe_lg/pb_lg`（指数，乐咕乐股）、`ak.stock_value_em`（个股，东方财富）、备用 `ak.stock_zh_valuation_baidu`。
+打分：对每个估值因子，取截至当日的历史序列求当前值分位数；PE/PB/PS/PCF 反向（高=差），收益率类正向。
+
+### 4.3 质量维度（质量因子）
 
 | 因子 | 关键词 | 子权重 | 方向 |
 |------|--------|:---:|------|
@@ -49,195 +243,108 @@
 | 资产负债率 | 资产负债率 | 0.15 | negative |
 | 利润稳定性 | 净利润增长率 | 0.10 | positive |
 
-### 2.3 筹码因子 (股东人数) — 权重 15%
+数据源：`ak.stock_financial_analysis_indicator`。每个报告期求分位数，再 `ffill` 到交易日。
 
-| 因子 | 子权重 | 打分逻辑 |
+### 4.4 筹码维度（股东人数）
+
+| 因子 | 子权重 | 打分 |
+|------|:---:|------|
+| 股东人数变化 | 0.6 | 增幅映射：−30%→0.9，0%→0.5，+30%→0.1 |
+| 人均持股变化 | 0.4 | 增幅映射：+30%→0.9，0%→0.5，−30%→0.1 |
+
+数据源：`ak.stock_hold_num_cninfo`（近 3 年每半年报告期）。人数减少 → 筹码集中 → 利好。
+
+### 4.5 增减持维度（内部人交易）
+
+- 数据源：`ak.stock_shareholder_change_ths`。
+- 每个公告日计算过去 12 个月累计净增持量，sigmoid 对数映射为 0~1 得分；增持 → 利好。
+
+### 4.6 波动率维度（低波异象）
+
+| 子因子 | 子权重 | 打分方式 |
 |------|:---:|---------|
-| 股东人数变化 | 0.6 | 增幅映射: -30%→0.9, 0%→0.5, +30%→0.1 |
-| 人均持股变化 | 0.4 | 增幅映射: +30%→0.9, 0%→0.5, -30%→0.1 |
+| HV20（20 日年化波动率） | 0.40 | 分位数，越低越好 |
+| 252 日最大回撤 | 0.35 | 回撤幅度映射，越低越好 |
+| ATR14/close（归一化波幅） | 0.25 | 分位数，越低越好 |
 
-数据源: `ak.stock_hold_num_cninfo(date=report_date)`，取近 3 年每半年报告期
+数据源：行情逐日计算。低波动、低回撤标的长期收益更稳（低波异象）。
 
-### 2.4 增减持因子 — 权重 10%
-
-数据源: `ak.stock_shareholder_change_ths(symbol)`，获取大股东/高管全部增减持记录
-
-打分: 每个公告日计算过去 12 个月累计净增持量，sigmoid 对数映射为 0~1 得分
-
-### 2.5 阈值
-
-| 参数 | 默认值 |
-|------|:------:|
-| buy_threshold | 0.6 |
-| sell_threshold | 0.4 |
-
----
-
-## 三、数据获取
-
-### 3.1 估值数据
+### 4.7 加权融合与信号生成（滚动 Z-score）
 
 ```
-_fetch_valuation(symbol, stock_type)
-│
-├── _fetch_index_valuation(symbol)        ← broad_index
-│   ├── ak.stock_index_pe_lg(index_name)  → 乐咕乐股 PE-TTM
-│   └── ak.stock_index_pb_lg(index_name)  → 乐咕乐股 PB
-│
-└── _fetch_stock_valuation(symbol)        ← 个股/ETF
-    ├── 主源: ak.stock_value_em(symbol)   → 东方财富 (PE/PB/PS/PCF)
-    └── 备选: ak.stock_zh_valuation_baidu → 百度估值
-```
-
-缓存 `_valuation_cache`：同次运行同一股票只请求一次。
-
-### 3.2 财务数据
-
-```
-_fetch_financials(symbol)
-│
-└── ak.stock_financial_analysis_indicator(symbol, start_year='2016')
-    → DataFrame，每行一个报告期
-```
-
-缓存 `_financials_cache`：同次运行只请求一次。
-
----
-
-## 四、分位数打分
-
-### 4.1 价值维度打分 (逐日)
-
-对行情数据的**每一个交易日**执行：
-
-```
-对于 date 在 df.index 中的每一天:
-│
-├── 1. 截取截止到 date 的估值历史序列 hist_val
-├── 2. 若历史数据 < 60 条 → 跳过
-│
-├── 3. 对每个估值因子:
-│   ├── current = val_df.loc[date, factor]
-│   ├── pct = (hist_val[factor] < current).sum() / len(hist_val)
-│   │
-│   ├── 方向调整:
-│   │   ├── PE/PB/PS/PCF → pct = 1 - pct (反向: 高分位=高估值=差)
-│   │   └── EY/股息率     → 不变        (正向: 高分位=高收益=好)
-│   │
-│   └── 加权累加
-│
-└── 4. 归一化 → value_score ∈ [0, 1]
-```
-
-**返回值:** 与 df.index 对齐的 `pd.Series`，有效日期为 0~1 得分，无效为 NaN。
-
-### 4.2 质量维度打分 (报告期 + ffill)
-
-以**财务报告日期**为评分点：
-
-```
-对于每个财务报告日 idx:
-│
-├── 对每个质量因子:
-│   ├── series = fin_df[col].iloc[:idx+1]
-│   ├── pct = (series < current).sum() / len(series)
-│   ├── negative 方向 → pct = 1 - pct
-│   └── 加权累加
-│
-├── 形成 (报告日期, score) 序列
-│
-└── score_aligned = score_series.reindex(df.index, method='ffill')
-    → 前向填充到每个交易日
-```
-
-**返回值:** 与 df.index 对齐的 `pd.Series`。
-
-### 4.3 信号形态特点
-
-- **价值维度:** 可能日频变化（估值数据每日更新）
-- **质量维度:** 阶梯状变化（报告期间 ffill 保持不变），作为"慢变量"稳压
-
----
-
-## 五、融合与信号生成
-
-### 5.1 四维加权融合
-
-```
-对每个交易日 i:
-│
-├── vw = has_value      ? value_weight      : 0
-├── qw = has_quality    ? quality_weight    : 0
-├── sw = has_shareholder? shareholder_weight: 0
-├── iw = has_insider    ? insider_weight    : 0
-│
-├── total_w = vw + qw + sw + iw
-├── 若 total_w == 0 → 跳过
-│
-└── combined[i] = (v_score×vw + q_score×qw + s_score×sw + i_score×iw) / total_w
-```
-
-核心设计：**单维度缺失时自动按有效维度的权重比例重新归一化**。宽基指数（broad_index）自动跳过筹码和增减持维度。
-
-### 5.2 信号转换（滚动 Z-score 标准化）
-
-综合得分 combined 集中在小范围，直接阈值判断易误判。信号转换改为**先平滑再滚动 Z-score 标准化**：
-
-```
+combined[i] = Σ(维度得分 × 有效维度权重) / Σ有效权重     # 缺失维度自动按比例重归一化
 combined_smooth = combined.rolling(3).mean()
-z_t = (combined_smooth,t - μ_window) / σ_window     # μ/σ 为过去 20 期滚动均值/标准差
+z_t = (combined_smooth,t − μ_20) / σ_20
 ```
 
-| 条件 | 信号 | 含义 |
-|------|:----:|------|
-| `z ≥ z_buy (1.0)` | **0.5** | 综合评估显著优于常态 → 弱买 |
-| `z ≤ z_sell (-1.0)` | **-0.5** | 综合评估显著劣于常态 → 弱卖 |
-| 其余 | **0** | 中性 → 观望 |
+| 条件 | 信号 |
+|------|:----:|
+| `z ≥ z_buy (1.0)` | 买 (1) |
+| `z ≤ z_sell (−1.0)` | 卖 (-1) |
+| 其余 | 0 观望 |
 
-增强级别（`quality_value1`）用更严格 Z 阈值：`z ≥ 2.0` 出强买（**1**）、`z ≤ -2.0` 出强卖（**-1**）。
-
-### 5.3 信号形态特点
-
-- **估值维度:** 日频变化，对价格波动最敏感
-- **质量维度:** 季度阶梯状（ffill），"慢变量"稳压
-- **筹码维度:** 半年度阶梯状（ffill），极低频但高权重变化
-- **增减持维度:** 公告日阶梯状（ffill），事件驱动型低频信号
+增强（`quality_value1`）：`z≥2.0` 买、`z≤−2.0` 卖。
 
 ---
 
-## 六、健壮性设计
+## 五、健壮性设计
 
-1. **四重缓存:** 估值/财务/股东人数/增减持数据各自独立缓存
-2. **单维度降级:** 任一维度缺失时，其余维度独立打分，动态调整权重比例
-3. **宽基指数豁免:** broad_index 类型自动跳过筹码和增减持维度（指数无对应数据）
-4. **数据不足跳过:** 估值 < 60 条 / 质量 < 4 期 → 对应维度置空
-5. **API 优雅降级:** 估值主源(东方财富)失败 → 备选(百度)；各 API 失败 → 对应维度置空
-6. **空数据安全:** 全部维度缺失时返回全 0 信号序列
-7. **分位数除零保护:** 加权总权重为 0 时跳过该日期
-8. **增减持解析健壮:** 支持 亿/万/股 单位及 减持/增持 前缀自动识别
+1. **技术指标确定性**：`add_all_indicators` 纯函数、逐行计算，同输入必同输出（前端数据预热 90 天保证首段指标有效）。
+2. **基本面四重缓存**：估值/财务/股东人数/增减持各自独立缓存，同次运行只请求一次。
+3. **单维度降级**：任一基本面维度缺失时，其余维度独立打分并按有效维度动态重归一化。
+4. **宽基指数豁免**：broad_index 自动跳过筹码与增减持维度（指数无对应数据）。
+5. **数据不足跳过**：估值 <60 条 / 质量 <4 期 → 对应维度置空。
+6. **API 优雅降级**：估值主源失败 → 备用源；各 API 失败 → 对应维度置空。
+7. **空数据安全**：全部维度缺失返回全 0 信号；Z-score 标准差为 0 时取 0 并裁剪到 [−3, 3]。
 
 ---
 
-## 七、与综合策略的集成
+## 六、因子与策略对照
 
-在 `stock-quant.json` 中配置 `quality_value` 权重，作为综合策略的一个子策略参与加权投票：
+| 策略 | 主要因子 |
+|------|---------|
+| `ma_cross` / `ma_cross1` | MA10/MA30 + 斜率确认 |
+| `sg1` | MA3/MA10 交叉（严格买入，无强信号） |
+| `sg2` | MA5/MA20 交叉（严格买入，无强信号） |
+| `sg3` | EMA5/EMA20 交叉（严格买入，无强信号） |
+| `ema_cross` / `ema_cross1` | EMA10/EMA30 + 斜率确认 |
+| `macd` / `macd1` | DIF/DEA 金叉死叉 + `close>MA60` |
+| `rsi` / `rsi1` | RSI14 超买超卖（30/70 或 25/75） |
+| `bollinger` / `bollinger1` | 上下轨穿越 + 带宽过滤 |
+| `kdj` / `kdj1` | K/D 金叉死叉 + `close>MA60` |
+| `quality_value` | 估值/质量/筹码/增减持/波动五维 |
+| `hold` | 无（基准买入持有） |
+| `momentum`（指数） | MOM60 + MA20/MA60 |
+| `volatility`（指数） | HV20 + MA20 + BOLL |
+| `breadth`（指数） | 涨跌比 + 量比 + MA5 |
+| `composite` | 上述策略加权 + 仓位水平 → 平滑 → Z-score |
+| 轮动/组合模式 | `classify_trend`（ADX/DMI/MA 等）用于选股与风控 |
 
-```json
-{
-    "composite": {
-        "threshold": 0.25,
-        "strategies": {
-            "ma_cross": 0.18,
-            "macd": 0.18,
-            "rsi": 0.18,
-            "bollinger": 0.18,
-            "quality_value": 0.16,
-            "momentum": 0.04,
-            "volatility": 0.04,
-            "breadth": 0.04
-        }
-    }
-}
-```
+## 七、因子组合实践
+**ADX/DMI 动向指标** ：
+*ADX＞25*：市场存在明显趋势（单边上涨 / 下跌），DI 交叉信号可信度高
+*ADX＜20*：无趋势，震荡市，DI 交叉大量假信号，DMI 基本失效
+1. 过滤其他指标信号：RSI/KDJ 金叉，但 ADX＜20，属于震荡噪音，可以降低仓位；ADX＞25，趋势行情，优先跟随趋势。
+2. 识别趋势结束：趋势运行一段时间后 ADX 见顶回落，警惕行情拐点。
+3. 不适合：横盘震荡，ADX 长期低位，DI 来回交叉，信号杂乱。
 
-策略注册 key 为 `quality_value`，中文名称"质量价值融合策略"，ETF 模式复用为"ETF质量价值融合策略"（`stock_type='auto'` 自动适配）。
+*先用 DMI‑ADX 定环境*：
+ADX＞25：存在趋势 → 优先 CCI 突破信号，少用 WR、KDJ 抄顶摸底；
+ADX＜20：震荡环境 → 可用 WR、KDJ、CCI 做高抛低吸，OBV 验证量能。
+   
+**WR 威廉指标**：
+和 RSI/KDJ 逻辑相似，但是 WR 反应极度灵敏，毛刺多，反复来回穿越区间。
+WR 进入‑80~‑100 超卖区后向上拐头：反弹机会
+WR 进入0~‑20 超买区后向下拐头：回落风险
+震荡市场，短线择时，只做辅助过滤，极少单独作为主信号，常`配合 BOLL、MACD` 一起用
+
+**OBV 能量潮** 
+*顶背离*：价格创新高，OBV 不创新高 → 股价在涨，但成交量资金跟不上，上涨动能不足，警惕见顶。
+*底背离*：价格创新低，OBV 不再创新低 → 股价下跌，但资金悄悄在承接，有见底可能性。
+1. 验证趋势真假：价格涨，OBV 不跟，上涨虚；价格跌，OBV 不创新低，抛压衰竭。
+2. 过滤假突破：K 线向上突破，OBV 没有同步向上突破，大概率假突破。
+3. 适合个股，对权重大盘股效果更好；对高度控盘庄股容易失真。
+
+*入场共振*：
+震荡市：BOLL 下轨 + CCI＜‑100 + WR 进入‑80~‑100 超卖 + OBV 底背离，反弹胜率提升。
+趋势市：DMI +DI 上穿‑DI + ADX＞25 + CCI 上穿 + 100 + OBV 同步创新高，顺势做多。

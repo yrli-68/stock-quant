@@ -59,9 +59,10 @@ CREATE TABLE daily_indicators (
     code           VARCHAR(10) NOT NULL,
     trade_date     DATE NOT NULL,
     -- 均线
-    ma5            DOUBLE, ma10           DOUBLE, ma20           DOUBLE, ma60           DOUBLE,
+    ma5            DOUBLE, ma10           DOUBLE, ma20           DOUBLE, ma30           DOUBLE,
+    ma60           DOUBLE,
     -- EMA
-    ema12          DOUBLE, ema26          DOUBLE,
+    ema10          DOUBLE, ema12          DOUBLE, ema26          DOUBLE, ema30          DOUBLE,
     -- MACD
     macd_dif       DOUBLE, macd_dea       DOUBLE, macd_bar       DOUBLE,
     -- RSI
@@ -70,6 +71,8 @@ CREATE TABLE daily_indicators (
     boll_upper     DOUBLE, boll_middle    DOUBLE, boll_lower     DOUBLE,
     -- KDJ
     kdj_k          DOUBLE, kdj_d          DOUBLE, kdj_j          DOUBLE,
+    -- DMI（趋势辅助因子）
+    adx14          DOUBLE, plus_di        DOUBLE, minus_di       DOUBLE,
     -- 其他
     atr14          DOUBLE, obv            DOUBLE, cci20          DOUBLE,
     wr14           DOUBLE, vol_ma5        DOUBLE, vwap           DOUBLE,
@@ -206,12 +209,13 @@ SELECT
     k.code, k.trade_date,
     k.open, k.high, k.low, k.close, k.volume, k.amount,
     k.amplitude, k.change_pct, k.change_val, k.turnover_rate,
-    i.ma5, i.ma10, i.ma20, i.ma60,
-    i.ema12, i.ema26,
+    i.ma5, i.ma10, i.ma20, i.ma30, i.ma60,
+    i.ema10, i.ema12, i.ema26, i.ema30,
     i.macd_dif, i.macd_dea, i.macd_bar,
     i.rsi14,
     i.boll_upper, i.boll_middle, i.boll_lower,
     i.kdj_k, i.kdj_d, i.kdj_j,
+    i.adx14, i.plus_di, i.minus_di,
     i.atr14, i.obv, i.cci20, i.wr14, i.vol_ma5, i.vwap,
     i.hv20, i.mom60
 FROM daily_kline k

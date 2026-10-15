@@ -77,11 +77,17 @@ FP_REGULAR, FP_BOLD = _setup_chinese_font()
 # 全局配色方案
 # ============================================================================
 
+# K线主图均线叠加（MA10/MA20/MA60/MA120）配色
+_MA10_COLOR = '#f39c12'   # 橙色
+_MA20_COLOR = '#3498db'   # 蓝色
+_MA60_COLOR = '#e74c3c'   # 红色
+_MA120_COLOR = '#9b59b6'  # 紫色
+
 # 配色方案：采用柔和的颜色搭配，保证图表美观
 COLOR_UP = '#e74c3c'        # 上涨红色
 COLOR_DOWN = '#2ecc71'      # 下跌绿色
-COLOR_UP_LIGHT = '#f1948a'  # 浅红色（弱买）
-COLOR_DOWN_LIGHT = '#82e0aa'  # 浅绿色（弱卖）
+COLOR_UP_LIGHT = '#f1948a'  # 浅红色
+COLOR_DOWN_LIGHT = '#82e0aa'  # 浅绿色
 COLOR_BLUE = '#3498db'      # 蓝色主色调
 COLOR_ORANGE = '#e67e22'    # 橙色
 COLOR_PURPLE = '#9b59b6'    # 紫色
@@ -126,6 +132,17 @@ class ChartGenerator:
             base, ext = os.path.splitext(filename)
             filename = f'{base}_{self.date_tag}{ext}'
         return os.path.join(self.output_dir, self.prefix + filename)
+
+    def _ma_price_overlays(self, df, panel=0):
+        """生成叠加在K线主图(panel)上的 MA10/MA20/MA60/MA120 曲线 addplot 列表"""
+        specs = [(10, _MA10_COLOR), (20, _MA20_COLOR), (60, _MA60_COLOR), (120, _MA120_COLOR)]
+        plots = []
+        for period, color in specs:
+            col = f'MA{period}'
+            if col in df.columns:
+                plots.append(mpf.make_addplot(df[col], panel=panel, color=color,
+                                              width=1.0, secondary_y=False))
+        return plots
 
     @_synchronized_plot
     def plot_kline_with_indicators(self, df, title='K线图与技术指标', save_path=None):
@@ -519,31 +536,17 @@ class ChartGenerator:
 
         # 标注买入信号
         buy_signals = signals_aligned[signals_aligned > 0]
-        weak_buy_signals = signals_aligned[signals_aligned == 0.5]
-        strong_buy_signals = signals_aligned[signals_aligned == 1]
         sell_signals = signals_aligned[signals_aligned < 0]
-        weak_sell_signals = signals_aligned[signals_aligned == -0.5]
-        strong_sell_signals = signals_aligned[signals_aligned == -1]
 
-        if len(strong_buy_signals) > 0:
-            buy_prices = df_aligned.loc[strong_buy_signals.index, 'close']
-            ax.scatter(strong_buy_signals.index, buy_prices, color=COLOR_UP, marker='^',
-                       s=60, zorder=5, label=f'买入 ({len(strong_buy_signals)}次)', edgecolors='white', linewidth=0.5)
+        if len(buy_signals) > 0:
+            buy_prices = df_aligned.loc[buy_signals.index, 'close']
+            ax.scatter(buy_signals.index, buy_prices, color=COLOR_UP, marker='^',
+                       s=60, zorder=5, label=f'买入 ({len(buy_signals)}次)', edgecolors='white', linewidth=0.5)
 
-        if len(weak_buy_signals) > 0:
-            buy_prices = df_aligned.loc[weak_buy_signals.index, 'close']
-            ax.scatter(weak_buy_signals.index, buy_prices, facecolors='none', edgecolors=COLOR_UP_LIGHT, marker='^',
-                       s=60, zorder=5, label=f'弱买 ({len(weak_buy_signals)}次)', linewidth=1.2)
-
-        if len(strong_sell_signals) > 0:
-            sell_prices = df_aligned.loc[strong_sell_signals.index, 'close']
-            ax.scatter(strong_sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
-                       s=60, zorder=5, label=f'卖出 ({len(strong_sell_signals)}次)', edgecolors='white', linewidth=0.5)
-
-        if len(weak_sell_signals) > 0:
-            sell_prices = df_aligned.loc[weak_sell_signals.index, 'close']
-            ax.scatter(weak_sell_signals.index, sell_prices, facecolors='none', edgecolors=COLOR_DOWN_LIGHT, marker='v',
-                       s=60, zorder=5, label=f'弱卖 ({len(weak_sell_signals)}次)', linewidth=1.2)
+        if len(sell_signals) > 0:
+            sell_prices = df_aligned.loc[sell_signals.index, 'close']
+            ax.scatter(sell_signals.index, sell_prices, color=COLOR_DOWN, marker='v',
+                       s=60, zorder=5, label=f'卖出 ({len(sell_signals)}次)', edgecolors='white', linewidth=0.5)
 
         ax.set_title(" ", fontsize=11, fontproperties=FP_BOLD, color=COLOR_DARK)
         ax.set_ylabel('价格', fontsize=11, fontproperties=FP_REGULAR, color=COLOR_DARK)
@@ -564,12 +567,15 @@ class ChartGenerator:
 
     # 策略 → 指标子图类型
     STRATEGY_INDICATOR_TYPE = {
-        'ma_cross': 'ma',
-        'ema_cross': 'ema',
-        'macd': 'macd',
+        'ma1030': 'ma',
+        'ema1030': 'ema',
+        'macd1226': 'macd',
         'rsi': 'rsi',
         'bollinger': 'boll',
         'kdj': 'kdj',
+        'ma310': 'sg1',
+        'ma520': 'sg2',
+        'ema520': 'sg3',
         'momentum': 'momentum',
         'volatility': 'volatility',
         'breadth': 'volume',
@@ -577,10 +583,26 @@ class ChartGenerator:
         'composite': 'composite',
     }
 
+    def _indicator_base_key(self, key):
+        """去掉增强级后缀得到基础策略 key（增强变体共用同指标子图）
+
+        基础键本身可能以数字结尾（如 'ma1030'），故优先精确匹配已知基础键，
+        否则在已知基础键中取最长前缀并校验其余部分为数字。
+        """
+        key = str(key)
+        if key in self.STRATEGY_INDICATOR_TYPE:
+            return key
+        for b in sorted(self.STRATEGY_INDICATOR_TYPE, key=len, reverse=True):
+            if key.startswith(b) and key[len(b):].isdigit():
+                return b
+        import re as _re
+        m = _re.match(r'^(.*?)(\d+)$', key)
+        return m.group(1) if m else key
+
     def _strategy_indicator_addplots(self, df, strategy_key, panel, signals=None):
         """根据策略生成对应的技术指标 addplot 列表（绘制在 panel 面板）"""
         plots = []
-        ind_type = self.STRATEGY_INDICATOR_TYPE.get(strategy_key)
+        ind_type = self.STRATEGY_INDICATOR_TYPE.get(self._indicator_base_key(strategy_key))
         if ind_type == 'macd':
             if all(c in df.columns for c in ('MACD_DIF', 'MACD_DEA', 'MACD_BAR')):
                 plots.append(mpf.make_addplot(df['MACD_DIF'], panel=panel, color=COLOR_BLUE, width=1.2, ylabel='MACD', label='DIF', secondary_y=False))
@@ -611,6 +633,27 @@ class ChartGenerator:
                 col = f'MA{period}'
                 if col in df.columns:
                     plots.append(mpf.make_addplot(df[col], panel=panel, color=color, width=1.0, ylabel='MA', label=f'MA{period}', secondary_y=False))
+        elif ind_type == 'sg1':
+            # SG1：MA3 快线与 MA10 慢线（MA3 缺失时按 close 现算）
+            ma3 = df['MA3'] if 'MA3' in df.columns else df['Close'].rolling(3).mean() if 'Close' in df.columns else None
+            if ma3 is not None:
+                plots.append(mpf.make_addplot(ma3, panel=panel, color=COLOR_ORANGE, width=1.0, ylabel='MA', label='MA3', secondary_y=False))
+            if 'MA10' in df.columns:
+                plots.append(mpf.make_addplot(df['MA10'], panel=panel, color=COLOR_TEAL, width=1.0, label='MA10', secondary_y=False))
+        elif ind_type == 'sg2':
+            # SG2：MA5 快线与 MA20 慢线
+            if 'MA5' in df.columns:
+                plots.append(mpf.make_addplot(df['MA5'], panel=panel, color=COLOR_ORANGE, width=1.0, ylabel='MA', label='MA5', secondary_y=False))
+            if 'MA20' in df.columns:
+                plots.append(mpf.make_addplot(df['MA20'], panel=panel, color=COLOR_TEAL, width=1.0, label='MA20', secondary_y=False))
+        elif ind_type == 'sg3':
+            # SG3：EMA5 快线与 EMA20 慢线（缺失时按 Close 现算）
+            ema5 = df['EMA5'] if 'EMA5' in df.columns else df['Close'].ewm(span=5, adjust=False).mean() if 'Close' in df.columns else None
+            ema20 = df['EMA20'] if 'EMA20' in df.columns else df['Close'].ewm(span=20, adjust=False).mean() if 'Close' in df.columns else None
+            if ema5 is not None:
+                plots.append(mpf.make_addplot(ema5, panel=panel, color=COLOR_ORANGE, width=1.0, ylabel='EMA', label='EMA5', secondary_y=False))
+            if ema20 is not None:
+                plots.append(mpf.make_addplot(ema20, panel=panel, color=COLOR_TEAL, width=1.0, label='EMA20', secondary_y=False))
         elif ind_type == 'ema':
             for period, color in ((10, COLOR_ORANGE), (30, COLOR_TEAL)):
                 col = f'EMA{period}'
@@ -669,24 +712,16 @@ class ChartGenerator:
         if signals is not None and len(signals) > 0:
             buy_val, sell_val = self._indicator_marker_values(df, ind_type)
             if buy_val is not None and sell_val is not None:
-                strong_buy = pd.Series(buy_val, index=df.index).where(signals == 1)
-                weak_buy = pd.Series(buy_val, index=df.index).where(signals == 0.5)
-                strong_sell = pd.Series(sell_val, index=df.index).where(signals == -1)
-                weak_sell = pd.Series(sell_val, index=df.index).where(signals == -0.5)
-                # 强买：实心向上三角；弱买：空心向上三角（浅红）
-                plots.append(mpf.make_addplot(strong_buy, type='scatter', panel=panel,
-                                              marker='^', markersize=72, color=COLOR_UP,
-                                              label='买入', secondary_y=False))
-                plots.append(mpf.make_addplot(weak_buy, type='scatter', panel=panel,
-                                              marker='^', markersize=72, color='none', edgecolors=COLOR_UP_LIGHT,
-                                              linewidths=1.5, label='弱买', secondary_y=False))
-                # 强卖：实心向下三角；弱卖：空心向下三角（浅绿）
-                plots.append(mpf.make_addplot(strong_sell, type='scatter', panel=panel,
-                                              marker='v', markersize=72, color=COLOR_DOWN,
-                                              label='卖出', secondary_y=False))
-                plots.append(mpf.make_addplot(weak_sell, type='scatter', panel=panel,
-                                              marker='v', markersize=72, color='none', edgecolors=COLOR_DOWN_LIGHT,
-                                              linewidths=1.5, label='弱卖', secondary_y=False))
+                buy_pts = pd.Series(buy_val, index=df.index).where(signals > 0)
+                sell_pts = pd.Series(sell_val, index=df.index).where(signals < 0)
+                plots.append(mpf.make_addplot(buy_pts, type='scatter', panel=panel,
+                                              marker='^', markersize=80, color=COLOR_UP,
+                                              edgecolors=COLOR_UP, linewidths=1.0,
+                                              label='买', secondary_y=False))
+                plots.append(mpf.make_addplot(sell_pts, type='scatter', panel=panel,
+                                              marker='v', markersize=80, color=COLOR_DOWN,
+                                              edgecolors=COLOR_DOWN, linewidths=1.0,
+                                              label='卖', secondary_y=False))
 
         return plots
 
@@ -709,6 +744,39 @@ class ChartGenerator:
             return lo - span * 0.05, hi + span * 0.05
         if ind_type == 'ma':
             cols = [f'MA{p}' for p in (10, 30) if f'MA{p}' in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'sg1':
+            cols = [c for c in ('MA3', 'MA10') if c in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'sg2':
+            cols = [c for c in ('MA5', 'MA20') if c in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'sg3':
+            cols = [c for c in ('EMA5', 'EMA20') if c in df.columns]
             if not cols:
                 return None, None
             vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
@@ -859,6 +927,9 @@ class ChartGenerator:
         add_plots = []
         panel_ratios = [2, 1]  # K线(原高度2/3) + 成交量
 
+        # K线主图叠加 MA10/MA20/MA60/MA120
+        add_plots.extend(self._ma_price_overlays(df, panel=0))
+
         # 买卖点标注已移至指标子图（由 _strategy_indicator_addplots 处理），K线主图不再标注
 
         # 指标子图 (panel 2，panel 1 为成交量)
@@ -894,7 +965,7 @@ class ChartGenerator:
 
         # 将指标子图上的买卖点散点重定位到靠近子图边框（买入贴近底部、卖出贴近顶部）
         if has_indicator:
-            ind_type = self.STRATEGY_INDICATOR_TYPE.get(strategy_key)
+            ind_type = self.STRATEGY_INDICATOR_TYPE.get(self._indicator_base_key(strategy_key))
             buy_val, sell_val = self._indicator_marker_values(df, ind_type)
             self._reposition_signal_markers(axes, indicator_panel, buy_val, sell_val)
 
@@ -969,7 +1040,7 @@ class ChartGenerator:
         结构:
         - panel 0: K线
         - panel 1: 成交量
-        - panel 2..N: 各策略指标子图（ma_cross/macd/rsi/kdj 等），买卖点标注在各自指标子图
+        - panel 2..N: 各策略指标子图（ma1030/macd1226/rsi/kdj 等），买卖点标注在各自指标子图
         - 最后一个 panel: 权益曲线汇总（每个策略一条曲线）
 
         Parameters
@@ -1016,6 +1087,9 @@ class ChartGenerator:
 
         add_plots = []
         panel_ratios = [2, 1]  # K线 + 成交量
+
+        # K线主图叠加 MA10/MA20/MA60/MA120
+        add_plots.extend(self._ma_price_overlays(df, panel=0))
 
         # 各策略指标子图（含各自买卖点标注）
         indicator_panels = []  # (panel, strategy_key)
@@ -1069,7 +1143,7 @@ class ChartGenerator:
 
         # 各指标子图买卖点重定位到靠近子图边框
         for panel, sk in indicator_panels:
-            ind_type = self.STRATEGY_INDICATOR_TYPE.get(sk)
+            ind_type = self.STRATEGY_INDICATOR_TYPE.get(self._indicator_base_key(sk))
             buy_val, sell_val = self._indicator_marker_values(df, ind_type)
             self._reposition_signal_markers(axes, panel, buy_val, sell_val)
 
@@ -1256,6 +1330,172 @@ class ChartGenerator:
         # 手动添加全局标题，y越小，标题越靠下，离K线越近，y取值范围 0~1：1=最顶部，0=最底部
         fig.suptitle(title, y=1, fontsize=16)
     
+        fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
+        plt.close(fig)
+
+        return save_path
+
+    @_synchronized_plot
+    def plot_all_indicators(self, df, title='全部因子子图K线', save_path=None):
+        """
+        绘制包含所有因子曲线子图的K线图（相关因子合并到同一子图）
+
+        子图布局（相关因子曲线合并）：
+            panel 0 主图(K线)：MA5/10/20/30/60/120 + BOLL上中下轨 + VWAP
+            panel 1 成交量：Volume + VOL_MA5
+            EMA 子图：EMA10/12/26/30
+            MACD 子图：DIF/DEA/MACD柱
+            RSI 子图：RSI14（含 30/70 参考线）
+            KDJ 子图：K/D/J
+            DMI 子图：ADX/+DI/-DI
+            摆动子图：CCI + WR
+            波动子图：ATR14 + HV20
+            OBV 子图
+            动量子图：MOM60
+
+        Parameters
+        ----------
+        df : pd.DataFrame : 含 OHLCV 及全部指标列（add_all_indicators 输出）
+        title : str : 图表标题
+        save_path : str : 保存路径
+
+        Returns
+        -------
+        str : 保存的 PNG 文件路径
+        """
+        if save_path is None:
+            save_path = self._get_save_path('all_indicators.png')
+
+        df = df.copy()
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+
+        rename_map = {}
+        ohlc_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+        for old_col, new_col in ohlc_map.items():
+            if old_col in df.columns and new_col not in df.columns:
+                rename_map[old_col] = new_col
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        def _has(*cols):
+            return all(c in df.columns and df[c].notna().any() for c in cols)
+
+        def _get(*cols):
+            return [c for c in cols if c in df.columns]
+
+        add_plots = []
+        panel_ratios = [3.2, 1.0]  # K线 + 成交量
+
+        def _new_panel(ylabel):
+            panel_ratios.append(1.0)
+            return len(panel_ratios) - 1, ylabel
+
+        def _line(col, panel, color, ylabel=None, width=1.1, style='-', alpha=1.0):
+            if col in df.columns:
+                kw = dict(panel=panel, color=color, width=width, secondary_y=False, alpha=alpha)
+                if style != '-':
+                    kw['linestyle'] = style
+                if ylabel is not None:
+                    kw['ylabel'] = ylabel
+                add_plots.append(mpf.make_addplot(df[col], **kw))
+
+        # ---- panel 0 主图：K线 + 均线 + 布林带 + VWAP ----
+        ma_colors = {5: '#f39c12', 10: '#3498db', 20: '#e67e22',
+                     30: '#9b59b6', 60: '#c0392b', 120: '#7f8c8d'}
+        for p, color in ma_colors.items():
+            _line(f'MA{p}', 0, color, width=1.0)
+        if _has('BOLL_UPPER', 'BOLL_MIDDLE', 'BOLL_LOWER'):
+            _line('BOLL_UPPER', 0, COLOR_UP, width=0.9, style='--', alpha=0.7)
+            _line('BOLL_MIDDLE', 0, '#34495e', width=0.9)
+            _line('BOLL_LOWER', 0, '#2ecc71', width=0.9, style='--', alpha=0.7)
+        _line('VWAP', 0, '#16a085', width=1.1, style='-.', alpha=0.8)
+
+        # ---- panel 1 成交量 + VOL_MA5 ----
+        _line('VOL_MA5', 1, '#f39c12', width=1.0)
+
+        # ---- EMA 子图 ----
+        if _has('EMA10', 'EMA12', 'EMA26', 'EMA30') or _has('EMA10', 'EMA30'):
+            p, yl = _new_panel('EMA')
+            for col, color in (('EMA10', '#3498db'), ('EMA12', '#e74c3c'),
+                               ('EMA26', '#f39c12'), ('EMA30', '#9b59b6')):
+                _line(col, p, color, ylabel=yl)
+
+        # ---- MACD 子图 ----
+        if _has('MACD_DIF', 'MACD_DEA'):
+            p, yl = _new_panel('MACD')
+            _line('MACD_DIF', p, '#3498db', ylabel=yl)
+            _line('MACD_DEA', p, '#e67e22')
+            if 'MACD_BAR' in df.columns:
+                bar_colors = [COLOR_UP if v >= 0 else '#2ecc71' for v in df['MACD_BAR']]
+                add_plots.append(mpf.make_addplot(df['MACD_BAR'], type='bar', panel=p,
+                                                  color=bar_colors, width=0.6, secondary_y=False))
+
+        # ---- RSI 子图 ----
+        if _has('RSI14'):
+            p, yl = _new_panel('RSI')
+            _line('RSI14', p, '#8e44ad', ylabel=yl)
+            for ref, c in ((70, '#95a5a6'), (30, '#95a5a6')):
+                add_plots.append(mpf.make_addplot(pd.Series(ref, index=df.index), panel=p,
+                                                  color=c, width=0.7, linestyle='--', secondary_y=False))
+
+        # ---- KDJ 子图（K/D/J）----
+        if _has('KDJ_K', 'KDJ_D', 'KDJ_J'):
+            p, yl = _new_panel('KDJ')
+            for col, color in (('KDJ_K', '#3498db'), ('KDJ_D', '#e67e22'), ('KDJ_J', '#e74c3c')):
+                _line(col, p, color, ylabel=yl)
+            for ref, c in ((80, '#95a5a6'), (20, '#95a5a6')):
+                add_plots.append(mpf.make_addplot(pd.Series(ref, index=df.index), panel=p,
+                                                  color=c, width=0.7, linestyle='--', secondary_y=False))
+
+        # ---- DMI 子图（ADX/+DI/-DI）----
+        if _has('ADX14', 'PLUS_DI', 'MINUS_DI'):
+            p, yl = _new_panel('DMI')
+            for col, color in (('ADX14', '#34495e'), ('PLUS_DI', '#27ae60'), ('MINUS_DI', '#c0392b')):
+                _line(col, p, color, ylabel=yl)
+
+        # ---- 摆动子图（CCI + WR）----
+        if _has('CCI20') or _has('WR14'):
+            p, yl = _new_panel('CCI/WR')
+            _line('CCI20', p, '#2980b9', ylabel=yl)
+            _line('WR14', p, '#d35400')
+            for ref, c in ((100, '#95a5a6'), (-100, '#95a5a6'), (0, '#95a5a6')):
+                add_plots.append(mpf.make_addplot(pd.Series(ref, index=df.index), panel=p,
+                                                  color=c, width=0.6, linestyle=':', secondary_y=False))
+
+        # ---- 波动子图（ATR + HV）----
+        if _has('ATR14') or _has('HV20'):
+            p, yl = _new_panel('ATR/HV')
+            _line('ATR14', p, '#16a085', ylabel=yl)
+            _line('HV20', p, '#8e44ad')
+
+        # ---- OBV 子图 ----
+        if _has('OBV'):
+            p, yl = _new_panel('OBV')
+            _line('OBV', p, '#1abc9c', ylabel=yl)
+
+        # ---- 动量子图（MOM60）----
+        if _has('MOM60'):
+            p, yl = _new_panel('MOM60')
+            _line('MOM60', p, '#e67e22', ylabel=yl)
+
+        mc = mpf.make_marketcolors(up=COLOR_UP, down='#2ecc71', edge='inherit', wick='inherit',
+                                   volume={'up': COLOR_UP, 'down': '#2ecc71'}, alpha=0.9)
+        s = mpf.make_mpf_style(
+            marketcolors=mc, gridstyle=':', gridcolor='#e0e0e0',
+            facecolor=COLOR_BG, figcolor=COLOR_BG, y_on_right=False,
+            rc={'font.sans-serif': [FP_REGULAR.get_name(), 'DejaVu Sans'], 'axes.unicode_minus': False}
+        )
+
+        fig_h = 5 + 0.9 * len(panel_ratios)
+        fig, axes = mpf.plot(
+            df, type='candle', style=s, volume=True, addplot=add_plots,
+            panel_ratios=tuple(panel_ratios), figsize=(16, fig_h),
+            returnfig=True, warn_too_much_data=len(df) + 1,
+            datetime_format='%Y-%m', xrotation=0,
+        )
+        fig.suptitle(title, y=1, fontsize=16)
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)
 
