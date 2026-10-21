@@ -26,7 +26,7 @@
 
 波动率因子（低波异象维度）：
     - 20日历史波动率（HV20）：低波动长期收益更高
-    - 最大回撤（252日）：低回撤更稳健
+    - 最大回撤（250日）：低回撤更稳健
     - ATR/价格比：震荡、熊市表现优秀，大牛市跑输高波动成长股
     - 近期净增持量占流通股比例
 
@@ -48,6 +48,7 @@ import pandas as pd
 import re as _re
 import warnings
 from datetime import datetime, timedelta
+from core.constants import TRADING_DAYS_PER_YEAR
 from core.strategy import Strategy
 
 logger = logging.getLogger(__name__)
@@ -806,7 +807,7 @@ class QualityValueFactorStrategy(Strategy):
 
         因子：
             - HV20（20日年化历史波动率）：越低越好
-            - MaxDD（252日最大回撤）：越低越好
+            - MaxDD（250日最大回撤）：越低越好
             - ATR14/close（归一化真实波幅）：越低越好
 
         Returns:
@@ -836,10 +837,10 @@ class QualityValueFactorStrategy(Strategy):
                         hv_pct = rank / len(hv_series)
                         score_parts.append((hv_pct, 0.40))
 
-            # MaxDD（252日最大回撤）：越低越好
+            # MaxDD（250日最大回撤）：越低越好
             close_series = window['close']
             if len(close_series) >= 60:
-                roll_max = close_series.rolling(window=min(252, len(close_series)), min_periods=1).max()
+                roll_max = close_series.rolling(window=min(TRADING_DAYS_PER_YEAR, len(close_series)), min_periods=1).max()
                 dd = (close_series - roll_max) / roll_max
                 current_dd = dd.iloc[-1]
                 # 回撤绝对值越小越好，映射为: -0%→1.0, -50%→0.0

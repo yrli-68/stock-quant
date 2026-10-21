@@ -13,6 +13,7 @@ Author: stock_quant
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Optional, List
 
@@ -29,6 +30,36 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Referer': 'https://finance.sina.com.cn/'
 }
+
+# 首选数据源（'sina' / 'baostock' / 'eastmoney' / 'db'）：先尝试该源，失败自动改用其它通道。
+# 'db' 为严格模式：只读 MySQL，数据不完整时抛出 DataSourceError，不回退网络。
+# 由 CLI 的 --src 选项通过 set_primary_source() 设置。
+_PRIMARY_SOURCE = 'sina'
+_SOURCES = ('sina', 'baostock', 'eastmoney', 'db')
+_NETWORK_SOURCES = ('sina', 'baostock', 'eastmoney')
+
+
+class DataSourceError(RuntimeError):
+    """数据源不可用或数据不满足完整性要求（如 --src db）。"""
+
+
+def _source_fallback_chain(primary: str):
+    """返回 [首选源, 其余数据源...]；'db' 为严格模式，不参与网络回退。"""
+    if primary == 'db':
+        return ['db']
+    return [primary] + [s for s in _NETWORK_SOURCES if s != primary]
+
+
+def set_primary_source(src: str) -> None:
+    """设置首选数据源（'sina' / 'baostock' / 'eastmoney'）；非法值回退为 'sina'"""
+    global _PRIMARY_SOURCE
+    s = str(src).strip().lower()
+    _PRIMARY_SOURCE = s if s in _SOURCES else 'sina'
+
+
+def get_primary_source() -> str:
+    """获取当前首选数据源"""
+    return _PRIMARY_SOURCE
 
 
 class DataFetcher:
@@ -107,9 +138,9 @@ class DataFetcher:
             str: 新浪前缀，如 'sh600036' 或 'sz000001'
         """
         symbol = self._normalize_a_stock_symbol(symbol)
-        if symbol.startswith(('6', '9')):
+        if symbol.startswith(('6', '9', '5')):
             return f'sh{symbol}'
-        elif symbol.startswith(('0', '3', '2')):
+        elif symbol.startswith(('0', '3', '2', '15', '16', '18')):
             return f'sz{symbol}'
         else:
             return f'sh{symbol}'
@@ -163,7 +194,10 @@ class DataFetcher:
             logger.warning("未获取到股票 %s 的数据，请检查代码和日期范围", symbol)
             return df
 
+        src_used = df.attrs.get('source')
         df = self._standardize_dataframe(df, adjust)
+        if src_used:
+            df.attrs['source'] = src_used
         logger.info("成功获取 %s 数据，共 %d 条记录 (复权类型: %s)", symbol, len(df), adjust)
         return df
 
@@ -178,51 +212,92 @@ class DataFetcher:
         获取A股历史数据，支持复权
 
         数据流程:
-        1. 先尝试从 MySQL 数据库读取
-        2. 数据缺失或不足时，从新浪获取并回写数据库
-        3. 如需要，从新浪获取复权因子并计算复权价格
+        - `--src db`：只读 MySQL，要求「首条 ≤ start+5天 且 末条 ≥ end-1」，否则抛 DataSourceError；
+        - 其它 `--src`：不读数据库，严格按首选网络通道获取（失败时按链回退）；
+        - 新浪通道会获取复权因子并计算复权价格，并回写数据库。
         """
         raw_symbol = self._normalize_a_stock_symbol(symbol)
-        sina_code = self._get_sina_prefix(raw_symbol)
+        primary = get_primary_source()
 
-        # ============================================================
-        # 第一步：尝试从 MySQL 读取
-        # ============================================================
+        # --src db：严格只读数据库；数据缺失/不完整时抛出 DataSourceError（不回退网络）
+        if primary == 'db':
+            df_db = self._get_a_stock_data_db(raw_symbol, start_date, end_date)
+            df_db.attrs['source'] = 'db'
+            return df_db
+
+        # 其它 --src：严格走对应网络通道，不再优先读取数据库
+        chain = _source_fallback_chain(primary)
+        for idx, src in enumerate(chain):
+            if src == 'sina':
+                df = self._get_a_stock_data_sina(raw_symbol, start_date, end_date, adjust)
+            elif src == 'baostock':
+                df = self._get_a_stock_data_baostock(raw_symbol, start_date, end_date, adjust)
+            else:
+                df = self._get_a_stock_data_eastmoney(raw_symbol, start_date, end_date, adjust)
+            if df is not None and not df.empty:
+                df.attrs['source'] = src
+                if idx > 0:
+                    logger.info("已改用备用数据源 %s 获取 %s", src, symbol)
+                return df
+            if idx == 0:
+                logger.warning("首选数据源 %s 获取 %s 失败，改用备用源 %s",
+                               src, symbol, chain[1])
+
+        return pd.DataFrame()
+
+    def _get_a_stock_data_db(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """从 MySQL 读取K线（--src db 专用）
+
+        完整性要求：首条 ≤ start+5天 且 末条 ≥ end-1天。
+        数据库读取失败或不满足要求时抛出 DataSourceError（由 CLI 报警退出）。
+        """
+        db_start = start_date[:4] + '-' + start_date[4:6] + '-' + start_date[6:8]
+        db_end = end_date[:4] + '-' + end_date[4:6] + '-' + end_date[6:8]
         try:
             from core.db import fetch_kline
-            db_start = start_date[:4] + '-' + start_date[4:6] + '-' + start_date[6:8]
-            db_end   = end_date[:4]   + '-' + end_date[4:6]   + '-' + end_date[6:8]
-            db_rows = fetch_kline(raw_symbol, db_start, db_end)
-            if db_rows:
-                df_db = pd.DataFrame(db_rows, columns=[
-                    'date', 'open', 'high', 'low', 'close', 'volume',
-                    'amount', 'amplitude', 'change_pct', 'change_val', 'turnover_rate'
-                ])
-                df_db['date'] = pd.to_datetime(df_db['date'])
-                df_db = df_db.dropna(axis=1, how='all')
-
-                # 若 DB 最早日期 > 请求起点+5天，或最晚日期 < 请求终点，从网络补全
-                db_first = df_db['date'].min()
-                db_last  = df_db['date'].max()
-                start_dt = pd.to_datetime(db_start)
-                end_dt   = pd.to_datetime(db_end)
-                margin = pd.Timedelta(days=5)
-
-                if db_first > start_dt + margin:
-                    logger.info("数据库 K 线不完整 (首条 %s, 需要 %s)，从网络补全",
-                                db_first.date(), db_start)
-                elif db_last < end_dt:
-                    logger.info("数据库 K 线不完整 (末条 %s, 需要 %s)，从网络补全",
-                                db_last.date(), db_end)
-                else:
-                    logger.info("从数据库读取 %d 条 K 线记录: %s", len(df_db), raw_symbol)
-                    return df_db
+            db_rows = fetch_kline(symbol, db_start, db_end)
         except Exception as e:
-            logger.debug("数据库读取 K 线跳过: %s", e)
+            raise DataSourceError(f"数据库读取 {symbol} 失败: {e}") from e
 
-        # ============================================================
-        # 第二步：从新浪 API 获取（K线与复权因子并行请求）
-        # ============================================================
+        if not db_rows:
+            raise DataSourceError(
+                f"数据库无 {symbol} 的K线数据（请求区间 {db_start} ~ {db_end}）")
+
+        df_db = pd.DataFrame(db_rows, columns=[
+            'date', 'open', 'high', 'low', 'close', 'volume',
+            'amount', 'amplitude', 'change_pct', 'change_val', 'turnover_rate'
+        ])
+        df_db['date'] = pd.to_datetime(df_db['date'])
+        df_db = df_db.dropna(axis=1, how='all')
+        if df_db.empty:
+            raise DataSourceError(f"数据库 {symbol} 的K线数据为空（{db_start} ~ {db_end}）")
+
+        db_first = df_db['date'].min()
+        db_last = df_db['date'].max()
+        start_dt = pd.to_datetime(db_start)
+        end_dt = pd.to_datetime(db_end)
+        margin = pd.Timedelta(days=5)
+        if db_first > start_dt + margin or db_last < end_dt - pd.Timedelta(days=1):
+            raise DataSourceError(
+                f"数据库K线不完整: {db_first.date()} ~ {db_last.date()}，"
+                f"需要覆盖 {db_start} ~ {db_end}"
+                f"（首条 ≤ start+5天 且 末条 ≥ end-1）")
+
+        logger.info("从数据库读取 %d 条 K 线记录: %s", len(df_db), symbol)
+        return df_db
+
+    def _get_a_stock_data_sina(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = 'qfq'
+    ) -> pd.DataFrame:
+        """从新浪 K 线 API 获取A股日线并复权（K线与复权因子并行请求）
+
+        成功时返回 DataFrame，并回写数据库；获取失败返回空 DataFrame。
+        """
+        sina_code = self._get_sina_prefix(symbol)
         try:
             adjust_type = adjust if adjust != 'None' else ''
             need_factor = adjust_type in ('qfq', 'hfq')
@@ -278,14 +353,14 @@ class DataFetcher:
             df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
 
             if df.empty:
-                logger.warning("日期范围内无数据: %s", symbol)
-                return df
+                logger.warning("新浪日期范围内无数据: %s", symbol)
+                return pd.DataFrame()
 
             logger.info("新浪返回 %d 条原始K线记录 (不复权)", len(df))
 
             # 复权（复用已并行获取的因子响应）
             if need_factor and factor_resp is not None:
-                factor_df = self._parse_sina_adjust_factor_text(raw_symbol, factor_resp.text)
+                factor_df = self._parse_sina_adjust_factor_text(symbol, factor_resp.text)
                 if not factor_df.empty:
                     df = self._apply_adjust_factor(df, factor_df, adjust_type)
                     logger.info("已应用 %s 复权因子，共 %d 条记录", adjust_type, len(df))
@@ -296,7 +371,7 @@ class DataFetcher:
                 rows = []
                 for _, row in df.iterrows():
                     rows.append((
-                        raw_symbol,
+                        symbol,
                         row['date'].strftime('%Y-%m-%d'),
                         float(row['open']), float(row['high']), float(row['low']),
                         float(row['close']), float(row['volume']),
@@ -307,18 +382,189 @@ class DataFetcher:
                         float(row.get('turnover_rate', 0)) if pd.notna(row.get('turnover_rate')) else None,
                     ))
                 if rows:
-                    store_kline(raw_symbol, rows)
+                    store_kline(symbol, rows)
             except Exception as e:
                 logger.debug("K 线回写数据库跳过: %s", e)
 
             return df
 
         except requests.RequestException as e:
-            logger.error("网络请求失败: %s", str(e))
+            logger.error("新浪网络请求失败: %s", str(e))
             return pd.DataFrame()
         except Exception as e:
-            logger.error("获取 %s 数据失败: %s", symbol, str(e))
+            logger.error("新浪获取 %s 数据失败: %s", symbol, str(e))
             return pd.DataFrame()
+
+    def _get_a_stock_data_baostock(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = 'qfq'
+    ) -> pd.DataFrame:
+        """从 Baostock 获取A股历史日线（新浪K线获取失败时的备用数据源）
+
+        使用 baostock.query_history_k_data_plus，直接返回已复权价格：
+            adjustflag: 'qfq' -> 2（前复权）、'hfq' -> 1（后复权）、其它 -> 3（不复权）
+
+        登录在 DataFetcher 实例内复用（同一批量任务仅登录一次）。
+        未安装 baostock 或获取失败时返回空 DataFrame。
+
+        Returns:
+            pd.DataFrame: 列 [date, open, high, low, close, volume, amount, change_pct, turnover_rate]
+        """
+        bs = self._baostock_login()
+        if bs is None:
+            return pd.DataFrame()
+
+        # 新浪前缀 sh600036 -> Baostock 代码 sh.600036
+        sina_code = self._get_sina_prefix(symbol)
+        bs_code = f'{sina_code[:2]}.{sina_code[2:]}'
+
+        s = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
+        e = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
+        adjustflag = {'qfq': '2', 'hfq': '1'}.get(adjust if adjust != 'None' else '', '3')
+
+        try:
+            fields = 'date,open,high,low,close,volume,amount,turn,pctChg'
+            rs = bs.query_history_k_data_plus(
+                bs_code, fields, start_date=s, end_date=e,
+                frequency='d', adjustflag=adjustflag)
+            if getattr(rs, 'error_code', '0') != '0':
+                logger.error("Baostock 查询失败(%s): %s", symbol, getattr(rs, 'error_msg', ''))
+                return pd.DataFrame()
+
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            if not rows:
+                logger.warning("Baostock 返回空数据: %s", symbol)
+                return pd.DataFrame()
+
+            df = pd.DataFrame(rows, columns=fields.split(','))
+            df = df.rename(columns={'pctChg': 'change_pct', 'turn': 'turnover_rate'})
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            for col in ['open', 'high', 'low', 'close', 'volume', 'amount',
+                        'change_pct', 'turnover_rate']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            df = df.dropna(subset=['date'])
+
+            start_dt = pd.to_datetime(s)
+            end_dt = pd.to_datetime(e)
+            df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+            df = df.sort_values('date').reset_index(drop=True)
+            logger.info("Baostock 获取 %s 共 %d 条记录 (adjustflag=%s)",
+                        symbol, len(df), adjustflag)
+            return df
+
+        except Exception as ex:
+            logger.error("Baostock 获取 %s 数据失败: %s", symbol, ex)
+            return pd.DataFrame()
+
+    def _get_a_stock_data_eastmoney(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = 'qfq'
+    ) -> pd.DataFrame:
+        """从东方财富 K 线 API 获取A股日线（支持前/后复权）
+
+        接口: push2his.eastmoney.com/api/qt/stock/kline/get
+        复权: fqt=1 前复权 / fqt=2 后复权 / fqt=0 不复权
+        返回列: date, open, high, low, close, volume, amount, amplitude,
+                change_pct, change, turnover_rate
+        """
+        sina_code = self._get_sina_prefix(symbol)
+        market = '1' if sina_code.startswith('sh') else '0'
+        secid = f'{market}.{sina_code[2:]}'
+        fqt = {'qfq': '1', 'hfq': '2'}.get(adjust if adjust != 'None' else '', '0')
+
+        url = (
+            'https://push2his.eastmoney.com/api/qt/stock/kline/get?'
+            f'secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b'
+            '&fields1=f1,f2,f3,f4,f5,f6'
+            '&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61'
+            f'&klt=101&fqt={fqt}&beg={start_date}&end={end_date}'
+        )
+        try:
+            resp = self._session.get(
+                url, timeout=15,
+                headers={'Referer': 'https://quote.eastmoney.com/'})
+            payload = resp.json()
+        except Exception as ex:
+            logger.error("东方财富获取 %s 数据失败: %s", symbol, ex)
+            return pd.DataFrame()
+
+        data = payload.get('data') or {}
+        klines = data.get('klines') or []
+        if not klines:
+            logger.warning("东方财富返回空数据: %s", symbol)
+            return pd.DataFrame()
+
+        cols = ['date', 'open', 'close', 'high', 'low', 'volume', 'amount',
+                'amplitude', 'change_pct', 'change', 'turnover_rate']
+        try:
+            rows = [line.split(',') for line in klines]
+            df = pd.DataFrame(rows, columns=cols)
+        except Exception as ex:
+            logger.error("东方财富解析 %s 数据失败: %s", symbol, ex)
+            return pd.DataFrame()
+
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        for col in cols[1:]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['date'])
+
+        start_dt = pd.to_datetime(start_date, format='%Y%m%d', errors='coerce')
+        end_dt = pd.to_datetime(end_date, format='%Y%m%d', errors='coerce')
+        if pd.notna(start_dt):
+            df = df[df['date'] >= start_dt]
+        if pd.notna(end_dt):
+            df = df[df['date'] <= end_dt]
+        df = df.sort_values('date').reset_index(drop=True)
+        logger.info("东方财富获取 %s 共 %d 条记录 (fqt=%s)", symbol, len(df), fqt)
+        return df
+
+    def _baostock_login(self):
+        """登录 Baostock（实例内复用，返回模块对象；未安装/登录失败返回 None）
+
+        Baostock 的 socket 未设置超时，网络异常时可能永久阻塞；此处临时设置
+        全局 socket 默认超时（15s），并在失败后缓存不可用状态，避免批量回测时
+        逐只股票重复等待。
+        """
+        if getattr(self, '_bs_module', None) is not None:
+            return self._bs_module
+        if getattr(self, '_bs_unavailable', False):
+            return None
+        try:
+            import baostock as bs
+        except ImportError:
+            logger.warning("未安装 baostock，无法使用备用数据源（可执行 pip install baostock）")
+            self._bs_unavailable = True
+            return None
+        import contextlib
+        import io
+        import socket
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(15)
+        try:
+            # baostock.login() 会向 stdout 打印 "login success!"，此处屏蔽以保持 CLI 输出整洁
+            with contextlib.redirect_stdout(io.StringIO()):
+                lg = bs.login()
+            if getattr(lg, 'error_code', '0') != '0':
+                logger.error("Baostock 登录失败: %s", getattr(lg, 'error_msg', ''))
+                self._bs_unavailable = True
+                return None
+            self._bs_module = bs
+            return bs
+        except Exception as e:
+            logger.error("Baostock 登录异常: %s", e)
+            self._bs_unavailable = True
+            return None
+        finally:
+            socket.setdefaulttimeout(old_timeout)
 
     def _get_us_stock_data(
         self,
@@ -769,9 +1015,44 @@ class DataFetcher:
         logger.info("获取指数数据: symbol=%s, start=%s, end=%s",
                      symbol, start_date, end_date)
 
+        raw_symbol = self._normalize_a_stock_symbol(symbol)
+        # 优先使用东方财富指数接口（支持完整历史；新浪仅返回最近 1000 根）
+        try:
+            secid = f'0.{raw_symbol}' if raw_symbol.startswith('399') else f'1.{raw_symbol}'
+            url = (
+                'https://push2his.eastmoney.com/api/qt/stock/kline/get?'
+                f'secid={secid}&ut=fa5fd1943c7b386f172d6893dbfba10b'
+                '&fields1=f1,f2,f3,f4,f5,f6'
+                '&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61'
+                f'&klt=101&fqt=0&beg={start_date}&end={end_date}'
+            )
+            resp = self._session.get(
+                url, timeout=20,
+                headers={'Referer': 'https://quote.eastmoney.com/'})
+            payload = resp.json()
+            klines = (payload.get('data') or {}).get('klines') or []
+            if klines:
+                cols = ['date', 'open', 'close', 'high', 'low', 'volume', 'amount',
+                        'amplitude', 'change_pct', 'change', 'turnover_rate']
+                df = pd.DataFrame([line.split(',') for line in klines], columns=cols)
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                for col in cols[1:]:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                df = df.dropna(subset=['date'])
+                logger.info("东方财富指数数据返回 %d 条记录", len(df))
+                return self._standardize_dataframe(df)
+        except Exception as e:
+            logger.warning("东方财富指数数据获取失败: %s", str(e))
+
         try:
             raw_symbol = self._normalize_a_stock_symbol(symbol)
-            sina_code = self._get_sina_prefix(raw_symbol)
+            raw_lower = str(symbol).strip().lower()
+            if raw_lower.startswith(('sh', 'sz')):
+                sina_code = raw_lower
+            elif raw_symbol.startswith('399'):
+                sina_code = f'sz{raw_symbol}'
+            else:
+                sina_code = f'sh{raw_symbol}'
 
             url = (
                 f'https://quotes.sina.com.cn/cn/api/json_v2.php/'
@@ -787,6 +1068,7 @@ class DataFetcher:
 
             df = pd.DataFrame(data)
             df['date'] = pd.to_datetime(df['day'])
+            df = df.drop(columns=['day'], errors='ignore')
             df['open'] = pd.to_numeric(df['open'], errors='coerce')
             df['high'] = pd.to_numeric(df['high'], errors='coerce')
             df['low'] = pd.to_numeric(df['low'], errors='coerce')
@@ -1076,62 +1358,177 @@ class DataFetcher:
 
 
     def get_stock_list(self, sort_key: str = 'changepercent', max_pages: int = 10) -> pd.DataFrame:
-        """
-        获取A股股票列表
-
-        Args:
-            sort_key: 排序依据，新浪行情中心支持的字段，如
-                      'changepercent'(涨跌幅) / 'turnoverratio'(换手率) /
-                      'amount'(成交额) / 'mktcap'(总市值) / 'pe'(市盈率)，
-                      默认 'changepercent'
-            max_pages: 最大翻页数（每页 100 条）。默认 10（约前 1000 只）；
-                       取全部市场（约 5000+ 只）时设为较大值（如 60），
-                       翻到空页自动停止
+        """获取A股股票列表（遵守 --src 首选数据源，失败时自动改用另一通道）
 
         Returns:
-            pd.DataFrame: 包含代码、名称等信息的股票列表（按 sort_key 降序）
+            pd.DataFrame: 含 symbol/name/price/change_pct/volume/amount/
+            turnover_rate/mktcap/pe 列，按 sort_key 降序
         """
+        primary = get_primary_source()
+        if primary == 'db':
+            logger.warning("--src db 不提供股票列表接口")
+            return pd.DataFrame()
+        chain = _source_fallback_chain(primary)
+        for idx, src in enumerate(chain):
+            if src == 'sina':
+                df = self._get_stock_list_sina(sort_key, max_pages)
+            elif src == 'baostock':
+                df = self._get_stock_list_baostock(sort_key)
+            else:
+                # eastmoney / db 无股票列表接口
+                df = pd.DataFrame()
+            if df is not None and len(df):
+                if idx > 0:
+                    logger.info("已改用备用数据源 %s 获取股票列表", src)
+                return df
+            if idx == 0:
+                logger.warning("首选数据源 %s 获取股票列表失败，改用备用源 %s", src, chain[1])
+        return pd.DataFrame()
+
+    def _get_stock_list_baostock(self, sort_key: str = 'changepercent') -> pd.DataFrame:
+        """从 Baostock 获取最近交易日全部A股快照
+
+        使用 query_daily_history_k_AStock + query_stock_basic：
+            - 价格/涨跌幅/换手率/成交额/PE(peTTM) 来自当日快照
+            - 名称来自 query_stock_basic
+            - Baostock 不提供总市值，mktcap 列置为 NaN（--nolowcap 在该源下不生效）
+        """
+        bs = self._baostock_login()
+        if bs is None:
+            return pd.DataFrame()
+
+        # 最近交易日（今天可能是周末/节假日）
+        day = datetime.now().strftime('%Y-%m-%d')
+        try:
+            start = (datetime.now() - pd.Timedelta(days=15)).strftime('%Y-%m-%d')
+            rs_d = bs.query_trade_dates(start_date=start, end_date=day)
+            last_td = None
+            while rs_d.next():
+                row = rs_d.get_row_data()
+                if len(row) >= 2 and str(row[1]) == '1':
+                    last_td = row[0]
+            if last_td:
+                day = last_td
+        except Exception:
+            pass
+
+        try:
+            rs = bs.query_daily_history_k_AStock(date=day)
+            if getattr(rs, 'error_code', '0') != '0':
+                logger.error("Baostock 股票列表查询失败(%s): %s", day,
+                             getattr(rs, 'error_msg', ''))
+                return pd.DataFrame()
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            if not rows:
+                logger.warning("Baostock %s 无股票快照数据", day)
+                return pd.DataFrame()
+            raw = pd.DataFrame(rows, columns=rs.fields)
+        except Exception as e:
+            logger.error("Baostock 获取股票列表失败: %s", e)
+            return pd.DataFrame()
+
+        # 代码 -> 名称
+        name_map = {}
+        try:
+            rsb = bs.query_stock_basic()
+            while rsb.next():
+                r = rsb.get_row_data()
+                if len(r) >= 6 and str(r[4]) == '1' and str(r[5]) == '1':
+                    name_map[r[0]] = r[1]
+        except Exception:
+            pass
+
+        def _num(v):
+            try:
+                return float(v)
+            except Exception:
+                return np.nan
+
+        code = raw['code'].astype(str)
+        out = pd.DataFrame({
+            'symbol': code.str.split('.').str[-1],
+            'name': code.map(lambda c: name_map.get(c, c)),
+            'price': raw['close'].map(_num),
+            'change_pct': raw['pctChg'].map(_num),
+            'volume': raw['volume'].map(_num),
+            'amount': raw['amount'].map(_num),
+            'turnover_rate': raw['turn'].map(_num),
+            'mktcap': np.nan,
+            'pe': raw['peTTM'].map(_num),
+        })
+        if 'tradestatus' in raw.columns:
+            out = out[raw['tradestatus'].astype(str) == '1']
+        out = out[out['price'] > 0]
+
+        sort_col = {'changepercent': 'change_pct', 'turnoverratio': 'turnover_rate',
+                    'amount': 'amount', 'mktcap': 'mktcap', 'pe': 'pe'}.get(
+                        sort_key, 'change_pct')
+        out = out.sort_values(sort_col, ascending=False, na_position='last')
+        out = out.drop_duplicates(subset=['symbol']).reset_index(drop=True)
+        logger.info("Baostock 获取股票列表 %d 只（交易日 %s）", len(out), day)
+        return out
+
+    def _get_stock_list_sina(self, sort_key: str = 'changepercent', max_pages: int = 10) -> pd.DataFrame:
+        """从新浪行情中心分页获取A股股票列表"""
         logger.info("获取A股股票列表: sort_key=%s, max_pages=%d", sort_key, max_pages)
 
+        # 新浪接口市盈率字段为 per（而非 pe），排序/解析均需映射
+        api_sort = 'per' if sort_key == 'pe' else sort_key
         all_stocks = []
-        try:
-            for page in range(1, max_pages + 1):
-                url = (
-                    f'http://vip.stock.finance.sina.com.cn/quotes_service/'
-                    f'api/json_v2.php/Market_Center.getHQNodeData?'
-                    f'page={page}&num=100&sort={sort_key}&asc=0&'
-                    f'node=hs_a&symbol=&_s_r_a=auto'
-                )
-                resp = self._session.get(url, timeout=15)
-                data = json.loads(resp.text)
-                if not data:
+        last_err = None
+        for page in range(1, max_pages + 1):
+            url = (
+                f'http://vip.stock.finance.sina.com.cn/quotes_service/'
+                f'api/json_v2.php/Market_Center.getHQNodeData?'
+                f'page={page}&num=100&sort={api_sort}&asc=0&'
+                f'node=hs_a&symbol=&_s_r_a=auto'
+            )
+            data = None
+            # 单页失败重试；多次失败则保留已获取的部分数据，避免整批丢弃
+            for attempt in range(3):
+                try:
+                    resp = self._session.get(url, timeout=15)
+                    data = json.loads(resp.text)
+                    last_err = None
                     break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.3 * (attempt + 1))
+            if data is None:
+                logger.warning("获取股票列表第 %d 页失败: %s", page, last_err)
+                break
+            if not data:
+                break
 
-                for item in data:
-                    code = item.get('code', '')
-                    name = item.get('name', '')
-                    if code:
-                        all_stocks.append({
-                            'symbol': code,
-                            'name': name,
-                            'price': float(item.get('trade', 0) or 0),
-                            'change_pct': float(item.get('changepercent', 0) or 0),
-                            'volume': float(item.get('volume', 0) or 0),
-                            'amount': float(item.get('amount', 0) or 0),
-                            'turnover_rate': float(item.get('turnoverratio', 0) or 0),
-                            'mktcap': float(item.get('mktcap', 0) or 0),
-                            'pe': float(item.get('pe', 0) or 0),
-                        })
+            for item in data:
+                code = item.get('code', '')
+                name = item.get('name', '')
+                if not code:
+                    continue
+                try:
+                    all_stocks.append({
+                        'symbol': code,
+                        'name': name,
+                        'price': float(item.get('trade', 0) or 0),
+                        'change_pct': float(item.get('changepercent', 0) or 0),
+                        'volume': float(item.get('volume', 0) or 0),
+                        'amount': float(item.get('amount', 0) or 0),
+                        'turnover_rate': float(item.get('turnoverratio', 0) or 0),
+                        'mktcap': float(item.get('mktcap', 0) or 0),
+                        'pe': float(item.get('per', item.get('pe', 0)) or 0),
+                    })
+                except (TypeError, ValueError):
+                    # 个别字段异常（如 per 为 '-'）时跳过该股票，避免整批失败
+                    continue
 
-            df = pd.DataFrame(all_stocks)
-            # 去重
-            df = df.drop_duplicates(subset=['symbol'])
-            logger.info("成功获取 %d 只股票", len(df))
-            return df
-
-        except Exception as e:
-            logger.error("获取股票列表失败: %s", str(e))
+        if not all_stocks:
+            logger.error("获取股票列表失败: %s", last_err or '接口返回空数据')
             return pd.DataFrame()
+        df = pd.DataFrame(all_stocks).drop_duplicates(subset=['symbol'])
+        logger.info("成功获取 %d 只股票", len(df))
+        return df
 
     def get_all_stock_codes(self) -> list:
         """获取全部 A 股代码列表（按代码排序分页拉取，供通配符展开使用）"""

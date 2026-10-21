@@ -165,6 +165,7 @@ var sh600036qfq = {
 | `RSI14` | `calc_rsi()` | `close` |
 | `BOLL_UPPER` / `BOLL_MIDDLE` / `BOLL_LOWER` | `calc_bollinger()` | `close` |
 | `KDJ_K` / `KDJ_D` / `KDJ_J` | `calc_kdj()` | `close`, `high`, `low` |
+| `SAR` | `calc_sar()` | `high`, `low`, `close` |
 | `ATR14` | `calc_atr()` | `high`, `low`, `close` |
 | `OBV` | `calc_obv()` | `close`, `volume` |
 | `CCI20` | `calc_cci()` | `high`, `low`, `close` |

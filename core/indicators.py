@@ -12,10 +12,13 @@
     - calc_macd: MACD 指标 (DIF, DEA, MACD柱)
     - calc_rsi: 相对强弱指标 (RSI)
     - calc_bollinger: 布林带 (上轨, 中轨, 下轨)
+    - calc_sar: 抛物线转向指标 (Parabolic SAR)
 """
 
 import pandas as pd
 import numpy as np
+
+from core.constants import TRADING_DAYS_PER_YEAR
 
 
 def calc_ma(df, period, price_col='close'):
@@ -163,6 +166,66 @@ def calc_kdj(df, n=9, m1=3, m2=3, price_col='close'):
     return pd.DataFrame({'K': k, 'D': d, 'J': j}, index=df.index)
 
 
+def calc_sar(df, af_step=0.02, af_max=0.2):
+    """抛物线转向指标 (Parabolic SAR)
+
+    Args:
+        df (pd.DataFrame): 行情数据，必须包含 'high'、'low'、'close' 列
+        af_step (float): 加速因子步长，默认 0.02
+        af_max (float): 加速因子上限，默认 0.2
+
+    Returns:
+        pd.Series: SAR 序列，索引与 df 对齐
+    """
+    high = df['high'].to_numpy(dtype=float)
+    low = df['low'].to_numpy(dtype=float)
+    close = df['close'].to_numpy(dtype=float)
+    n = len(df)
+    sar = np.full(n, np.nan, dtype=float)
+    if n == 0:
+        return pd.Series(sar, index=df.index, name='SAR')
+
+    is_long = True if n == 1 else close[1] >= close[0]
+    if is_long:
+        sar[0] = low[0]
+        ep = high[0]
+    else:
+        sar[0] = high[0]
+        ep = low[0]
+    af = af_step
+
+    for i in range(1, n):
+        prev_sar = sar[i - 1]
+        new_sar = prev_sar + af * (ep - prev_sar)
+        prev_low = low[i - 1]
+        prev_high = high[i - 1]
+
+        if is_long:
+            new_sar = min(new_sar, prev_low, low[i - 2] if i >= 2 else prev_low)
+            if low[i] < new_sar:
+                is_long = False
+                new_sar = ep
+                ep = low[i]
+                af = af_step
+            elif high[i] > ep:
+                ep = high[i]
+                af = min(af + af_step, af_max)
+        else:
+            new_sar = max(new_sar, prev_high, high[i - 2] if i >= 2 else prev_high)
+            if high[i] > new_sar:
+                is_long = True
+                new_sar = ep
+                ep = high[i]
+                af = af_step
+            elif low[i] < ep:
+                ep = low[i]
+                af = min(af + af_step, af_max)
+
+        sar[i] = new_sar
+
+    return pd.Series(sar, index=df.index, name='SAR')
+
+
 def calc_atr(df, period=14):
     """平均真实波幅"""
     high, low, close = df['high'], df['low'], df['close']
@@ -234,7 +297,7 @@ def calc_historical_volatility(df, period=20, price_col='close', annualize=True)
     log_returns = np.log(price / price.shift(1))
     rolling_vol = log_returns.rolling(window=period).std()
     if annualize:
-        rolling_vol = rolling_vol * np.sqrt(252)
+        rolling_vol = rolling_vol * np.sqrt(TRADING_DAYS_PER_YEAR)
     return rolling_vol
 
 
@@ -476,6 +539,7 @@ def add_all_indicators(df):
     df['KDJ_K'] = kdj['K']
     df['KDJ_D'] = kdj['D']
     df['KDJ_J'] = kdj['J']
+    df['SAR'] = calc_sar(df)
     df['ATR14'] = calc_atr(df, 14)
     adx = calc_adx(df, 14)
     df['ADX14'] = adx['ADX']

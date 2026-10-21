@@ -16,6 +16,7 @@ import numpy as np
 
 from core.strategy import Strategy
 from core.indicators import calc_rsi
+from core.thresholds import UNSET, get_threshold
 
 
 class RSIStrategy(Strategy):
@@ -27,29 +28,31 @@ class RSIStrategy(Strategy):
 
     Attributes:
         period (int): RSI 计算周期，默认 14
-        oversold (float): 超卖阈值，默认 30
-        overbought (float): 超买阈值，默认 70
+        oversold (float): 超卖阈值（未传参时读取 MIN_RSI_THRESHOLD，配置默认 25）
+        overbought (float): 超买阈值（未传参时读取 MAX_RSI_THRESHOLD，配置默认 85）
         enh_oversold (float): 增强级超卖阈值（更深超卖区），默认 25
         enh_overbought (float): 增强级超买阈值（更深超买区），默认 75
     """
 
-    def __init__(self, period=14, oversold=30, overbought=70,
+    def __init__(self, period=14, oversold=UNSET, overbought=UNSET,
                  enh_oversold=25, enh_overbought=75, name='RSI'):
         """
         初始化 RSI 策略
 
         Args:
             period (int): RSI 计算周期，默认 14
-            oversold (float): 超卖阈值，RSI 低于此值视为超卖，默认 30
-            overbought (float): 超买阈值，RSI 高于此值视为超买，默认 70
+            oversold (float): 超卖阈值，RSI 低于此值视为超卖（未传参时读取
+                stock-quant.json 的 MIN_RSI_THRESHOLD，配置默认 25）
+            overbought (float): 超买阈值，RSI 高于此值视为超买（未传参时读取
+                stock-quant.json 的 MAX_RSI_THRESHOLD，配置默认 85）
             enh_oversold (float): 增强级超卖阈值，默认 25
             enh_overbought (float): 增强级超买阈值，默认 75
             name (str): 策略名称
         """
         super().__init__(name=name)
         self.period = period
-        self.oversold = oversold
-        self.overbought = overbought
+        self.oversold = get_threshold('MIN_RSI_THRESHOLD') if oversold is UNSET else oversold
+        self.overbought = get_threshold('MAX_RSI_THRESHOLD') if overbought is UNSET else overbought
         self.enh_oversold = enh_oversold
         self.enh_overbought = enh_overbought
 

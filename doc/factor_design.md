@@ -17,7 +17,7 @@
 | 基本面因子（估值/质量/筹码/增减持） | `quality_value_factor` 各 `_compute_*` | 日频(估值/波动) / 低频 ffill(其余) | 质价融合策略（`quality_value`） |
 | 另类因子（波动率低波异象） | `quality_value_factor._compute_volatility_score` | 逐日 | 质价融合策略第 5 维 |
 
-### 1.2 `add_all_indicators` 输出列清单（36 列指标 + OHLCV）
+### 1.2 `add_all_indicators` 输出列清单（37 列指标 + OHLCV）
 
 | 族 | 列 |
 |----|----|
@@ -27,6 +27,7 @@
 | RSI | RSI14 |
 | 布林带 BOLL | BOLL_UPPER BOLL_MIDDLE BOLL_LOWER |
 | KDJ | KDJ_K KDJ_D KDJ_J |
+| SAR | SAR |
 | DMI（趋势） | ADX14 PLUS_DI MINUS_DI |
 | ATR | ATR14 |
 | 量能 | OBV VOL_MA5 VWAP |
@@ -177,7 +178,7 @@ VWAP     = cumsum(TP·volume) / cumsum(volume)
 ### 2.12 HV20（历史波动率）
 
 ```
-HV20 = std(ln(close_t/close_t-1), 20) × √252     # 年化
+HV20 = std(ln(close_t/close_t-1), 20) × √250     # 年化（按 250 个交易日/年）
 ```
 - `volatility_timing`：`HV<15%` 低位缩量后突破 → 买；`HV>30%` 且跌破 MA20 → 卖。
 - `quality_value` 波动率维度子因子（HV20 越低越好）。
@@ -264,7 +265,7 @@ MOM60 = close / close.shift(60) − 1
 | 子因子 | 子权重 | 打分方式 |
 |------|:---:|---------|
 | HV20（20 日年化波动率） | 0.40 | 分位数，越低越好 |
-| 252 日最大回撤 | 0.35 | 回撤幅度映射，越低越好 |
+| 250 日最大回撤 | 0.35 | 回撤幅度映射，越低越好 |
 | ATR14/close（归一化波幅） | 0.25 | 分位数，越低越好 |
 
 数据源：行情逐日计算。低波动、低回撤标的长期收益更稳（低波异象）。

@@ -571,8 +571,9 @@ class ChartGenerator:
         'ema1030': 'ema',
         'macd1226': 'macd',
         'rsi': 'rsi',
-        'bollinger': 'boll',
+        'boll': 'boll',
         'kdj': 'kdj',
+        'sar': 'sar',
         'ma310': 'sg1',
         'ma520': 'sg2',
         'ema520': 'sg3',
@@ -628,6 +629,11 @@ class ChartGenerator:
                 plots.append(mpf.make_addplot(df['KDJ_J'], panel=panel, color=COLOR_PURPLE, width=1.0, label='J', secondary_y=False))
                 plots.append(mpf.make_addplot(pd.Series(80, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超买80', secondary_y=False))
                 plots.append(mpf.make_addplot(pd.Series(20, index=df.index), panel=panel, color=COLOR_GRAY, width=0.8, linestyle='--', label='超卖20', secondary_y=False))
+        elif ind_type == 'sar':
+            if 'SAR' in df.columns:
+                plots.append(mpf.make_addplot(df['SAR'], panel=panel, color=COLOR_PURPLE, width=1.0, ylabel='SAR', label='SAR', secondary_y=False))
+            if 'Close' in df.columns:
+                plots.append(mpf.make_addplot(df['Close'], panel=panel, color=COLOR_BLUE, width=0.8, alpha=0.8, label='收盘价', secondary_y=False))
         elif ind_type == 'ma':
             for period, color in ((10, COLOR_ORANGE), (30, COLOR_TEAL)):
                 col = f'MA{period}'
@@ -788,6 +794,17 @@ class ChartGenerator:
             return lo - span * 0.05, hi + span * 0.05
         if ind_type == 'ema':
             cols = [f'EMA{p}' for p in (10, 30) if f'EMA{p}' in df.columns]
+            if not cols:
+                return None, None
+            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
+            vals = vals[~pd.isna(vals).all(axis=1)]
+            if vals.size == 0:
+                return None, None
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
+            return lo - span * 0.05, hi + span * 0.05
+        if ind_type == 'sar':
+            cols = [c for c in ('SAR', 'Close') if c in df.columns]
             if not cols:
                 return None, None
             vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)

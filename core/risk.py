@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from core.constants import TRADING_DAYS_PER_YEAR
+
 
 def calc_var(returns, confidence=0.95):
     """
@@ -152,7 +154,7 @@ def calc_sortino_ratio(returns, risk_free=0.03):
         float: 索提诺比率
     """
     returns = np.asarray(returns)
-    excess_returns = returns - risk_free / 252  # 日化无风险利率
+    excess_returns = returns - risk_free / TRADING_DAYS_PER_YEAR  # 日化无风险利率
 
     # 下行标准差：只考虑负收益的波动
     downside_returns = returns[returns < 0]
@@ -163,8 +165,8 @@ def calc_sortino_ratio(returns, risk_free=0.03):
     if downside_std == 0:
         return 0.0
 
-    annual_excess_return = np.mean(excess_returns) * 252
-    annual_downside_std = downside_std * np.sqrt(252)
+    annual_excess_return = np.mean(excess_returns) * TRADING_DAYS_PER_YEAR
+    annual_downside_std = downside_std * np.sqrt(TRADING_DAYS_PER_YEAR)
 
     return annual_excess_return / annual_downside_std
 
@@ -194,8 +196,8 @@ def calc_information_ratio(returns, benchmark_returns):
     if tracking_error == 0:
         return 0.0
 
-    annual_excess = np.mean(excess_returns) * 252
-    annual_tracking_error = tracking_error * np.sqrt(252)
+    annual_excess = np.mean(excess_returns) * TRADING_DAYS_PER_YEAR
+    annual_tracking_error = tracking_error * np.sqrt(TRADING_DAYS_PER_YEAR)
 
     return annual_excess / annual_tracking_error
 
@@ -260,11 +262,11 @@ def calc_alpha(returns, benchmark_returns, risk_free=0.03):
     avg_return = np.mean(returns)
     avg_benchmark = np.mean(benchmark_returns)
 
-    daily_rf = risk_free / 252
+    daily_rf = risk_free / TRADING_DAYS_PER_YEAR
 
     # 日度 Alpha，然后年化
     daily_alpha = (avg_return - daily_rf) - beta * (avg_benchmark - daily_rf)
-    annual_alpha = daily_alpha * 252
+    annual_alpha = daily_alpha * TRADING_DAYS_PER_YEAR
 
     return annual_alpha
 
@@ -299,8 +301,8 @@ def risk_report(returns, equity_curve, benchmark_returns=None):
     returns = np.asarray(returns)
 
     # 基本统计量
-    annual_return = np.mean(returns) * 252
-    annual_volatility = np.std(returns, ddof=1) * np.sqrt(252)
+    annual_return = np.mean(returns) * TRADING_DAYS_PER_YEAR
+    annual_volatility = np.std(returns, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)
 
     # VaR 和 CVaR
     var_95 = calc_var(returns, 0.95)

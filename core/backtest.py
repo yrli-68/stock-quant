@@ -14,6 +14,8 @@
 import numpy as np
 import pandas as pd
 
+from core.constants import TRADING_DAYS_PER_YEAR
+
 
 class BacktestEngine:
     """
@@ -30,20 +32,24 @@ class BacktestEngine:
         trading_days (int): 年交易日数
     """
 
-    def __init__(self, initial_capital=100000, commission=0.0003, slippage=0.0001):
+    def __init__(self, initial_capital=100000, commission=0.0003, slippage=0.0001, fix_capital=False):
         """
         初始化回测引擎
 
         Args:
             initial_capital (float): 初始资金，默认 100,000
-            commission (float): 佣金费率，默认 0.0003（万三）
-            slippage (float): 滑点比例，默认 0.0001（万一）
+            commission (float): 佣金费率，默认 0.03%
+            slippage (float): 滑点，默认 0.01%
+            fix_capital (bool): 固定资金模式，默认 False；
+                True 时每次买入均按 initial_capital 额度买入，
+                上一轮交易的盈亏不影响本轮交易资金
         """
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
+        self.fix_capital = fix_capital
         self.risk_free = 0.03  # 无风险利率，用于夏普比率计算
-        self.trading_days = 252  # 年交易日数
+        self.trading_days = TRADING_DAYS_PER_YEAR  # 年交易日数
 
     def run(self, df, signals, position_style='fraction'):
         """
@@ -131,7 +137,9 @@ class BacktestEngine:
                 # ---- 全仓买卖模式 ----
                 if signal >= 0.5 and in_position < 1.0:
                     # 买入信号（含弱买/强买）：全仓买入
-                    trade_amount = cash * (1 - self.commission)  # 扣除佣金后的可用资金
+                    # 固定资金模式：每次按初始资金额度买入（上轮盈亏不影响本轮资金）
+                    buy_capital = self.initial_capital if self.fix_capital else cash
+                    trade_amount = buy_capital * (1 - self.commission)  # 扣除佣金后的可用资金
                     shares = trade_amount / exec_price
                     shares_held = shares
                     cash -= shares * exec_price * (1 + self.commission)
@@ -174,7 +182,8 @@ class BacktestEngine:
                 if signal > 0 and in_position < 1.0:
                     # 买入：仓位水平按信号强度累加（弱买 +0.5 / 强买 +1），封顶 1
                     increment = min(abs(signal), 1.0 - in_position)
-                    target_value = cash * increment
+                    # 固定资金模式：按初始资金额度计算买入金额
+                    target_value = (self.initial_capital if self.fix_capital else cash) * increment
                     trade_amount = target_value * (1 - self.commission)
                     shares = trade_amount / exec_price
                     shares_held += shares

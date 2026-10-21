@@ -14,7 +14,8 @@ import pandas as pd
 import numpy as np
 
 from core.strategy import Strategy
-from core.indicators import calc_ema
+from core.indicators import calc_ema, calc_rsi
+from core.thresholds import UNSET, get_threshold
 
 
 class EMACrossStrategy(Strategy):
@@ -29,18 +30,27 @@ class EMACrossStrategy(Strategy):
         slow_period (int): 慢线周期，默认 30
     """
 
-    def __init__(self, fast_period=10, slow_period=30, name='EMACross'):
+    def __init__(self, fast_period=10, slow_period=30, rsi_buy_max=UNSET, rsi_sell_min=UNSET,
+                 name='EMACross'):
         """
         初始化双指数均线交叉策略
 
         Args:
             fast_period (int): 快速均线周期，默认 10
             slow_period (int): 慢速均线周期，默认 30
+            rsi_buy_max (float): 买入附加条件 RSI < rsi_buy_max（None 表示不启用；
+                未传参时读取 stock-quant.json 的 MIN_RSI_THRESHOLD）
+            rsi_sell_min (float): 卖出附加条件 RSI > rsi_sell_min（None 表示不启用；
+                未传参时读取 stock-quant.json 的 MAX_RSI_THRESHOLD）
             name (str): 策略名称
         """
         super().__init__(name=name)
         self.fast_period = fast_period
         self.slow_period = slow_period
+        self.rsi_buy_max = (get_threshold('MIN_RSI_THRESHOLD')
+                            if rsi_buy_max is UNSET else rsi_buy_max)
+        self.rsi_sell_min = (get_threshold('MAX_RSI_THRESHOLD')
+                             if rsi_sell_min is UNSET else rsi_sell_min)
 
     def generate_signals(self, df):
         """
@@ -68,13 +78,22 @@ class EMACrossStrategy(Strategy):
         # 初始化信号序列，全部为 0（持有）
         signals = pd.Series(0.0, index=df.index, dtype=float)
 
-        # 检测金叉（快线上穿慢线）：买入信号
-        # 条件：上一期快线 <= 上一期慢线，且当期快线 > 当期慢线
-        golden_cross = (fast_ema.shift(1) <= slow_ema.shift(1)) & (fast_ema > slow_ema)
+        # RSI 附加过滤：仅当配置了阈值时才计算
+        rsi = None
+        if self.rsi_buy_max is not None or self.rsi_sell_min is not None:
+            rsi = df['RSI14'] if 'RSI14' in df.columns else calc_rsi(df, 14)
 
-        # 检测死叉（快线下穿慢线）：卖出信号
+        # 检测金叉（快线上穿慢线）：买入信号
+        # 条件：上一期快线 <= 上一期慢线，且当期快线 > 当期慢线，且 RSI < rsi_buy_max
+        golden_cross = (fast_ema.shift(1) <= slow_ema.shift(1)) & (fast_ema > slow_ema)
+        if self.rsi_buy_max is not None:
+            golden_cross = golden_cross & (rsi < self.rsi_buy_max)
+
+        # 检测死叉（快线下穿慢线）：卖出信号；或 RSI > rsi_sell_min
         # 条件：上一期快线 >= 上一期慢线，且当期快线 < 当期慢线
         death_cross = (fast_ema.shift(1) >= slow_ema.shift(1)) & (fast_ema < slow_ema)
+        if self.rsi_sell_min is not None:
+            death_cross = death_cross | (rsi > self.rsi_sell_min)
 
         # 基础版条件 → 弱信号
         signals[golden_cross] = self.signal_value(1)
