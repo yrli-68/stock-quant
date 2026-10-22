@@ -14,12 +14,12 @@
 排名依据：策略收益分析表中的「平均总收益率」与「持股年化收益率」。
 
 注意：`main.py` 依赖 mplfinance/pandas 等，需用能运行它的解释器启动本脚本，
-例如：  venv/bin/python strategy_rank_test.py
+例如：  venv/bin/python test/strategy_rank_test.py
 
 用法示例：
-    venv/bin/python strategy_rank_test.py
-    venv/bin/python strategy_rank_test.py --runs 5 --short-months 6
-    venv/bin/python strategy_rank_test.py --task long
+    venv/bin/python test/strategy_rank_test.py
+    venv/bin/python test/strategy_rank_test.py --runs 5 --short-months 6
+    venv/bin/python test/strategy_rank_test.py --task long
 """
 
 import argparse
@@ -31,7 +31,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAIN = os.path.join(ROOT, 'main.py')
 
 
@@ -107,7 +107,7 @@ def parse_date_arg(s):
 # ----------------------------------------------------------------------------
 def run_backtest(start, end, src='sina'):
     """执行一次 backtest --random，返回生成的 HTML 报告路径"""
-    cmd = [PYTHON, MAIN, 'backtest', '--random', '-g', 'boll,macd1226,ma520,hold',
+    cmd = [PYTHON, MAIN, 'backtest', '--random', '-g', 'boll,macd,ma520,hold',
            '--src', src,
            '-st', start.strftime('%Y%m%d'), '-e', end.strftime('%Y%m%d')]
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)

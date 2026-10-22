@@ -3,7 +3,9 @@
 import sys, os, warnings
 import pandas as pd, numpy as np
 warnings.filterwarnings('ignore')
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 from core.indicators import add_all_indicators
 from core.backtest import BacktestEngine
 from core.risk import risk_report

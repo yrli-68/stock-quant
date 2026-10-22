@@ -137,20 +137,16 @@ class QualityValueFactorStrategy(Strategy):
 
     def __init__(self, stock_type='auto',
                  buy_threshold=0.55, sell_threshold=0.45,
-                 enhance_buy_threshold=0.6, enhance_sell_threshold=0.4,
                  value_weight=0.35, quality_weight=0.30,
                  shareholder_weight=0.15, insider_weight=0.10,
                  volatility_weight=0.10,
                  score_smooth_window=3, score_z_window=20,
                  z_buy=1.0, z_sell=-1.0,
-                 z_strong_buy=2.0, z_strong_sell=-2.0,
                  name='QualityValueFactor'):
         super().__init__(name=name)
         self.stock_type = stock_type
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
-        self.enhance_buy_threshold = enhance_buy_threshold
-        self.enhance_sell_threshold = enhance_sell_threshold
         self.value_weight = value_weight
         self.quality_weight = quality_weight
         self.shareholder_weight = shareholder_weight
@@ -160,8 +156,6 @@ class QualityValueFactorStrategy(Strategy):
         self.score_z_window = score_z_window
         self.z_buy = z_buy
         self.z_sell = z_sell
-        self.z_strong_buy = z_strong_buy
-        self.z_strong_sell = z_strong_sell
         self._valuation_cache = {}
         self._financials_cache = {}
         self._shareholder_cache = {}
@@ -870,13 +864,6 @@ class QualityValueFactorStrategy(Strategy):
     # =========================================================================
 
     def _z_to_signal(self, z):
-        # 增强级别：更严格的 Z 值阈值 → 强信号
-        if self.enhance >= 1:
-            if z >= self.z_strong_buy:
-                return self.signal_value(1, strong=True)
-            elif z <= self.z_strong_sell:
-                return self.signal_value(-1, strong=True)
-        # 基础版条件 → 弱信号
         if z >= self.z_buy:
             return self.signal_value(1)
         elif z <= self.z_sell:

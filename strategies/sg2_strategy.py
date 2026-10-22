@@ -31,7 +31,7 @@ class SG2Strategy(SG1Strategy):
             fast_period (int): 快速均线周期，默认 5
             slow_period (int): 慢速均线周期，默认 20
             max_drawdown (float): 最大回撤止损阈值（0.15 表示 15%；未传参时
-                读取 stock-quant.json 的 MAX_DRAWDWON_THRESHOLD）
+                读取 pyproject.toml 的 MAX_DRAWDWON_THRESHOLD）
             name (str): 策略名称
         """
         super().__init__(fast_period=fast_period, slow_period=slow_period,

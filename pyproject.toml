@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stock-quant"
-version = "1.0.0"
+dynamic = ["version"]
 description = "股票量化分析工具：分析、回测、扫描、策略对比、钉钉通知"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,14 +19,71 @@ dependencies = [
     "PyMySQL>=1.0.0",
     "akshare>=1.14.0",
     "yfinance>=0.2.40",
+    'tomli>=2.0.0; python_version < "3.11"',
 ]
 
 [project.scripts]
 stock-quant = "main:cli"
 
+[tool.stock-quant]
+position_style = "full"
+
+[tool.stock-quant.service]
+SQ_RUN_TIME = "1450"
+SQ_STRATEGY = "all"
+
+[tool.stock-quant.thresholds]
+MAX_DRAWDWON_THRESHOLD = 35
+MAX_RSI_THRESHOLD = 85
+MIN_RSI_THRESHOLD = 65
+PE_THRESHOLD = 100
+BOLL_SQUEEZE_SCALE = 0.01
+BOLL_EXTRAWIDE_SCALE = 3
+SAR_CHECK = 0
+EMA60_CHECK = 0
+ADX_CHECK = 0
+INDEX_CHECK = 0
+
+[tool.stock-quant.WEBHOOK]
+URL = "https://oapi.dingtalk.com/robot/send?access_token=f9c9cc753feb5fedb3e59bcb15e2282201f1715aeaafab90900eb7b0f2f8d205"
+key = "quant"
+
+[tool.stock-quant.database]
+host = "localhost"
+port = 3306
+user = "root"
+password = "your_password"
+database = "stock_quant"
+
+[tool.stock-quant.composite]
+strategies = [
+    "ma1030",
+    "ema1030",
+    "macd",
+    "kdj",
+    "rsi",
+    "bollinger",
+    "quality_value",
+]
+window = 20
+z_buy = 1.5
+z_sell = -1.5
+
+[tool.stock-quant.composite.weights]
+ma1030 = 0.15
+ema1030 = 0.15
+macd = 0.2
+kdj = 0.15
+rsi = 0.15
+bollinger = 0.1
+quality_value = 0.1
+
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "_version"]
 packages = ["core", "strategies", "visualization"]
+
+[tool.setuptools.dynamic]
+version = {attr = "_version.__version__"}
 
 [tool.setuptools.package-data]
 core = ["*.py"]

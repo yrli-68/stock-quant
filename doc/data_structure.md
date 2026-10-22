@@ -220,5 +220,5 @@ QualityValueFactorStrategy 内置缓存(aKshare):
 ### 6.4 输入文件
 | 文件 | 格式 | 用途 |
 |------|------|------|
-| `input/stock-quant.json` | JSON | 自选股列表 + 综合策略权重 |
+| `pyproject.toml` | TOML | 软件配置：版本、阈值、服务、Webhook、数据库、综合权重 |
 | `input/favs.json` | JSON 数组 | 自选股(回退) |

@@ -39,9 +39,9 @@ class EMACrossStrategy(Strategy):
             fast_period (int): 快速均线周期，默认 10
             slow_period (int): 慢速均线周期，默认 30
             rsi_buy_max (float): 买入附加条件 RSI < rsi_buy_max（None 表示不启用；
-                未传参时读取 stock-quant.json 的 MIN_RSI_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MIN_RSI_THRESHOLD）
             rsi_sell_min (float): 卖出附加条件 RSI > rsi_sell_min（None 表示不启用；
-                未传参时读取 stock-quant.json 的 MAX_RSI_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MAX_RSI_THRESHOLD）
             name (str): 策略名称
         """
         super().__init__(name=name)
@@ -60,10 +60,6 @@ class EMACrossStrategy(Strategy):
             - 金叉：快线上穿慢线（上一期快线 <= 上一期慢线 且 当期快线 > 当期慢线）→ 买入(1)
             - 死叉：快线下穿慢线（上一期快线 >= 上一期慢线 且 当期快线 < 当期慢线）→ 卖出(-1)
             - 其余情况 → 持有(0)
-
-        增强级别 1（enhance>=1）时，额外要求短期均线（快线）方向确认：
-            - 金叉还需 slope(快线) > 0（短期均线向上）
-            - 死叉还需 slope(快线) < 0（短期均线向下）
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
@@ -98,11 +94,5 @@ class EMACrossStrategy(Strategy):
         # 基础版条件 → 弱信号
         signals[golden_cross] = self.signal_value(1)
         signals[death_cross] = self.signal_value(-1)
-
-        # 增强级别 1：额外要求短期均线（快线）方向确认 → 强信号
-        if self.enhance >= 1:
-            fast_slope = fast_ema.diff()  # 当前快线值 - 上一期值
-            signals[golden_cross & (fast_slope > 0)] = self.signal_value(1, strong=True)
-            signals[death_cross & (fast_slope < 0)] = self.signal_value(-1, strong=True)
 
         return signals

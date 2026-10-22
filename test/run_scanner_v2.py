@@ -3,7 +3,9 @@
 import sys, os, warnings, json, requests, time, random
 import pandas as pd, numpy as np
 warnings.filterwarnings('ignore')
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 
 from core.indicators import add_all_indicators, calc_historical_volatility, calc_momentum_return
 from core.backtest import BacktestEngine

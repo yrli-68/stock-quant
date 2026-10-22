@@ -21,18 +21,16 @@ import sys
 import time
 from datetime import datetime
 
-import json
-
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-JSON_PATH = os.path.join(PROJECT_ROOT, 'input', 'stock-quant.json')
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-with open(JSON_PATH) as f:
-    config = json.load(f)
+from core.config import load_config
 
-SERVICE_CFG = config.get('service', {})
+SERVICE_CFG = load_config().get('service', {})
 RUN_TIME = os.environ.get('SQ_RUN_TIME', SERVICE_CFG.get('SQ_RUN_TIME', '1445'))
-STRATEGY = os.environ.get('SQ_STRATEGY', SERVICE_CFG.get('SQ_STRATEGY', 'all'))
-WATCHLIST = os.environ.get('SQ_WATCHLIST', os.path.join(PROJECT_ROOT, 'input', 'favs.txt'))
+STRATEGY = os.environ.get('SQ_STRATEGY', SERVICE_CFG.get('SQ_STRATEGY', 'boll,macd'))
+WATCHLIST = os.environ.get('SQ_WATCHLIST', os.path.join(PROJECT_ROOT, 'input', 'big.txt'))
 POLL_SECONDS = 60  # 时间检查间隔（秒）
 
 
@@ -54,10 +52,10 @@ def main():
         try:
             now = datetime.now()
             if _time_exceeded(RUN_TIME) and last_run_date != now.date():
-                cmd = [sys.executable, 'main.py', 'scan',
-                       '--random', '-g', STRATEGY, '--notify']
-                print(f'[{now.strftime("%Y-%m-%d %H:%M:%S")}] 已超过 {RUN_TIME}，运行: {" ".join(cmd)}', flush=True)
-                proc = subprocess.run(cmd, cwd=PROJECT_ROOT)
+                #cmd = [sys.executable, 'main.py', 'scan',
+                #       '--random', '-g', STRATEGY, '--notify']
+                #print(f'[{now.strftime("%Y-%m-%d %H:%M:%S")}] 已超过 {RUN_TIME}，运行: {" ".join(cmd)}', flush=True)
+                #proc = subprocess.run(cmd, cwd=PROJECT_ROOT)
 
                 cmd = [sys.executable, 'main.py', 'analyze',
                        '-sf', WATCHLIST, '-g', STRATEGY, '--notify']

@@ -17,7 +17,7 @@
           z_t = (S_raw_smooth,t - μ_window) / σ_window
     - z > z_buy(1.0) 时买入，z < z_sell(-1.0) 时卖出，其余观望
 
-参与加权的策略及其权重由 `input/stock-quant.json` 的 `composite` 配置决定。
+参与加权的策略及其权重由 `pyproject.toml` 的 `composite` 配置决定。
 """
 
 import pandas as pd

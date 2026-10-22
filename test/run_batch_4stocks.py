@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""8只股票批量量化分析 — 输出JSON"""
+"""4只股票批量量化分析"""
 import sys, os, warnings, json
 import pandas as pd, numpy as np, requests
 warnings.filterwarnings('ignore')
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 
 from core.indicators import add_all_indicators, calc_historical_volatility, calc_momentum_return
 from core.backtest import BacktestEngine
@@ -18,14 +20,10 @@ from strategies.volatility_timing import VolatilityTimingStrategy
 from strategies.breadth_confirmation import BreadthConfirmationStrategy
 
 STOCKS = [
-    ('000725', '京东方A', 'sz'),
-    ('002432', '九安医疗', 'sz'),
-    ('300017', '网宿科技', 'sz'),
-    ('002297', '博云新材', 'sz'),
-    ('688270', 'ST臻镭', 'sh'),
-    ('002990', '盛视科技', 'sz'),
-    ('300302', '同有科技', 'sz'),
-    ('002487', '大金重工', 'sz'),
+    ('300747', '锐科激光', 'sz'),
+    ('002602', '世纪华通', 'sz'),
+    ('001323', '慕思股份', 'sz'),
+    ('002039', '黔源电力', 'sz'),
 ]
 
 STOCK_WEIGHT = 0.20
@@ -41,7 +39,6 @@ def fmt(v, f='.2f'):
     return f'{v:{f}}'
 
 def fetch_data(code, prefix):
-    """从新浪获取日线数据"""
     sina_code = f'{prefix}{code}'
     url = f'https://quotes.sina.com.cn/cn/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=600'
     resp = requests.get(url, headers={
@@ -228,7 +225,7 @@ def analyze_stock(code, name, prefix):
 
 # ===== 主流程 =====
 print('='*80)
-print('  8只股票批量量化分析')
+print('  4只股票批量量化分析')
 print('='*80)
 
 all_outputs = []
@@ -236,10 +233,10 @@ success_count = 0
 fail_count = 0
 
 for i, (code, name, prefix) in enumerate(STOCKS):
-    print(f'\n[{i+1}/8] 分析 {name}({code})...', end=' ', flush=True)
+    print(f'\n[{i+1}/4] 分析 {name}({code})...', end=' ', flush=True)
     try:
         output, verdict, v_color = analyze_stock(code, name, prefix)
-        json_path = f'/workspace/stock_quant/data/{code}_v3_result.json'
+        json_path = f'/workspace/stock_quant/data/{code}_result.json'
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
         all_outputs.append(output)
@@ -249,16 +246,35 @@ for i, (code, name, prefix) in enumerate(STOCKS):
         fail_count += 1
         print(f'FAIL: {str(e)[:80]}')
 
+# ===== 详细输出 =====
+for output in all_outputs:
+    print(f'\n{"="*80}')
+    print(f'  {output["name"]}({output["code"]}) 详细分析')
+    print(f'{"="*80}')
+    print(f'  收盘价: {output["close"]}  日涨跌: {output["change"]*100:+.2f}%  区间收益: {output["total_ret"]*100:+.2f}%')
+    print(f'  数据: {output["start_date"]} ~ {output["end_date"]} ({output["data_rows"]}条)')
+    print(f'  综合结论: {output["verdict"]}  加权评分: {output["score"]:+.4f}')
+    print(f'  信号分布: {output["buy_count"]}买/{output["sell_count"]}卖/{output["hold_count"]}观')
+    print(f'  策略信号:')
+    for s in output['strategies']:
+        sig_icon = {1: '买入', -1: '卖出', 0: '观望'}[s['signal']]
+        w = f' (权重:{s["weight"]})' if s['weight'] else ''
+        print(f'    [{s["category"]}] {s["name"]:12s} {sig_icon}{w}')
+        if s['total_trades'] > 0:
+            print(f'      → 收益{pct(s["total_return"])} 年化{pct(s["annual_return"])} 夏普{fmt(s["sharpe_ratio"])} 回撤{pct(s["max_drawdown"])} 胜率{pct(s["win_rate"])} 交易{s["total_trades"]}次')
+    print(f'  关键指标:')
+    for r in output['reasons']:
+        print(f'    - {r}')
+
 summary = {
     'generated': '2026-08-08',
     'success': success_count,
     'fail': fail_count,
     'stocks': all_outputs,
 }
-with open('/workspace/stock_quant/data/batch_8_summary.json', 'w', encoding='utf-8') as f:
+with open('/workspace/stock_quant/data/batch_4_summary.json', 'w', encoding='utf-8') as f:
     json.dump(summary, f, ensure_ascii=False, indent=2)
 
 print(f'\n{"="*80}')
 print(f'  完成! 成功 {success_count}/{len(STOCKS)}，失败 {fail_count}')
-print(f'  汇总结果: data/batch_8_summary.json')
 print(f'{"="*80}')

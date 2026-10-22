@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""长江电力(600900) 量化分析"""
+"""8只股票批量量化分析 — 输出JSON"""
 import sys, os, warnings, json
 import pandas as pd, numpy as np, requests
 warnings.filterwarnings('ignore')
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 
 from core.indicators import add_all_indicators, calc_historical_volatility, calc_momentum_return
 from core.backtest import BacktestEngine
@@ -16,6 +18,17 @@ from strategies.composite_strategy import CompositeStrategy
 from strategies.momentum_tiered import MomentumTieredStrategy
 from strategies.volatility_timing import VolatilityTimingStrategy
 from strategies.breadth_confirmation import BreadthConfirmationStrategy
+
+STOCKS = [
+    ('000725', '京东方A', 'sz'),
+    ('002432', '九安医疗', 'sz'),
+    ('300017', '网宿科技', 'sz'),
+    ('002297', '博云新材', 'sz'),
+    ('688270', 'ST臻镭', 'sh'),
+    ('002990', '盛视科技', 'sz'),
+    ('300302', '同有科技', 'sz'),
+    ('002487', '大金重工', 'sz'),
+]
 
 STOCK_WEIGHT = 0.20
 INDEX_WEIGHT = 0.0667
@@ -217,44 +230,37 @@ def analyze_stock(code, name, prefix):
 
 # ===== 主流程 =====
 print('='*80)
-print('  长江电力(600900) 量化分析')
+print('  8只股票批量量化分析')
 print('='*80)
 
-code, name, prefix = '600900', '长江电力', 'sh'
-print(f'\n分析 {name}({code})...', end=' ', flush=True)
-try:
-    output, verdict, v_color = analyze_stock(code, name, prefix)
-    json_path = f'/workspace/stock_quant/data/{code}_result.json'
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f'OK  评分:{output["score"]:+.3f}  {verdict}  ({output["buy_count"]}买/{output["sell_count"]}卖/{output["hold_count"]}观)')
+all_outputs = []
+success_count = 0
+fail_count = 0
 
-    print(f'\n{"="*80}')
-    print(f'  {name}({code}) 详细分析结果')
-    print(f'{"="*80}')
-    print(f'  收盘价: {output["close"]}')
-    print(f'  日涨跌: {output["change"]*100:+.2f}%')
-    print(f'  区间收益: {output["total_ret"]*100:+.2f}%')
-    print(f'  数据范围: {output["start_date"]} ~ {output["end_date"]} ({output["data_rows"]}条)')
-    print(f'\n  策略信号:')
-    for s in output['strategies']:
-        w = f'(权重:{s["weight"]})' if s['weight'] else ''
-        sig_icon = {1: '🔴买入', -1: '🟢卖出', 0: '⚪观望'}[s['signal']]
-        print(f'    [{s["category"]}] {s["name"]:12s} {sig_icon} {w}')
-        if s['total_trades'] > 0:
-            print(f'      回测: 收益{pct(s["total_return"])} 年化{pct(s["annual_return"])} 夏普{fmt(s["sharpe_ratio"])} 最大回撤{pct(s["max_drawdown"])} 胜率{pct(s["win_rate"])} 交易{s["total_trades"]}次')
-    print(f'\n  综合结论: {verdict}')
-    print(f'  加权评分: {output["score"]:+.4f}')
-    print(f'  信号分布: {output["buy_count"]}买/{output["sell_count"]}卖/{output["hold_count"]}观')
-    print(f'  关键指标:')
-    for r in output['reasons']:
-        print(f'    - {r}')
+for i, (code, name, prefix) in enumerate(STOCKS):
+    print(f'\n[{i+1}/8] 分析 {name}({code})...', end=' ', flush=True)
+    try:
+        output, verdict, v_color = analyze_stock(code, name, prefix)
+        json_path = f'/workspace/stock_quant/data/{code}_v3_result.json'
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(output, f, ensure_ascii=False, indent=2)
+        all_outputs.append(output)
+        success_count += 1
+        print(f'OK  评分:{output["score"]:+.3f}  {verdict}  ({output["buy_count"]}买/{output["sell_count"]}卖/{output["hold_count"]}观)')
+    except Exception as e:
+        fail_count += 1
+        print(f'FAIL: {str(e)[:80]}')
 
-except Exception as e:
-    import traceback
-    print(f'FAIL: {str(e)[:80]}')
-    traceback.print_exc()
+summary = {
+    'generated': '2026-08-08',
+    'success': success_count,
+    'fail': fail_count,
+    'stocks': all_outputs,
+}
+with open('/workspace/stock_quant/data/batch_8_summary.json', 'w', encoding='utf-8') as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
 
 print(f'\n{"="*80}')
-print(f'  结果已保存: data/{code}_result.json')
+print(f'  完成! 成功 {success_count}/{len(STOCKS)}，失败 {fail_count}')
+print(f'  汇总结果: data/batch_8_summary.json')
 print(f'{"="*80}')

@@ -30,8 +30,6 @@ class RSIStrategy(Strategy):
         period (int): RSI 计算周期，默认 14
         oversold (float): 超卖阈值（未传参时读取 MIN_RSI_THRESHOLD，配置默认 25）
         overbought (float): 超买阈值（未传参时读取 MAX_RSI_THRESHOLD，配置默认 85）
-        enh_oversold (float): 增强级超卖阈值（更深超卖区），默认 25
-        enh_overbought (float): 增强级超买阈值（更深超买区），默认 75
     """
 
     def __init__(self, period=14, oversold=UNSET, overbought=UNSET,
@@ -42,19 +40,15 @@ class RSIStrategy(Strategy):
         Args:
             period (int): RSI 计算周期，默认 14
             oversold (float): 超卖阈值，RSI 低于此值视为超卖（未传参时读取
-                stock-quant.json 的 MIN_RSI_THRESHOLD，配置默认 25）
+                pyproject.toml 的 MIN_RSI_THRESHOLD，配置默认 25）
             overbought (float): 超买阈值，RSI 高于此值视为超买（未传参时读取
-                stock-quant.json 的 MAX_RSI_THRESHOLD，配置默认 85）
-            enh_oversold (float): 增强级超卖阈值，默认 25
-            enh_overbought (float): 增强级超买阈值，默认 75
+                pyproject.toml 的 MAX_RSI_THRESHOLD，配置默认 85）
             name (str): 策略名称
         """
         super().__init__(name=name)
         self.period = period
         self.oversold = get_threshold('MIN_RSI_THRESHOLD') if oversold is UNSET else oversold
         self.overbought = get_threshold('MAX_RSI_THRESHOLD') if overbought is UNSET else overbought
-        self.enh_oversold = enh_oversold
-        self.enh_overbought = enh_overbought
 
     def generate_signals(self, df):
         """
@@ -91,12 +85,5 @@ class RSIStrategy(Strategy):
         # 即 RSI 从超买区域向下突破超买线
         sell_signal = (rsi.shift(1) > self.overbought) & (rsi < self.overbought)
         signals[sell_signal] = self.signal_value(-1)
-
-        # 增强级别 1：改用更深超卖/超买阈值（25/75）→ 强信号
-        if self.enhance >= 1:
-            buy_enhanced = (rsi.shift(1) < self.enh_oversold) & (rsi > self.enh_oversold)
-            sell_enhanced = (rsi.shift(1) > self.enh_overbought) & (rsi < self.enh_overbought)
-            signals[buy_enhanced] = self.signal_value(1, strong=True)
-            signals[sell_enhanced] = self.signal_value(-1, strong=True)
 
         return signals

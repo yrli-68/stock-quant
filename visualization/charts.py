@@ -569,7 +569,7 @@ class ChartGenerator:
     STRATEGY_INDICATOR_TYPE = {
         'ma1030': 'ma',
         'ema1030': 'ema',
-        'macd1226': 'macd',
+        'macd': 'macd',
         'rsi': 'rsi',
         'boll': 'boll',
         'kdj': 'kdj',
@@ -1057,7 +1057,7 @@ class ChartGenerator:
         结构:
         - panel 0: K线
         - panel 1: 成交量
-        - panel 2..N: 各策略指标子图（ma1030/macd1226/rsi/kdj 等），买卖点标注在各自指标子图
+        - panel 2..N: 各策略指标子图（ma1030/macd/rsi/kdj 等），买卖点标注在各自指标子图
         - 最后一个 panel: 权益曲线汇总（每个策略一条曲线）
 
         Parameters

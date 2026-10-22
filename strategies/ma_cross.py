@@ -39,9 +39,9 @@ class MACrossStrategy(Strategy):
             fast_period (int): 快速均线周期，默认 10
             slow_period (int): 慢速均线周期，默认 30
             rsi_buy_max (float): 买入附加条件 RSI < rsi_buy_max（None 表示不启用；
-                未传参时读取 stock-quant.json 的 MIN_RSI_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MIN_RSI_THRESHOLD）
             rsi_sell_min (float): 卖出附加条件 RSI > rsi_sell_min（None 表示不启用；
-                未传参时读取 stock-quant.json 的 MAX_RSI_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MAX_RSI_THRESHOLD）
             name (str): 策略名称
         """
         super().__init__(name=name)

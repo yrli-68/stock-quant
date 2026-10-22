@@ -49,7 +49,6 @@ MA_n = close.rolling(n).mean()          # n 期收盘价算术平均
 - `MA5/10/20/30/60/120` 分别对应短/中/长周期市场成本。
 - 用途：
   - `ma_cross`：MA10 上穿/下穿 MA30 → 金叉买/死叉卖（参数化，可改 MA5/MA20 等）。
-  - 增强过滤：`macd1`/`kdj1` 买入要求 `close > MA60`（站上 60 日线）。
   - `volatility_timing`：跌破 MA20 为多头防线失守 → 卖出确认。
   - `classify_trend`：`MA20 > MA60 > MA120`（多头排列）/反向（空头排列）。
   - 图表主图叠加。
@@ -60,8 +59,8 @@ EMA_n: α=2/(n+1)，EMA_t = α·close_t + (1−α)·EMA_{t-1}   # ewm(span=n, ad
 ```
 - 对近期价格赋予更高权重，响应快于同周期 MA。
 - 用途：
-  - `ema_cross`：EMA10 上穿/下穿 EMA30 → 金叉买/死叉卖（增强加斜率确认）。
-  - `ema_cross1` 增强；MACD 内部即由 EMA12/EMA26 派生。
+  - `ema_cross`：EMA10 上穿/下穿 EMA30 → 金叉买/死叉卖。
+  - MACD 内部即由 EMA12/EMA26 派生。
   - 图表叠加。
 
 ### 2.2 MACD（趋势动量）
@@ -72,7 +71,6 @@ DEA      = EMA9(DIF)
 MACD柱   = 2 × (DIF − DEA)
 ```
 - `macd_strategy`：DIF 上穿 DEA（金叉）→ 买；DIF 下穿 DEA（死叉）→ 卖。
-- `macd1`：金叉 + 次日延续确认（MA60/放量）→ 买；死叉 → 卖。
 - 柱状图为 DIF/DEA 距离的放大，直观反映动能强弱与背离（见 `calc_macd_divergence`）。
 
 ### 2.3 布林带 BOLL（波动通道 / 均值回归）
@@ -83,7 +81,6 @@ UPPER  = MIDDLE + 2·std(close,20)
 LOWER  = MIDDLE − 2·std(close,20)
 ```
 - `bollinger_strategy`：价格跌破下轨后回升上穿下轨 → 买；突破上轨后回落 → 卖。
-- `bollinger1`：以带宽 `BBW=(UPPER−LOWER)/MIDDLE` 过滤"挤压/极端宽"状态。
 - `volatility_timing` 亦参考布林通道。
 
 ### 2.4 RSI（超买超卖 / 均值回归）
@@ -95,7 +92,6 @@ avg_loss = |min(delta,0)| 的 Wilder 平滑(α=1/14)
 RS = avg_gain/avg_loss；RSI = 100 − 100/(1+RS)
 ```
 - `rsi_strategy`：RSI 自超卖区(<30)上穿 30 → 买；自超买区(>70)下穿 70 → 卖。
-- `rsi1`：更严格阈值 25/75（从更深超卖/超买区穿越 → 强信号）。
 
 ### 2.5 KDJ（随机指标 / 均值回归）
 
@@ -106,7 +102,6 @@ D   = K 的 EMA(α=1/3)
 J   = 3K − 2D
 ```
 - `kdj_strategy`：K 上穿 D（金叉）→ 买；K 下穿 D（死叉）→ 卖。
-- `kdj1`：买入需 `close > MA60` → 买；死叉卖出同基础。
 
 ### 2.6 ATR（真实波幅 / 波动尺度）
 
@@ -284,7 +279,6 @@ z_t = (combined_smooth,t − μ_20) / σ_20
 | `z ≤ z_sell (−1.0)` | 卖 (-1) |
 | 其余 | 0 观望 |
 
-增强（`quality_value1`）：`z≥2.0` 买、`z≤−2.0` 卖。
 
 ---
 
@@ -304,15 +298,15 @@ z_t = (combined_smooth,t − μ_20) / σ_20
 
 | 策略 | 主要因子 |
 |------|---------|
-| `ma_cross` / `ma_cross1` | MA10/MA30 + 斜率确认 |
+| `ma_cross` | MA10/MA30 交叉 |
 | `sg1` | MA3/MA10 交叉（严格买入，无强信号） |
 | `sg2` | MA5/MA20 交叉（严格买入，无强信号） |
 | `sg3` | EMA5/EMA20 交叉（严格买入，无强信号） |
-| `ema_cross` / `ema_cross1` | EMA10/EMA30 + 斜率确认 |
-| `macd` / `macd1` | DIF/DEA 金叉死叉 + `close>MA60` |
-| `rsi` / `rsi1` | RSI14 超买超卖（30/70 或 25/75） |
-| `bollinger` / `bollinger1` | 上下轨穿越 + 带宽过滤 |
-| `kdj` / `kdj1` | K/D 金叉死叉 + `close>MA60` |
+| `ema_cross` | EMA10/EMA30 交叉 |
+| `macd` | DIF/DEA 金叉死叉 |
+| `rsi` | RSI14 超买超卖（30/70） |
+| `bollinger` | 上下轨穿越 |
+| `kdj` | K/D 金叉死叉 + `close>MA60` |
 | `quality_value` | 估值/质量/筹码/增减持/波动五维 |
 | `hold` | 无（基准买入持有） |
 | `momentum`（指数） | MOM60 + MA20/MA60 |

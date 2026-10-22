@@ -14,6 +14,7 @@ import contextlib
 import fnmatch
 import warnings
 import re
+import shlex
 import time
 
 # 将项目根目录加入 Python 路径
@@ -21,12 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入核心模块
 from core.data_fetcher import DataFetcher, set_primary_source, DataSourceError
-from core.indicators import add_all_indicators, classify_trend, calc_sar
+from core.indicators import add_all_indicators, classify_trend, calc_sar, calc_rsi
 from core.backtest import BacktestEngine
 from core.risk import risk_report
 from core.strategy import Strategy
 from core.thresholds import get_threshold, get_sar_check, get_index_check_mode
+from core.config import load_config
 from core.constants import TRADING_DAYS_PER_YEAR
+from _version import __version__
 from strategies.ma_cross import MACrossStrategy
 from strategies.ema_cross import EMACrossStrategy
 from strategies.macd_strategy import MACDStrategy
@@ -60,7 +63,7 @@ warnings.filterwarnings('ignore')
 STRATEGY_MAP = {
     'ma1030': ('MA1030', MACrossStrategy),
     'ema1030': ('EMA1030', EMACrossStrategy),
-    'macd1226': ('MACD1226', MACDStrategy),
+    'macd': ('MACD', MACDStrategy),
     'boll': ('BOLL', BollingerStrategy),
     'kdj': ('KDJ', KDJStrategy),
     'sar': ('SAR', SARStrategy),
@@ -77,7 +80,7 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma1030', 'ema1030', 'macd1226', 'boll', 'kdj', 'sar', 'ma310', 'ma520', 'ema520', 'hold']
+ALL_STRATEGIES = ['ma1030', 'ema1030', 'macd', 'boll', 'kdj', 'sar', 'ma310', 'ma520', 'ema520', 'hold']
 # -g all 使用的策略集合（排除 ma1030 / ma310 / ma520，仍可用 -g 单独指定）
 ALL_SELECTION = [k for k in ALL_STRATEGIES if k not in ('ma1030', 'ma310', 'ma520')]
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
@@ -86,7 +89,7 @@ ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 _SCAN_SHORT_NAMES = {
     'ma1030': 'MA1030',
     'ema1030': 'EMA1030',
-    'macd1226': 'MACD1226',
+    'macd': 'MACD',
     'boll': 'BOLL',
     'kdj': 'KDJ',
     'sar': 'SAR',
@@ -101,7 +104,7 @@ _SCAN_SHORT_NAMES = {
 ETF_STRATEGY_MAP = {
     'ma1030': ('ETF均线', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
     'ema1030': ('ETF EMA', lambda: EMACrossStrategy(fast_period=10, slow_period=40, name='ETF EMACross')),
-    'macd1226': ('ETF MACD', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
+    'macd': ('ETF MACD', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
     'boll': ('ETF BOLL', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
     'kdj': ('ETF KDJ', lambda: KDJStrategy(n=9, m1=3, m2=3, oversold=20, overbought=80, name='ETF KDJ')),
     'sar': ('ETF SAR', lambda: SARStrategy(name='ETF SAR')),
@@ -111,14 +114,14 @@ ETF_STRATEGY_MAP = {
     'quality_value': ('ETF多因子', lambda: QualityValueFactorStrategy(stock_type='auto', name='ETF QualityValue')),
     'hold': ('ETF持有', lambda: HoldStrategy(name='ETF Hold')),
 }
-ALL_ETF_STRATEGIES = ['ma1030', 'ema1030', 'macd1226', 'boll', 'kdj', 'sar', 'ma310', 'ma520', 'ema520', 'quality_value', 'hold']
+ALL_ETF_STRATEGIES = ['ma1030', 'ema1030', 'macd', 'boll', 'kdj', 'sar', 'ma310', 'ma520', 'ema520', 'quality_value', 'hold']
 ALL_ETF_SELECTION = [k for k in ALL_ETF_STRATEGIES if k not in ('ma1030', 'ma310', 'ma520')]
 
 # 策略 key 到类的映射
 _STRATEGY_CLASS_MAP = {
     'ma1030': MACrossStrategy,
     'ema1030': EMACrossStrategy,
-    'macd1226': MACDStrategy,
+    'macd': MACDStrategy,
     'boll': BollingerStrategy,
     'kdj': KDJStrategy,
     'sar': SARStrategy,
@@ -144,16 +147,10 @@ _quant_config = None
 
 
 def _load_quant_config():
-    """加载 stock-quant.json 配置文件，失败时返回空字典"""
+    """加载 pyproject.toml 的 [tool.stock-quant] 配置，失败时返回空字典"""
     global _quant_config
-    if _quant_config is not None:
-        return _quant_config
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'input', 'stock-quant.json')
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            _quant_config = json.load(f)
-    except Exception:
-        _quant_config = {}
+    if _quant_config is None:
+        _quant_config = load_config()
     return _quant_config
 
 
@@ -294,7 +291,7 @@ def _generate_effective_signals(strategy, df):
     """生成最终交易信号
 
     - BOLL：在策略内部同步 -sn、涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损；
-    - MACD1226：内部同步涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损，忽略 -sn；
+    - MACD：内部同步涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损，忽略 -sn；
     - SG1/SG2/SG3：内部同步涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损，忽略 -sn；
     - 其余策略：外部应用涨幅过滤、SAR_CHECK 与 INDEX_CHECK，忽略 -sn。
     """
@@ -315,7 +312,7 @@ def _generate_effective_signals(strategy, df):
 
 
 def _get_position_style():
-    """从 stock-quant.json 读取回测持仓模式（position_style），默认 'full'
+    """从 pyproject.toml 读取回测持仓模式（position_style），默认 'full'
 
     合法值：'full'（全仓）/ 'fraction'（按信号比例），非法时回退默认并告警。
     """
@@ -393,7 +390,7 @@ def _run_strategy(strategy_key, df, capital=100000, is_index=False, enhance=0):
     result = engine.run(df, signals, position_style=_get_position_style())
     result['strategy_name'] = strategy_name
     result['strategy_key'] = strategy_key
-    result['enhance'] = _strat_enh(strategy_key) if enhance == 0 else enhance
+    result['enhance'] = 0
     result['signals'] = signals
     result['raw_signals'] = raw_signals
     result['signal_seq'] = _signal_sequence(raw_signals)
@@ -641,6 +638,12 @@ def _build_report_filename(source, end_date, days, strategy, mode, profit=None):
     return f'anlyze_{file_part}_{strat_part}_{datetime.now().strftime("%m%d%H%M")}.html'
 
 
+def _command_options_str():
+    """当前进程的完整命令行选项（不含解释器与脚本路径）"""
+    args = sys.argv[1:]
+    return shlex.join(args) if args else 'N/A'
+
+
 def _format_cmd_params(symbol, symbol_file, hot, start, end, strategy, is_index,
                        capital, output, output_file, threads, mode,
                        filter_signal=None, chart=False, forecast=0, seqnum=0):
@@ -727,7 +730,7 @@ def _signal_reason(strategy_key, signal, enhance=0):
     if base in ('ma1030', 'ema1030'):
         ma = 'EMA' if base == 'ema1030' else 'MA'
         return f'{ma}快线上穿慢线（金叉）' if buy else f'{ma}快线下穿慢线（死叉）'
-    if base == 'macd1226':
+    if base == 'macd':
         return 'DIF 上穿 DEA（金叉）' if buy else 'DIF 下穿 DEA（死叉）'
     if base == 'boll':
         return '跌破下轨后反弹' if buy else '触及上轨后回落或回撤止损'
@@ -789,7 +792,7 @@ def _build_trades_detail_table(trades_df):
     rows = []
     if trades_df is None or len(trades_df) == 0:
         return headers, rows
-    reason_map = {'signal': '信号', 'end': '期末平仓'}
+    reason_map = {'signal': '信号', 'end': '期末平仓', 'replace': '换股'}
     for _, t in trades_df.iterrows():
         ed = t.get('entry_date')
         xd = t.get('exit_date')
@@ -911,7 +914,7 @@ def _match_filter(filter_signal, all_signals, all_risks=None):
 
 
 def _get_webhook_config():
-    """读取钉钉机器人 Webhook 配置（stock-quant.json 的 WEBHOOK 节）"""
+    """读取钉钉机器人 Webhook 配置（pyproject.toml 的 WEBHOOK 节）"""
     config = _load_quant_config().get('WEBHOOK', {})
     url = config.get('URL')
     key = config.get('key', 'quant')
@@ -1168,6 +1171,8 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </div>
 <div class="info">
     <span><strong>命令参数:</strong> {cmd_params}</span>
+    <span><strong>命令选项:</strong> {_command_options_str()}</span>
+    <span><strong>软件版本:</strong> {__version__}</span>
 </div>
 
 <h2>策略对比排名</h2>
@@ -1326,6 +1331,8 @@ tr:nth-child(even) {{ background: #f5f6fa; }}
 <div class="info">
     <span><strong>策略:</strong> {strat_label}</span>
     <span style="margin-left:20px;"><strong>生成时间:</strong> {report_time}</span>
+    <span style="margin-left:20px;"><strong>命令选项:</strong> {_command_options_str()}</span>
+    <span style="margin-left:20px;"><strong>软件版本:</strong> {__version__}</span>
 </div>
 <h2>扫描结果 - Top {len(table_rows)}</h2>
 <table>
@@ -1375,7 +1382,7 @@ def _generate_backtest_html(symbol_label, start_date, end_date, capital, tables,
     from datetime import datetime as dt
     report_time = dt.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # 概要备注：回测使用的阈值参数（读取 stock-quant.json 的 thresholds）
+    # 概要备注：回测使用的阈值参数（读取 pyproject.toml 的 thresholds）
     def _fmt_th(v):
         return 'N/A' if v is None else f'{v:g}'
 
@@ -1424,6 +1431,8 @@ tr:nth-child(even) {{ background: #f5f6fa; }}
     <span><strong>数据来源:</strong> {source_label or 'N/A'}</span>
     <span><strong>生成时间:</strong> {report_time}</span>
     <span><strong>备注:</strong> {_remark}</span>
+    <span><strong>命令选项:</strong> {_command_options_str()}</span>
+    <span><strong>软件版本:</strong> {__version__}</span>
 </div>
 {tables_html}
 <div class="chart">{charts_html}</div>
@@ -1698,6 +1707,8 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </div>
 <div class="info">
     <span><strong>命令参数:</strong> {cmd_params}</span>
+    <span><strong>命令选项:</strong> {_command_options_str()}</span>
+    <span><strong>软件版本:</strong> {__version__}</span>
 </div>
 
 <h2>最新信号表</h2>
@@ -1741,53 +1752,8 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 # ============================================================================
 
 
-class _StrategyEnhanceGroup(click.Group):
-    """自定义命令组：重写 -g[N]/--strategy[N] 参数，将增强级别 N 附加到各策略后
-
-    例如：
-        -g  macd, boll   ->  -g macd, boll      （基础判定）
-        -g1 macd, boll   ->  -g macd1, boll1    （增强级别 1）
-        -gN macd        ->  -g macdN          （增强级别 N）
-    """
-
-    def parse_args(self, ctx, args):
-        new_args = []
-        i = 0
-        n = len(args)
-        while i < n:
-            arg = args[i]
-            # 匹配 -gN 或 --strategyN（N 为可选数字）
-            m = re.match(r'^(-g|--strategy)(\d*)$', arg)
-            if m:
-                flag, num = m.group(1), m.group(2)
-                # 从下一个参数取策略列表（-g 需要其值）
-                if i + 1 < n:
-                    strat_list = args[i + 1]
-                    if num:
-                        if strat_list.strip() == 'all':
-                            # all 展开为全部策略并附加增强级别 N
-                            new_list = ','.join(k + num for k in ALL_STRATEGIES)
-                        else:
-                            # 将增强级别 N 追加到每个策略 key 后
-                            new_list = ','.join(
-                                s.strip() + num if s.strip() and s.strip() != 'all' else s.strip()
-                                for s in re.split(r'[,|]', strat_list) if s.strip()
-                            )
-                        new_args.append('-g')
-                        new_args.append(new_list)
-                    else:
-                        new_args.append('-g')
-                        new_args.append(strat_list)
-                    i += 2
-                    continue
-            new_args.append(arg)
-            i += 1
-        args = new_args
-        return super().parse_args(ctx, args)
-
-
-@click.group(cls=_StrategyEnhanceGroup)
-@click.version_option(version='1.0.0', prog_name='stock_quant')
+@click.group()
+@click.version_option(version=__version__, prog_name='stock_quant')
 def cli():
     """股票量化分析软件 - 命令行工具
 
@@ -1889,66 +1855,43 @@ def _split_strategies(s):
 
 
 def _parse_strategy_spec(spec):
-    """解析 -g 策略说明：支持 <STRATEGY>[N] 形式（N 为信号增强判定级别）
-
-    - 'ma1030'   -> ('ma1030', 0)   基本判定
-    - 'ma10301'  -> ('ma1030', 1)   在 ma1030 基础上增加增强判定条件 1
-
-    Returns:
-        (base_key, enhance): base_key 为策略基础 key，enhance 为增强级别（0=不增强）
-    """
-    spec = spec.strip()
-    # 已注册的基础键可能以数字结尾（如 'ma310'），故先按"最长基础键前缀 + 可选数字增强级"解析
-    known_bases = set(STRATEGY_MAP) | set(INDEX_STRATEGY_MAP) | set(ETF_STRATEGY_MAP)
-    for k in sorted((b for b in known_bases if spec.startswith(b)), key=len, reverse=True):
-        if spec == k:
-            return k, 0
-        rest = spec[len(k):]
-        if rest.isdigit():
-            return k, int(rest)
-    # 回退：未匹配已知基础键 → 按末尾数字拆分
-    m = re.match(r'^(.*?)(\d+)$', spec)
-    if m:
-        base, num = m.group(1), int(m.group(2))
-        return base, num
-    return spec, 0
+    """返回策略 key（不再支持增强级别后缀）。"""
+    return str(spec).strip(), 0
 
 
 def _strat_base(key):
-    """策略键的基础 key（去掉增强级后缀）：'ma10301'→'ma1030'，'ma1030'→'ma1030'"""
-    return _parse_strategy_spec(str(key))[0]
+    """策略键（不再去掉数字后缀）。"""
+    return str(key).strip()
 
 
 def _strat_enh(key):
-    """策略键的增强级别：'ma10301'→1，'ma1030'→0"""
-    return _parse_strategy_spec(str(key))[1]
+    """兼容接口：增强级别已取消，始终返回 0。"""
+    return 0
 
 
 def _strat_label(key, strategy_map=None):
-    """策略显示名：基础显示原名，增强级>0 追加等级后缀（如 MACD / MACD1 / MACD2）"""
+    """策略显示名"""
     smap = strategy_map if strategy_map is not None else STRATEGY_MAP
-    base, enh = _parse_strategy_spec(str(key))
+    base, _ = _parse_strategy_spec(str(key))
     if base == _PREV_TOKEN:
         return _PREV_NAME
     if base == _COMBO_TOKEN:
         return _COMBO_NAME
-    name = smap[base][0]
-    return name if enh == 0 else f'{name}{enh}'
+    return smap[base][0]
 
 
 def _strat_short(key):
-    """scan 汇总表短栏名：基础用 _SCAN_SHORT_NAMES，增强级>0 追加等级后缀"""
-    base, enh = _parse_strategy_spec(str(key))
+    """scan 汇总表短栏名"""
+    base, _ = _parse_strategy_spec(str(key))
     if base == _PREV_TOKEN:
         return _PREV_NAME
     if base == _COMBO_TOKEN:
         return _COMBO_NAME
-    name = _SCAN_SHORT_NAMES.get(base, STRATEGY_MAP[base][0])
-    return name if enh == 0 else f'{name}{enh}'
+    return _SCAN_SHORT_NAMES.get(base, STRATEGY_MAP[base][0])
 
 
 def _build_report_strategy_map(strategy_map, tokens):
-    """构建报告用的 {键: 显示名} 映射：基础键名 + 增强变体 token 的带等级显示名"""
+    """构建报告用的 {键: 显示名} 映射"""
     m = {k: v[0] for k, v in strategy_map.items()}
     for t in tokens:
         m[t] = _strat_label(t, strategy_map)
@@ -1956,27 +1899,37 @@ def _build_report_strategy_map(strategy_map, tokens):
 
 
 def _build_strategy_instance(base_key, strategy_map, enhance=0):
-    """构建策略实例，并注入增强级别 enhance（与 _run_strategy 的实例化逻辑一致）
-
-    base_key 可为基础键（'ma1030'）或带增强级的变体键（'ma10301'）；变体键的增强级别在
-    enhance 参数未显式给定时生效。
-    """
-    base, spec_enh = _parse_strategy_spec(str(base_key))
+    """构建策略实例（enhance 仅为兼容旧调用，已忽略）。"""
+    base, _ = _parse_strategy_spec(str(base_key))
     strategy_name, strategy_class = strategy_map[base]
-    strategy = strategy_class()
-    strategy.enhance = spec_enh if enhance == 0 else enhance
-    return strategy
+    return strategy_class()
 
 
 def _read_symbols_file(path):
-    """从文件读取股票代码列表（空格/逗号/换行分隔）"""
+    """从文件读取股票代码列表（空格/逗号/换行分隔）
+
+    仅保留有效股票代码（6 位数字，可带 sh/sz/bj 前缀），忽略股票名称等其它内容。
+    """
     if not os.path.exists(path):
         click.echo(click.style(f'  错误: 文件不存在 ({path})', fg='red'))
         return []
     try:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
-        return [s for s in re.split(r'[,\s]+', text) if s]
+        symbols = []
+        seen = set()
+        for token in re.split(r'[,\s]+', text):
+            token = token.strip()
+            if not token:
+                continue
+            m = re.fullmatch(r'(?i)(?:sh|sz|bj)?(\d{6})', token)
+            if not m:
+                continue
+            code = m.group(1)
+            if code not in seen:
+                seen.add(code)
+                symbols.append(code)
+        return symbols
     except Exception as e:
         click.echo(click.style(f'  错误: 无法读取 {path}: {e}', fg='red'))
         return []
@@ -2163,11 +2116,11 @@ def _seqnum_option(f):
 @_src_option
 @_seqnum_option
 @click.option('--symbol', '-s', default=None, help='股票代码或名称，可多个，以空格分隔（如 "000725 京东方A 000021"）')
-@click.option('--symbol-file', '-sf', default=None, help='从指定文件读取自选股列表（股票代码，多个以空格/逗号/换行分隔），与 -s 同时使用时合并')
+@click.option('--symbol-file', '-sf', default=None, help='从指定文件读取股票代码（空格/逗号/换行分隔），仅处理有效 6 位代码并忽略名称，与 -s 同时使用时合并')
 @click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYYMMDD')
-@click.option('--strategy', '-g', default='macd1226',     help='策略选择 [ma1030|ema1030|macd1226|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔（默认macd1226）；-gN 表示全部启用增强级别N（如 -g1 ma1030,boll 即 ma10301,boll1）')
+@click.option('--strategy', '-g', default='macd',     help='策略选择 [ma1030|ema1030|macd|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔（默认macd）')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
@@ -2177,7 +2130,7 @@ def _seqnum_option(f):
 @click.option('--filter', '-f', 'filter_signal', default=None, type=click.Choice(['b', 's', 'w']), help='信号过滤，仅输出符合指定信号的股票报告 [b=买入|s=卖出|w=观望]')
 @click.option('--chart', is_flag=True, default=False, help='生成所有股票的K线图等图形并嵌入报告（默认仅生成至少有一个策略信号非观望的股票的图表）')
 @click.option('--forecast', is_flag=True, default=False, help='预测次日触发买卖信号的收盘价阈值（不指定则不预测）')
-@click.option('--notify', is_flag=True, default=False, help='对最新信号非观望的股票通过钉钉机器人发送通知（读取 stock-quant.json 的 WEBHOOK 配置）')
+@click.option('--notify', is_flag=True, default=False, help='对最新信号非观望的股票通过钉钉机器人发送通知（读取 pyproject.toml 的 WEBHOOK 配置）')
 @click.option('--plan-time', default=None, help='定时执行：到指定时间(hhmm，如 0900=09:00)才开始运行，当日已过则顺延到次日')
 def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file, threads, mode, filter_signal, chart, forecast, notify, plan_time, src, seqnum):
     """量化分析：重点输出结束日当天的买卖信号
@@ -2187,7 +2140,7 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
     使用 --index/-i 参数可切换到指数专属策略模式，适用于分析大盘指数。
     -s 支持多个股票代码或名称，以空格分隔；报告文件名格式为 anlyze_<file>_<strategy>_<mmddHHMM>.html。
     -s 和 -sf 可同时使用，股票列表会自动合并去重。
-    都不指定时从 stock-quant.json 读取自选股。
+    都不指定时从 input/favs.txt 读取自选股。
     使用 -h 指定数量时，忽略 -s/-sf，从网络获取最热门股票。
     缺少 -st 时默认分析周期 180 天，缺少 -e 时默认今天。
     """
@@ -2501,16 +2454,15 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             strategies_to_run = []
             strategy_enhance = {}
             for s in _split_strategies(strategy):
-                base_key, enh = _parse_strategy_spec(s)
+                base_key, _ = _parse_strategy_spec(s)
                 if base_key not in strategy_map:
                     avail = ', '.join(strategy_map.keys())
                     click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {avail}, all', fg='red'))
                     return
-                # 变体键：基础键或 基础键+增强级（如 macd / macd1），允许同基础不同增强级并存
-                token = base_key if enh == 0 else f'{base_key}{enh}'
+                token = base_key
                 if token not in strategies_to_run:
                     strategies_to_run.append(token)
-                strategy_enhance[token] = enh
+                strategy_enhance[token] = 0
 
         # 运行策略
         all_results = {}
@@ -2702,7 +2654,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             'trading_days': len(df),
             'capital': capital,
             'is_index': is_index,
-            # 仅保留策略名（类/闭包不可跨进程 pickle）；含增强变体 token 的显示名
+            # 仅保留策略名（类/闭包不可跨进程 pickle）
             'strategy_map': _build_report_strategy_map(strategy_map, strategies_to_report),
             'strategies_to_run': strategies_to_report,
             'all_results': all_results,
@@ -3417,7 +3369,7 @@ def _generate_portfolio_html(pool_symbols, strategy_name, start_date, end_date, 
             try:
                 cg = ChartGenerator(output_dir=output, prefix=f'{sym}_portfolio', date_tag=date_tag)
                 chart_path = cg.plot_signal_composite(
-                    df, sig, strategy_key='macd1226', title=f'{label} K线与买卖点'
+                    df, sig, strategy_key='macd', title=f'{label} K线与买卖点'
                 )
                 b64 = _img_to_b64(chart_path)
                 if b64:
@@ -3467,6 +3419,8 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </div>
 <div class="info">
     <span><strong>命令参数:</strong> {cmd_params}</span>
+    <span><strong>命令选项:</strong> {_command_options_str()}</span>
+    <span><strong>软件版本:</strong> {__version__}</span>
 </div>
 
 <h2>交易记录</h2>
@@ -3735,7 +3689,7 @@ _LOW_CAP_50YI = 500000.0
 def _apply_scan_filters(stock_list, peplus=False, nost=False, nolowcap=False):
     """按 PE / 名称 / 总市值过滤股票列表 DataFrame（缺少对应列时该条件忽略）
 
-    PE 上限取自 stock-quant.json 的 PE_THRESHOLD（默认 100），高于阈值视为高估并剔除。
+    PE 上限取自 pyproject.toml 的 PE_THRESHOLD（默认 100），高于阈值视为高估并剔除。
     """
     if stock_list is None or len(stock_list) == 0:
         return stock_list
@@ -3759,7 +3713,7 @@ def _apply_scan_filters(stock_list, peplus=False, nost=False, nolowcap=False):
 @cli.command('scan')
 @_src_option
 @_seqnum_option
-@click.option('--strategy', '-g', default='macd1226', help='策略选择，多个策略用逗号分隔，all表示全部（默认macd1226）；-gN 表示全部启用增强级别N（如 -g1 ma1030,boll 即 ma10301,boll1）')
+@click.option('--strategy', '-g', default='macd', help='策略选择，多个策略用逗号分隔，all表示全部（默认macd）')
 @click.option('--top', '-t', default=5, type=click.IntRange(1, 100), help='筛选排名前N只股票 -tN（N=1~100，默认10）')
 @click.option('--offset', '-o', default=0, type=click.IntRange(0, 1000000), help='从获取到的股票中第N条记录开始分析 -oN（N=0起始，默认0=第一条）')
 @click.option('--min-volume', default=None, type=float, help='最小成交量过滤')
@@ -3796,14 +3750,14 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
             strat_keys = []
             strat_enhance = {}
             for spec in strat_specs:
-                base_key, enh = _parse_strategy_spec(spec)
+                base_key, _ = _parse_strategy_spec(spec)
                 if base_key not in STRATEGY_MAP:
                     click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {", ".join(STRATEGY_MAP.keys())}', fg='red'))
                     return
-                token = base_key if enh == 0 else f'{base_key}{enh}'
+                token = base_key
                 if token not in strat_keys:
                     strat_keys.append(token)
-                strat_enhance[token] = enh
+                strat_enhance[token] = 0
 
         # 持有 hold 为基准对照策略，不参与扫描信号表/排序；仅当用户显式只指定 hold 时保留
         if len(strat_keys) > 1:
@@ -4080,7 +4034,8 @@ def _sample_random_pool(count=100):
 def _build_onestock_breakdown(trades, source_keys, result):
     """构建单持仓回测的「按策略分类」统计表，返回 (headers, rows)
 
-    列：指标 + 全部 + 各策略；策略的「总收益率」为该策略触发交易的复利累计。
+    列：指标 + 全部 + 各策略；策略的「总收益率」为该策略触发交易的复利累计；
+    「年化收益率」= 累计收益率 × 250 / 累计持股天数（按实际交易日）。
     """
     strat_names = [_strat_label(k) for k in source_keys]
 
@@ -4101,6 +4056,7 @@ def _build_onestock_breakdown(trades, source_keys, result):
             'cum_ret': (cum - 1) if n else 0.0,
             'pf': pf,
             'avg_hold': (sum(t['holding_days'] for t in ts) / n) if n else 0.0,
+            'hold_sum': sum(t['holding_days'] for t in ts),
             'pnl': sum(pnls) if pnls else 0.0,
             'max_win': max(pnls) if pnls else 0.0,
             'max_loss': min(pnls) if pnls else 0.0,
@@ -4119,7 +4075,9 @@ def _build_onestock_breakdown(trades, source_keys, result):
     headers = ['指标', '全部'] + strat_names
     rows = [
         ['总收益率', pct(result['total_return'])] + [pct(per[n]['cum_ret']) for n in strat_names],
-        ['年化收益率', pct(result['annual_return'])] + ['—' for _ in strat_names],
+        ['年化收益率', pct(result['annual_return'])] + [
+            pct(per[n]['cum_ret'] * TRADING_DAYS_PER_YEAR / per[n]['hold_sum'])
+            if per[n]['hold_sum'] else '—' for n in strat_names],
         ['最大回撤', pct(result['max_drawdown'])] + ['—' for _ in strat_names],
         ['夏普比率', f"{result['sharpe_ratio']:.2f}"] + ['—' for _ in strat_names],
         ['交易次数', str(all_st['n'])] + [str(per[n]['n']) for n in strat_names],
@@ -4136,13 +4094,18 @@ def _build_onestock_breakdown(trades, source_keys, result):
 
 def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enhance,
                            capital, output, random_mode=False, random_count=100, fix_capital=False,
-                           file_part='onestock'):
+                           file_part='onestock', replace_on_buy=0):
     """--onestock：单持仓轮动回测
 
-    空仓时在股票池中寻找买入信号，用全部资金买入第一只（并记住触发买入的策略）；
+    空仓时按 -g 指定的策略顺序寻找买入信号：优先选择较前面策略发出买入信号的股票，
+    同一策略内按股票池顺序选择第一只；用全部资金买入并记住触发买入的策略。
     持仓期间仅当「该股票 + 该策略」出现卖出信号时全部卖出。任意时刻至多一只持仓。
 
     fix_capital=True 时，每次买入均按初始资金 capital 额度买入（上轮盈亏不影响本轮资金）。
+
+    replace_on_buy=1 时，若已持仓且出现其它股票的买入信号，则仅当当前持仓 RSI > 75
+    时卖出换股；候选股票与当前持仓相同时不操作。
+    0 表示持仓期间忽略新的买入信号。
 
     random_mode=True 时，每次进入空仓状态（含初始）会重新随机抽取股票池。
     """
@@ -4235,8 +4198,38 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
         })
         hold = None
 
+    def _buy(sym, sk, df, d):
+        nonlocal cash, hold
+        exec_px = float(df['close'].loc[d]) * (1 + slippage)
+        # 固定资金模式：按初始资金额度买入（上轮盈亏不影响本轮资金）
+        cost = float(capital) if fix_capital else cash
+        shares = cost / (exec_px * (1 + commission))
+        cash -= cost
+        hold = {'symbol': sym, 'sk': sk, 'shares': shares,
+                'cost': cost, 'entry_date': d, 'entry_price': exec_px}
+
+    def _pick_buy(d):
+        for sk in source_keys:
+            for sym in symbols:
+                if sym not in loaded:
+                    continue
+                df, sigs = loaded[sym]
+                if d not in df.index:
+                    continue
+                if float(sigs[sk].loc[d]) > 0:
+                    return sym, sk, df
+        return None
+
+    def _rsi_above_75(sym, d):
+        df = loaded[sym][0]
+        if d not in df.index:
+            return False
+        rsi = df['RSI14'] if 'RSI14' in df.columns else calc_rsi(df, 14)
+        val = rsi.loc[d]
+        return pd.notna(val) and float(val) > 75.0
+
     for d in calendar:
-        # 1) 持仓：仅当被记录策略出现卖出信号时清仓
+        # 1) 持仓：被记录策略出现卖出信号时清仓
         if hold is not None:
             df, sigs = loaded[hold['symbol']]
             if d in df.index and float(sigs[hold['sk']].loc[d]) < 0:
@@ -4255,26 +4248,19 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
                     loaded = load_pool(symbols, label='加载')
             need_refresh = False
 
-        # 3) 空仓：寻找买入信号（第一只命中的股票 + 第一个命中策略）
+        # 3) 空仓：按 -g 策略顺序寻找买入信号；同一策略内按股票池顺序
         if hold is None:
-            for sym in symbols:
-                if sym not in loaded:
-                    continue
-                df, sigs = loaded[sym]
-                if d not in df.index:
-                    continue
-                for sk in source_keys:
-                    if float(sigs[sk].loc[d]) > 0:
-                        exec_px = float(df['close'].loc[d]) * (1 + slippage)
-                        # 固定资金模式：按初始资金额度买入（上轮盈亏不影响本轮资金）
-                        cost = float(capital) if fix_capital else cash
-                        shares = cost / (exec_px * (1 + commission))
-                        cash -= cost
-                        hold = {'symbol': sym, 'sk': sk, 'shares': shares,
-                                'cost': cost, 'entry_date': d, 'entry_price': exec_px}
-                        break
-                if hold is not None:
-                    break
+            pick = _pick_buy(d)
+            if pick is not None:
+                _buy(*pick, d)
+
+        # 3.1) 已持仓且 N=1：有其它股票买入信号且当前 RSI > 75 时换股
+        elif replace_on_buy == 1:
+            pick = _pick_buy(d)
+            if (pick is not None and pick[0] != hold['symbol']
+                    and _rsi_above_75(hold['symbol'], d)):
+                _sell(d, 'replace')
+                _buy(*pick, d)
 
         # 4) 记录当日权益
         eq = cash + (hold['shares'] * _price(hold['symbol'], d) if hold is not None else 0.0)
@@ -4287,8 +4273,8 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
 
     total_return = (equity[-1] - capital) / capital if capital else 0.0
     sharpe, max_dd = _calc_sharpe_drawdown(equity)
-    n_days = len(equity)
-    annual_return = ((1 + total_return) ** (TRADING_DAYS_PER_YEAR / n_days) - 1) if n_days > 0 and total_return > -1 else -1.0
+    hold_sum = sum(t['holding_days'] for t in trades)
+    annual_return = (total_return * TRADING_DAYS_PER_YEAR / hold_sum) if hold_sum else 0.0
     rets = [t['return'] for t in trades]
     wins = [r for r in rets if r > 0]
     losses = [r for r in rets if r < 0]
@@ -4312,7 +4298,7 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
     # 交易明细
     trade_headers = ['买入日期', '卖出日期', '股票代码', '策略', '买入价', '卖出价',
                      '持股数', '持仓天数', '收益率', '盈亏额', '退出原因']
-    reason_map = {'signal': '信号', 'end': '期末平仓'}
+    reason_map = {'signal': '信号', 'end': '期末平仓', 'replace': '换股'}
     trade_rows = []
     for t in trades:
         pnl = (t['exit_price'] - t['entry_price']) * t['position']
@@ -4366,15 +4352,16 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
 @_src_option
 @_seqnum_option
 @click.option('--symbol', '-s', default=None, help='股票代码（与 -sf 至少指定一个）')
-@click.option('--symbol-file', '-sf', default=None, help='从指定文件读取多个股票代码进行批量回测（空格/逗号/换行分隔），与 -s 同时使用时合并')
+@click.option('--symbol-file', '-sf', default=None, help='从指定文件读取股票代码进行批量回测（空格/逗号/换行分隔），仅处理有效 6 位代码并忽略名称，与 -s 同时使用时合并')
 @click.option('--random', is_flag=True, default=False, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 100 只股票回测（忽略 -s 和 -sf），完成后将代码写入 report/random_<mmddHHMM>.txt')
-@click.option('--strategy', '-g', default='boll,macd1226',     help='策略选择 [ma1030|ema1030|macd1226|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔，all表示全部（默认boll,macd1226）；-gN 表示全部启用增强级别N（如 -g1 ma1030,boll 即 ma10301,boll1）')
+@click.option('--strategy', '-g', default='boll,macd',     help='策略选择 [ma1030|ema1030|macd|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔，all表示全部（默认boll,macd）')
 @click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期，格式: YYYYMMDD')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--chart', is_flag=True, default=False, help='生成K线图等图形（默认仅输出表格报告）')
-@click.option('--onestock', is_flag=True, default=False, help='单持仓轮动回测：空仓时买入有买入信号的1只股票并记录策略，待该策略卖出时清仓；--random 下每次空仓刷新随机股票池')
+@click.option('--onestock', type=click.IntRange(0, 1), default=None, is_flag=False, flag_value=0,
+              help='单持仓轮动回测 [N]：空仓时按 -g 策略顺序优先选择靠前策略发出买入信号的股票，待该策略卖出时清仓。N=0（默认）：持仓时忽略新买入信号；N=1：持仓时若有其它股票买入信号，且当前股票 RSI > 75，则卖出换股（同一只不操作）。--random 下每次空仓刷新随机股票池')
 @click.option('--fixcapital', is_flag=True, default=False, help='固定资金模式：每次买入均按初始资金额度买入，上一轮交易的盈亏不影响本轮交易资金')
 @click.option('--verbose', is_flag=True, default=False, help='批量回测时额外输出每只股票单独的 HTML 回测报告（含K线/信号/权益图表）')
 def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, output, chart, src, onestock, fixcapital, verbose, seqnum):
@@ -4398,14 +4385,14 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
             strat_keys = []
             strat_enhance = {}
             for spec in strat_specs:
-                base_key, enh = _parse_strategy_spec(spec)
+                base_key, _ = _parse_strategy_spec(spec)
                 if base_key not in STRATEGY_MAP:
                     click.echo(click.style(f'  错误: 未知策略 "{base_key}"，可选: {", ".join(STRATEGY_MAP.keys())}', fg='red'))
                     return
-                token = base_key if enh == 0 else f'{base_key}{enh}'
+                token = base_key
                 if token not in strat_keys:
                     strat_keys.append(token)
-                strat_enhance[token] = enh
+                strat_enhance[token] = 0
 
         start_date, end_date = _parse_dates(start, end, default_days=_BACKTEST_PERIOD_DAYS)
         strat_names = [_strat_label(k) for k in strat_keys]
@@ -4454,10 +4441,10 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
             _file_part = '-'.join(str(symbol or '').split())
 
         # --onestock：单持仓轮动回测（随机模式下每次空仓刷新股票池）
-        if onestock:
+        if onestock is not None:
             _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enhance,
                                    capital, output, random_mode=random, fix_capital=fixcapital,
-                                   file_part=_file_part)
+                                   file_part=_file_part, replace_on_buy=onestock)
             return
 
         # -sf / --random 批量回测：每只股票每策略一行，各项指标作为列
@@ -5416,6 +5403,8 @@ h1 {{ color: #1a5276; }}
     <span><strong>区间:</strong> {start_date} ~ {end_date}</span>
     <span style="margin-left:20px;"><strong>指标数:</strong> {len(indicator_cols)}</span>
     <span style="margin-left:20px;"><strong>生成时间:</strong> {dt.now().strftime("%Y-%m-%d %H:%M:%S")}</span>
+    <span style="margin-left:20px;"><strong>命令选项:</strong> {_command_options_str()}</span>
+    <span style="margin-left:20px;"><strong>软件版本:</strong> {__version__}</span>
 </div>
 {img_html}
 </body>

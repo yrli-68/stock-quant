@@ -7,7 +7,7 @@ SG1 策略（策略1）
     - 买(+1)：MA3 上穿 MA10（金叉）且当日收盘价 > 前一日收盘价 × 99%（涨）且 RSI < MIN_RSI_THRESHOLD
     - 卖(-1)：MA3 下穿 MA10（死叉）或 RSI > MAX_RSI_THRESHOLD 或买入后自最高收盘价回撤 ≥ MAX_DRAWDWON_THRESHOLD
 
-阈值读取 stock-quant.json 的 thresholds 配置（默认 MIN_RSI=25 / MAX_RSI=85 / 回撤15%）。
+阈值读取 pyproject.toml 的 thresholds 配置（默认 MIN_RSI=25 / MAX_RSI=85 / 回撤15%）。
 
 本策略无强买/强卖条件（不随增强级别变化）。
 """
@@ -42,12 +42,12 @@ class SG1Strategy(Strategy):
             fast_period (int): 快速均线周期，默认 3
             slow_period (int): 慢速均线周期，默认 10
             max_drawdown (float): 最大回撤止损阈值（0.15 表示 15%；None 表示不启用；
-                未传参时读取 stock-quant.json 的 MAX_DRAWDWON_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MAX_DRAWDWON_THRESHOLD）
             use_ema (bool): True 用 EMA，False 用 SMA
             rsi_buy_max (float): 买入附加条件 RSI < rsi_buy_max（None 表示不启用；
-                未传参时读取 stock-quant.json 的 MIN_RSI_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MIN_RSI_THRESHOLD）
             rsi_sell_min (float): 卖出附加条件 RSI > rsi_sell_min（None 表示不启用；
-                未传参时读取 stock-quant.json 的 MAX_RSI_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MAX_RSI_THRESHOLD）
             name (str): 策略名称
         """
         super().__init__(name=name)

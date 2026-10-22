@@ -18,14 +18,13 @@
 | `-1` | 卖出 | 卖 |
 
 > **强弱信号已合并**：原先的弱买 `+0.5` / 强买 `+1` 统一为「买」`+1`，弱卖 `-0.5` / 强卖 `-1` 统一为「卖」`-1`。
-> 各策略的 `enhance`（`-gN`）仍控制**是否触发**该方向信号（过滤条件更严格、信号更少），但不再区分信号值大小。
 > 回测中（fraction 模式）仓位水平 `in_position` 为 0~1 浮点数，按 `±1` 累加/递减并封顶：`in_position<1` 时买入、`>0` 时卖出。
 >
 > 质价融合策略会额外在 `signals.attrs` 中附加 `combined_score`（综合得分）、`z_score`（Z 分数）与 `stock_type`（标的类型）。
 >
-> **RSI 过滤已内置**：MA1030 / EMA1030 / MACD1226 / BOLL / MA310 / MA520 / EMA520 的买入条件统一附加
+> **RSI 过滤已内置**：MA1030 / EMA1030 / MACD / BOLL / MA310 / MA520 / EMA520 的买入条件统一附加
 > `RSI < MIN_RSI_THRESHOLD`（且条件），卖出条件统一附加 `或 RSI > MAX_RSI_THRESHOLD`（RSI 优先取 `RSI14`，
-> 缺失时用 `calc_rsi(df,14)` 现算）。阈值来自 `input/stock-quant.json`（见 0.4），因此独立的 RSI 策略已取消注册。
+> 缺失时用 `calc_rsi(df,14)` 现算）。阈值来自 `pyproject.toml` 的 `[tool.stock-quant.thresholds]`（见 0.4），因此独立的 RSI 策略已取消注册。
 >
 > **全局买入附加条件**：所有策略的买入信号（`>0`）统一附加「当日涨幅 < 9.9%」。若 `close.pct_change() >= 9.9%`，
 > 该日买入信号被置为观望；卖出/观望信号不受影响。该过滤在信号生成后集中执行（`_filter_buy_on_big_gain`），
@@ -66,7 +65,7 @@
 |------|------|---------|---------|
 | 技术指标类 | MA1030 策略 | `ma1030` | 个股 / ETF |
 | 技术指标类 | EMA1030 策略 | `ema1030` | 个股 / ETF |
-| 技术指标类 | MACD1226 策略 | `macd1226` | 个股 / ETF |
+| 技术指标类 | MACD 策略 | `macd` | 个股 / ETF |
 | 技术指标类 | KDJ 策略 | `kdj` | 个股 / ETF |
 | 技术指标类 | SAR 抛物线转向策略 | `sar` | 个股 / ETF |
 | 技术指标类 | 布林带策略 | `boll` | 个股 / ETF |
@@ -79,8 +78,8 @@
 | 指数专属 | 波动率择时策略 | `volatility` | 指数 |
 | 指数专属 | 涨跌比确认策略 | `breadth` | 指数 |
 
-> `-g all` 展开为 `ALL_SELECTION = ['ema1030','macd1226','boll','kdj','sar','ema520','hold']`，**不含 `ma1030` / `ma310` / `ma520`**（仍可通过 `-g ma1030` 等单独指定）。ETF 模式的 `-g all` 另含 `quality_value`。
-> 全量注册表 `ALL_STRATEGIES` 仍保留 `ma1030` / `ma310` / `ma520`，供 `compare` 与 `-gN` 展开使用。
+> `-g all` 展开为 `ALL_SELECTION = ['ema1030','macd','boll','kdj','sar','ema520','hold']`，**不含 `ma1030` / `ma310` / `ma520`**（仍可通过 `-g ma1030` 等单独指定）。ETF 模式的 `-g all` 另含 `quality_value`。
+> 全量注册表 `ALL_STRATEGIES` 仍保留 `ma1030` / `ma310` / `ma520`，供 `compare` 使用。
 > `analyze` 命令除 `-g` 所选策略外，还会**自动追加 PREV 策略**（见 3.3）。
 > `backtest` 命令除 `-g` 所选策略外，还会**自动追加复合策略**（key `combo`，见 3.4）。
 > RSI 策略与加权投票综合策略（`composite`）已不再注册到 CLI（见第六节）。
@@ -106,9 +105,9 @@
   baostock 走最近交易日全市场快照。Baostock 不提供总市值，`--nolowcap`/市值排序在该源下不生效并给出警告。
 - 实现见 `core/data_fetcher.py`（`set_primary_source` / `_get_a_stock_data` / `get_stock_list`），数据格式详见 `doc/data_structure.md`。
 
-### 0.4 统一阈值配置（`input/stock-quant.json`）
+### 0.4 统一阈值配置（`pyproject.toml` 的 `[tool.stock-quant.thresholds]`）
 
-阈值集中在 `thresholds` 节，策略未显式传参时自动读取（`core/thresholds.py`），**以配置文件当前值为准**：
+阈值集中在 `pyproject.toml` 的 `[tool.stock-quant.thresholds]` 节，策略未显式传参时自动读取（`core/thresholds.py`），**以配置当前值为准**：
 
 | 配置项 | 代码回退默认 | 作用 |
 |------|:---:|------|
@@ -123,7 +122,7 @@
 | `ADX_CHECK` | 0 | BOLL 买入 ADX 过滤开关：`1`=买入需 `ADX > 20`；`0`=不检查 |
 | `INDEX_CHECK` | 0 | 全局买入指数过滤：`0`=不检查；`1`=上证指数收盘 > 指数 MA5；`2`=指数 MA5 或个股 MA5 |
 
-- 生效策略：MA1030 / EMA1030 / MACD1226 / BOLL / MA310 / MA520 / EMA520（以及历史 `RSIStrategy`）。
+- 生效策略：MA1030 / EMA1030 / MACD / BOLL / MA310 / MA520 / EMA520（以及历史 `RSIStrategy`）。
   `BOLL_SQUEEZE_SCALE` / `BOLL_EXTRAWIDE_SCALE` / `bbw_lookback` 当前不生效（BOLL 带宽过滤已停用）。
 - 构造参数显式传入时以传入值为准；传 `None` 表示禁用该过滤（如显式传 `max_drawdown=None` 禁用回撤止损）。
 - 加载结果在进程内缓存，修改配置后需重新启动进程生效。
@@ -161,7 +160,7 @@
 | `rsi_buy_max` | 配置 `MIN_RSI_THRESHOLD` | 买入附加条件 `RSI < MIN_RSI_THRESHOLD`（`None` 不启用） |
 | `rsi_sell_min` | 配置 `MAX_RSI_THRESHOLD` | 卖出附加条件 `RSI > MAX_RSI_THRESHOLD`（`None` 不启用） |
 
-**设计要点：** 用 `shift(1)` 检测交叉的"边沿"而非"状态"，仅在交叉发生当日出信号，其余交易日保持观望，避免重复信号。买入附加 `RSI < MIN_RSI_THRESHOLD`，以过滤过热追高。**本策略不区分增强级别**（`-gN` 对其无额外处理）。ETF 版参数为 MA10/MA40。
+**设计要点：** 用 `shift(1)` 检测交叉的"边沿"而非"状态"，仅在交叉发生当日出信号，其余交易日保持观望，避免重复信号。买入附加 `RSI < MIN_RSI_THRESHOLD`，以过滤过热追高。ETF 版参数为 MA10/MA40。
 
 ---
 
@@ -194,25 +193,10 @@
 | `rsi_buy_max` | 配置 `MIN_RSI_THRESHOLD` | 买入附加条件 `RSI < MIN_RSI_THRESHOLD` |
 | `rsi_sell_min` | 配置 `MAX_RSI_THRESHOLD` | 卖出附加条件 `RSI > MAX_RSI_THRESHOLD` |
 
-> RSI 条件作用于金叉/死叉定义本身，因此增强级别 1 亦继承该过滤。
-
-**增强级别 1（`ema10301`）**
-
-在基础交叉基础上增加短期均线（快线）斜率确认（`slope(快线) = fast_ema.diff()`）。
-仅满足基础金叉/死叉出买/卖信号（`±1`）；增强级别叠加过滤条件，仅触发满足全部条件的信号：
-
-| 信号 | 条件 | 说明 |
-|:---:|---|---|
-| 买 `1` | 金叉（快线上穿慢线） | 基础版条件 |
-| 买 `1` | 金叉 且 `slope(快线) > 0` | 金叉 + 短期均线向上 |
-| 卖 `-1` | 死叉（快线下穿慢线） | 基础版条件 |
-| 卖 `-1` | 死叉 且 `slope(快线) < 0` | 死叉 + 短期均线向下 |
-
-> 通过 `-g1 ema1030` 或 `-g ema10301` 启用。
 
 ---
 
-### 1.3 MACD1226 策略 (MACDStrategy)
+### 1.3 MACD 策略 (MACDStrategy)
 
 **定位：** 趋势跟踪动量策略，通过快慢 EMA 差值反映趋势强度与方向变化。
 
@@ -243,30 +227,15 @@
 | `rsi_buy_max` | 配置 `MIN_RSI_THRESHOLD` | 买入附加条件 `RSI < MIN_RSI_THRESHOLD`（`None` 不启用） |
 | `rsi_sell_min` | 配置 `MAX_RSI_THRESHOLD` | 卖出附加条件 `RSI > MAX_RSI_THRESHOLD`（`None` 不启用） |
 | `max_drawdown` | 配置 `MAX_DRAWDWON_THRESHOLD` / 100 | 买入后自最高收盘价回撤 ≥ 阈值止损卖出（`None` 不启用） |
-| `ma_period` | 20 | 增强过滤用趋势快速均线周期 |
-| `ma_slow` | 60 | 增强过滤用趋势慢速均线周期 |
 
-**设计要点：** 金叉时 `DIF > DEA` 恒成立，故 `MACD柱 > 0` 为冗余条件已省略；买卖附加 RSI 过滤（`RSI<MIN_RSI_THRESHOLD` / `RSI>MAX_RSI_THRESHOLD`）以抑制过热追高与提前离场。RSI 已并入金叉/死叉定义，增强级别同样继承。买入后逐日跟踪最高收盘价，回撤达到 `MAX_DRAWDWON_THRESHOLD` 时优先卖出。
-
-**增强级别 1（`macd12261`）** — 金叉/死叉 + 次日延续确认
-
-`MA60 = 60 日均线`，`vol_ma20 = 20 日均量`，`ret = 当日涨跌幅`。（强弱已合并，均为 买 `1` / 卖 `-1`）
-
-| 方向 | 条件（满足任一即触发） |
-|:---:|---|
-| 买 `1` | 金叉 |
-| 买 `1` | 金叉次日：`close>MA60` 且 `vol>vol_ma20` 且 `ret<3%`；或昨日为买 且 `ret<3%` |
-| 卖 `-1` | 死叉 |
-| 卖 `-1` | 死叉次日：`close<MA60` 且 `vol>vol_ma20` 且 `ret<3%`；或昨日为卖 且 `ret<3%` |
-
-> 通过 `-g1 macd1226` 或 `-g macd12261` 启用（需 df 含 `volume` 列）。
+**设计要点：** 金叉时 `DIF > DEA` 恒成立，故 `MACD柱 > 0` 为冗余条件已省略；买卖附加 RSI 过滤（`RSI<MIN_RSI_THRESHOLD` / `RSI>MAX_RSI_THRESHOLD`）以抑制过热追高与提前离场。RSI 已并入金叉/死叉定义。买入后逐日跟踪最高收盘价，回撤达到 `MAX_DRAWDWON_THRESHOLD` 时优先卖出。
 
 ---
 
 ### 1.4 RSI 策略（已取消注册）
 
 独立 RSI 策略不再注册到 CLI（`-g rsi` 不可用）。原因是 RSI 已被整合进其它策略的买卖过滤条件
-（MA1030 / EMA1030 / MACD1226 / BOLL / MA310 / MA520 / EMA520 均附加 `RSI < MIN_RSI_THRESHOLD` 买入、
+（MA1030 / EMA1030 / MACD / BOLL / MA310 / MA520 / EMA520 均附加 `RSI < MIN_RSI_THRESHOLD` 买入、
 `RSI > MAX_RSI_THRESHOLD` 卖出）。
 源码 `strategies/rsi_strategy.py` 保留供参考与历史脚本使用。
 
@@ -304,7 +273,7 @@
 | `overbought` | 80 | 超买阈值（K 高于此值视为超买） |
 | `ma_slow` | 60 | 买入过滤用慢速均线（MA60）周期 |
 
-**设计要点：** 基础买卖判定（交叉边沿 + `close>MA60` 过滤）即为最终逻辑，**本策略不区分增强级别**（`-gN` 不再产生额外过滤）。依赖 `high`/`low`/`close` 三列。
+**设计要点：** 基础买卖判定（交叉边沿 + `close>MA60` 过滤）即为最终逻辑，依赖 `high`/`low`/`close` 三列。
 
 ---
 
@@ -347,8 +316,6 @@
 - 买入：下轨反弹 **且** `RSI < MIN_RSI_THRESHOLD`（`EMA60_CHECK=1` 时另加 `EMA60 < close`；`ADX_CHECK=1` 时另加 `ADX > 20`）；
 - 卖出：上轨回落 **或** `RSI > MAX_RSI_THRESHOLD`，或回撤止损；
 - `bbw_lookback` / `BOLL_SQUEEZE_SCALE` / `BOLL_EXTRAWIDE_SCALE` 当前不生效。
-
-**BOLL 不再区分增强级别**（`-g1 boll` 或 `boll1` 与基础 `boll` 行为一致）。
 
 ---
 
@@ -418,7 +385,7 @@
 | `af_step` | 0.02 | 加速因子步长 |
 | `af_max` | 0.2 | 加速因子上限 |
 
-**设计要点：** 仅使用 SAR 与收盘价的穿越方向，不附加 RSI 过滤；**本策略不区分增强级别**（`-gN` 与基础 `sar` 行为一致）。`SAR_CHECK` 宏不作用于本策略。依赖 `high`/`low`/`close` 三列。
+**设计要点：** 仅使用 SAR 与收盘价的穿越方向，不附加 RSI 过滤；`SAR_CHECK` 宏不作用于本策略。依赖 `high`/`low`/`close` 三列。
 
 ---
 
@@ -463,17 +430,6 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 | 卖 `-1` | `z <= z_sell (-1.0)` | 综合评估显著劣于常态 |
 | 观望 `0` | `-1.0 < z < 1.0` | 中性 |
 
-**增强级别 1（`quality_value1`）**
-
-采用更严格 Z 值阈值：基础 `z >= 1.0` 买 / `z <= -1.0` 卖；增强级 `z >= 2.0` 买 / `z <= -2.0` 卖（强弱已合并为 买 `1` / 卖 `-1`）。
-
-| 信号 | 条件 | 说明 |
-|:---:|---|---|
-| 买 `1` | `1.0 <= z < 2.0` | 仅满足基础阈值 |
-| 买 `1` | `z >= z_strong_buy (2.0)` | 满足增强阈值 |
-| 卖 `-1` | `-2.0 < z <= -1.0` | 仅满足基础阈值 |
-| 卖 `-1` | `z <= z_strong_sell (-2.0)` | 满足增强阈值 |
-
 **参数**
 
 | 参数 | 默认 | 说明 |
@@ -482,8 +438,6 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 | `score_z_window` | 20 | 滚动 Z-score 窗口 |
 | `z_buy` | 1.0 | 基础买入 Z 阈值 |
 | `z_sell` | -1.0 | 基础卖出 Z 阈值 |
-| `z_strong_buy` | 2.0 | 增强级买入 Z 阈值 |
-| `z_strong_sell` | -2.0 | 增强级卖出 Z 阈值 |
 | `value_weight` | 0.35 | 估值维度权重 |
 | `quality_weight` | 0.30 | 质量维度权重 |
 | `shareholder_weight` | 0.15 | 筹码维度权重 |
@@ -500,7 +454,7 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 
 综合策略（`composite`）已从 CLI 注册表移除：`-g composite` 不可用，`ALL_STRATEGIES` 不再包含它，
 `analyze` 的 DB/综合构建分支一并删除。源码 `strategies/composite_strategy.py` 保留供参考与历史脚本使用，
-`input/stock-quant.json` 的 `composite` 配置段不再被 CLI 读取。
+`pyproject.toml` 的 `[tool.stock-quant.composite]` 配置段不再被 CLI 读取。
 
 ---
 
@@ -664,13 +618,13 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 |------|:---:|------|------|------|
 | MA1030 | 交叉边沿 | 双均线 + RSI 过滤 | 日频 | 趋势跟踪 |
 | EMA1030 | 交叉边沿 | 双指数均线 + RSI 过滤 | 日频 | 趋势跟踪 |
-| MACD1226 | 交叉边沿 | DIF/DEA + RSI 过滤 | 日频 | 趋势跟踪 |
+| MACD | 交叉边沿 | DIF/DEA + RSI 过滤 | 日频 | 趋势跟踪 |
 | KDJ | 交叉边沿 | K/D + MA60 过滤 | 日频 | 均值回归 |
 | SAR | 穿越边沿 | SAR 与收盘价位置切换 | 日频 | 趋势跟踪 |
 | 布林带 | 轨道穿越边沿 | 布林带 + RSI 过滤（带宽过滤已停用） | 日频 | 均值回归 |
-| MA310 | 交叉边沿 | MA3/MA10（严格买入 + RSI 过滤/无增强） | 日频 | 趋势跟踪 |
-| MA520 | 交叉边沿 | MA5/MA20（严格买入 + RSI 过滤/无增强） | 日频 | 趋势跟踪 |
-| EMA520 | 交叉边沿 | EMA5/EMA20（严格买入 + RSI 过滤/无增强） | 日频 | 趋势跟踪 |
+| MA310 | 交叉边沿 | MA3/MA10（严格买入 + RSI 过滤） | 日频 | 趋势跟踪 |
+| MA520 | 交叉边沿 | MA5/MA20（严格买入 + RSI 过滤） | 日频 | 趋势跟踪 |
+| EMA520 | 交叉边沿 | EMA5/EMA20（严格买入 + RSI 过滤） | 日频 | 趋势跟踪 |
 | 质价融合 | Z 值阈值（平滑+滚动标准化） | 五维基本面/另类 | 估值/波动日频，其余低频 ffill | 价值回归 |
 | PREV | 前一交易日所选策略信号多数表决 | 合成信号 | 日频 | 隔日确认 |
 | 复合策略 | 首个买入策略跟随（持有到该策略卖出） | 合成信号 | 日频 | 混合 |
@@ -678,21 +632,6 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 | 波动率择时 | 因子状态 | 波动率 + 布林/均线 | 日频 | 择时 |
 | 涨跌比确认 | 因子状态 | 宽度 + 量比 + MA5 | 日频 | 择时 |
 | 买入并持有 | 固定信号 | 无（基准对照） | 一次性买入后持有 | 趋势跟踪 |
-
-**增强级别（`-g[N]`）：**
-
-通过 `-gN`（如 `-g1 macd1226` 即 `macd12261`）或单策略后缀（`-g macd12261`）启用，
-在基础信号判定上叠加额外过滤条件（信号均为 买 `1` / 卖 `-1`，强弱不再区分）：
-
-| 增强策略 | 附加过滤 |
-|------|------|
-| `ema10301` | 金叉/死叉 + 快线斜率确认（`slope>0`/`<0`）（含基础 RSI 过滤） |
-| `macd12261` | 金叉/死叉 + 次日延续确认（MA60/放量）（含基础 RSI 过滤） |
-| `quality_value1` | 更严格 Z 阈值：`z >= 2.0` 买、`z <= -2.0` 卖 |
-
-> `ma1030`、`boll`、`ma310`、`ma520`、`ema520`、`kdj`、`sar` 均无增强级别（BOLL 的带宽过滤已停用，
-> `boll1` 与 `boll` 行为一致）；`ma310`/`ma520`/`ema520` 的买入条件为
-> 金叉 + 当日跌幅不超过 1% + `RSI < MIN_RSI_THRESHOLD`，涨幅上限由全局买入条件（< 9.9%）统一控制。
 
 **次日信号预测（`--forecast`）：**
 
@@ -717,5 +656,5 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 | `strategies/quality_factor.py` | 早期质量因子策略（ROE/现金流/净利率等），功能并入质价融合策略的质量维度 |
 | `strategies/rsi_strategy.py` | 独立 RSI 策略，已取消注册；RSI 现作为其它策略的买卖过滤条件；其超买/超卖阈值同样读取 `thresholds` 配置 |
 | `strategies/composite_strategy.py` | 综合策略，已取消注册（CLI 不再读取 `composite` 配置） |
-| `strategies/enhanced_macd.py` | 已移除（不再注册）；其趋势过滤思路现由 `macd12261` 增强级别承担 |
+| `strategies/enhanced_macd.py` | 已移除（不再注册） |
 | `strategies/enhanced_rsi.py` | 已移除（不再注册） |

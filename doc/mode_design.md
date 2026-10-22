@@ -27,7 +27,7 @@
 - `STRATEGY_MAP`：个股策略（`ma_cross`、`ema_cross`、`macd`、`rsi`、`bollinger`、`kdj`、`quality_value`、`composite`）
 - `INDEX_STRATEGY_MAP`：指数专属策略（`momentum`、`volatility`、`breadth`）
 - `ETF_STRATEGY_MAP`：ETF/指数基金专用策略（参数适配低波动、趋势跟随）
-- `composite` 综合策略：参与加权的子策略与权重由 `input/stock-quant.json` 的 `composite` 配置决定；
+- `composite` 综合策略：参与加权的子策略与权重由 `pyproject.toml` 的 `[tool.stock-quant.composite]` 配置决定；
   每个子策略的参与加权原始值 = 信号值 × 0.7 + 仓位水平 × 0.3，加权求和后先轻度平滑
   （rolling(3).mean()）再做滚动 Z-score 标准化（窗口 20），按 `z>1.0` 买入 / `z<-1.0` 卖出生成信号。
 
@@ -73,7 +73,7 @@
 - `-s`：直接指定代码/名称，支持多只（空格分隔）与通配符（如 `60*`）
 - `-sf`：从 JSON 文件读取自选股列表
 - `-h N`：按 HotScore 热度分排序取前 N 只热门股
-- 均未指定时：读 `stock-quant.json` 的 `favorites`，否则读 `input/favs.json`
+- 均未指定时：读 `input/favs.txt`，否则读 `input/favs.json`
 
 ### 买卖行为
 
@@ -211,10 +211,10 @@
 | 字段 | 含义 | 示例 |
 |------|------|------|
 | `file` | 股票源：`-s` 指定的代码（多只为 `multi`），`-sf` 指定的文件名（去扩展名），`-h` 为 `hot<N>`，默认 `favs` | `000725`、`multi`、`big`、`hot5` |
-| `strategy` | `-g` 指定的策略，去除空格及 `,`/`\|` 分隔符 | `macd`、`all`、`bollmacd1226` |
+| `strategy` | `-g` 指定的策略，去除空格及 `,`/`\|` 分隔符 | `macd`、`all`、`bollmacd` |
 | `mmddHHMM` | 报告生成时间：月日时分 | `10211101` |
 
-示例：`anlyze_600036_boll_10211101.html`、`anlyze_syms2_macd1226_10211101.html`、`anlyze_multi_bollmacd1226_10211101.html`
+示例：`anlyze_600036_boll_10211101.html`、`anlyze_syms2_macd_10211101.html`、`anlyze_multi_bollmacd_10211101.html`
 
 ### 日期范围选项
 

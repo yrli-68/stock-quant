@@ -3,7 +3,7 @@
 """INDEX_CHECK 年度回测对比测试
 
 15 个用例 = 5 个年度（2021~2025）× 3 个 INDEX_CHECK 取值（0/1/2）。
-每个用例运行 -g boll,macd1226，并追加由两者合成的「复合策略」，
+每个用例运行 -g boll,macd，并追加由两者合成的「复合策略」，
 股票池来自 input/random1.txt，数据源 eastmoney。
 
 最终输出：
@@ -20,18 +20,24 @@ import html
 import math
 import os
 import re
+import sys
 from datetime import datetime
 
 import pandas as pd
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 import core.thresholds as thresholds
 import main as sq
+from _version import __version__
 from core.data_fetcher import DataFetcher, set_primary_source
 from core.indicators import add_all_indicators
 
 YEARS = [2021, 2022, 2023, 2024, 2025]
 MODES = [0, 1, 2]
-BASE_STRATEGIES = ['boll', 'macd1226']
+BASE_STRATEGIES = ['boll', 'macd']
 STRATEGIES = BASE_STRATEGIES + ['combo']
 def _read_symbols(path):
     with open(path, 'r', encoding='utf-8') as f:
@@ -209,13 +215,14 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 <h1>INDEX_CHECK 年度回测对比报告</h1>
 <div class="info">
 <span><strong>用例数:</strong> {len(YEARS) * len(MODES)}（5 年度 × 3 个 INDEX_CHECK）</span><br>
-<span><strong>选项:</strong> {html.escape(case_options)}</span><br>
+<span><strong>命令选项:</strong> {html.escape(case_options)}</span><br>
+<span><strong>软件版本:</strong> {__version__}</span><br>
 <span><strong>股票数:</strong> {symbol_count}</span><br>
 <span><strong>生成时间:</strong> {now}</span>
 </div>
 <p class="note">年度收益率为当年股票等权平均总收益率；年度收益率合计为 5 年算术和；
 5 年累计总收益率为年度收益率的复利累乘；年化总收益率 = (1 + 5年累计总收益率)<sup>1/5</sup> - 1。<br>
-「复合策略」由 BOLL 与 MACD1226 的买入信号合成：任一策略买入即持有，直到被记录策略出现卖出。</p>
+「复合策略」由 BOLL 与 MACD 的买入信号合成：任一策略买入即持有，直到被记录策略出现卖出。</p>
 {_table_html(by_cum, '按 5 年累计总收益率排序')}
 {_table_html(by_annual, '按年化总收益率排序')}
 </body></html>'''
@@ -245,6 +252,7 @@ def _print_report(groups):
 
 
 def main():
+    os.chdir(ROOT)
     parser = argparse.ArgumentParser(description='INDEX_CHECK 年度回测对比测试')
     parser.add_argument('--symbol-file', default='input/random1.txt')
     parser.add_argument('--capital', type=float, default=100, help='初始资金（万元）')
@@ -262,7 +270,7 @@ def main():
     tag = datetime.now().strftime('%m%d%H%M')
     file_stem = os.path.splitext(os.path.basename(args.symbol_file))[0]
     base = os.path.join(args.output_dir, f'index_check_yearly_compare_{file_stem}_{tag}')
-    case_options = f'-g boll,macd1226 -sf {args.symbol_file} --src eastmoney'
+    case_options = f'-g boll,macd -sf {args.symbol_file} --src eastmoney'
     _write_csv(groups, base + '.csv')
     _write_html(groups, base + '.html', args.limit or len(symbols), case_options)
     _print_report(groups)

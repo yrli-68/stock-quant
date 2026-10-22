@@ -51,7 +51,7 @@ class BollingerStrategy(Strategy):
             name (str): 策略名称
             bbw_lookback (int): 布林带宽度过滤的回看窗口，默认 10（当前过滤已停用）
             max_drawdown (float): 最大回撤止损阈值（0.15 表示 15%；None 表示不启用；
-                未传参时读取 stock-quant.json 的 MAX_DRAWDWON_THRESHOLD）
+                未传参时读取 pyproject.toml 的 MAX_DRAWDWON_THRESHOLD）
         """
         super().__init__(name=name)
         self.period = period

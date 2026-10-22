@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""推荐买入8只股票完整量化分析：奥浦迈 益诺思 美迪西 君实生物 百济神州 贝达药业 百普赛斯 誉衡药业"""
+"""图中8只股票批量量化分析：高争民爆 璞泰来 凯旺科技 金力永磁 泓博医药 华明装备 隆盛科技 福龙马"""
 import sys, os, warnings
 import pandas as pd, numpy as np
 warnings.filterwarnings('ignore')
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 from core.indicators import add_all_indicators
 from core.backtest import BacktestEngine
 from core.risk import risk_report
@@ -14,14 +16,14 @@ from strategies.bollinger_strategy import BollingerStrategy
 from strategies.composite_strategy import CompositeStrategy
 
 STOCKS = [
-    ('688293', '奥浦迈'),
-    ('688710', '益诺思'),
-    ('688202', '美迪西'),
-    ('688180', '君实生物'),
-    ('688235', '百济神州'),
-    ('300558', '贝达药业'),
-    ('301080', '百普赛斯'),
-    ('002437', '誉衡药业'),
+    ('002827', '高争民爆'),
+    ('603659', '璞泰来'),
+    ('301182', '凯旺科技'),
+    ('300748', '金力永磁'),
+    ('301230', '泓博医药'),
+    ('002270', '华明装备'),
+    ('300680', '隆盛科技'),
+    ('603686', '福龙马'),
 ]
 
 SM = {
@@ -72,12 +74,14 @@ for code, name in STOCKS:
     print(f'  {name}({code})  收盘:{close:.2f}  当日:{change:+.2f}%  区间:{total_ret:+.2f}%')
     print(f'{"="*60}')
 
+    # 技术指标
     print(f'  MA5={latest["MA5"]:.2f} MA20={latest["MA20"]:.2f} MA60={latest["MA60"]:.2f}')
     print(f'  MACD: DIF={latest["MACD_DIF"]:.2f} DEA={latest["MACD_DEA"]:.2f} BAR={latest["MACD_BAR"]:.2f}')
     print(f'  RSI14={latest["RSI14"]:.2f} KDJ: K={latest["KDJ_K"]:.2f} D={latest["KDJ_D"]:.2f} J={latest["KDJ_J"]:.2f}')
     print(f'  布林: 上={latest["BOLL_UPPER"]:.2f} 中={latest["BOLL_MIDDLE"]:.2f} 下={latest["BOLL_LOWER"]:.2f}')
     print(f'  CCI={latest["CCI20"]:.2f} WR={latest["WR14"]:.2f}  ATR={latest["ATR14"]:.2f}')
 
+    # 回测
     results, signals = {}, {}
     for sk in SM:
         results[sk], signals[sk] = run(sk, df, 100000)
@@ -94,6 +98,7 @@ for code, name in STOCKS:
     best = rankings[0]
     best_sig = signals[best[0]].iloc[-1]
 
+    # 综合判断
     macd_dif = latest['MACD_DIF']
     macd_dea = latest['MACD_DEA']
     rsi = latest['RSI14']
@@ -106,6 +111,7 @@ for code, name in STOCKS:
     cci = latest['CCI20']
     wr = latest['WR14']
 
+    # 多维度信号评分
     score = 0
     reasons = []
     # MACD
@@ -161,10 +167,12 @@ for code, name in STOCKS:
     elif cci > 100:
         score -= 1; reasons.append('CCI超买')
 
+    # 策略信号统计
     buy_count = sum(1 for sk in SM if signals[sk].iloc[-1] == 1)
     sell_count = sum(1 for sk in SM if signals[sk].iloc[-1] == -1)
     hold_count = sum(1 for sk in SM if signals[sk].iloc[-1] == 0)
 
+    # 综合裁决
     if buy_count >= 4:
         verdict = '强烈买入'
     elif buy_count >= 3:
@@ -179,6 +187,8 @@ for code, name in STOCKS:
         verdict = '偏空卖出'
     elif buy_count >= 1:
         verdict = '谨慎偏多'
+    elif hold_count >= 4:
+        verdict = '观望'
     else:
         verdict = '观望'
 
@@ -191,7 +201,6 @@ for code, name in STOCKS:
         'total_ret': total_ret, 'best_strategy': SM[best[0]][0],
         'best_return': best[1].get('total_return'), 'best_sharpe': best[1].get('sharpe_ratio'),
         'best_annual': best[1].get('annual_return'),
-        'best_dd': best[1].get('max_drawdown'),
         'buy': buy_count, 'sell': sell_count, 'hold': hold_count,
         'verdict': verdict, 'score': score, 'reasons': '; '.join(reasons),
         'macd_dif': macd_dif, 'macd_dea': macd_dea, 'rsi': rsi,
@@ -203,7 +212,7 @@ for code, name in STOCKS:
 # ===== 最终汇总 =====
 print('\n\n')
 print('=' * 100)
-print('  8只推荐买入股票量化综合分析汇总表')
+print('  8只股票量化综合分析汇总表')
 print('=' * 100)
 print(f'  {"股票":<10s}{"收盘":<8s}{"当日%":<8s}{"区间%":<10s}{"评分":<6s}{"最佳策略":<10s}{"最佳收益":<10s}{"最佳夏普":<8s}{"买入":<5s}{"卖出":<5s}{"综合建议":<12s}')
 print(f'  {"-"*98}')

@@ -1,10 +1,9 @@
 """
 数据库连接工具模块
 
-提供 MySQL 连接管理和 CRUD 操作, 支持从 stock-quant.json 读取连接配置。
+提供 MySQL 连接管理和 CRUD 操作, 支持从 pyproject.toml 读取连接配置。
 """
 
-import json
 import os
 import logging
 import threading
@@ -12,6 +11,8 @@ import time
 import tempfile
 from contextlib import contextmanager
 from typing import Optional, List, Tuple
+
+from core.config import load_config
 
 try:
     import fcntl
@@ -53,31 +54,22 @@ _LOCK_TIMEOUT = 30
 
 
 def _load_db_config():
-    """从 input/stock-quant.json 加载数据库配置"""
+    """从 pyproject.toml 的 [tool.stock-quant.database] 加载数据库配置"""
     global _DB_CONFIG
     if _DB_CONFIG is not None:
         return _DB_CONFIG
 
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'input', 'stock-quant.json'
-    )
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        db_cfg = config.get('database', {})
-        if db_cfg:
-            _DB_CONFIG = {
-                'host': db_cfg.get('host', 'localhost'),
-                'port': db_cfg.get('port', 3306),
-                'user': db_cfg.get('user', ''),
-                'password': db_cfg.get('password', ''),
-                'database': db_cfg.get('database', 'stock_quant'),
-                'charset': db_cfg.get('charset', 'utf8mb4'),
-            }
-        else:
-            _DB_CONFIG = None
-    except Exception:
+    db_cfg = load_config().get('database') or {}
+    if db_cfg:
+        _DB_CONFIG = {
+            'host': db_cfg.get('host', 'localhost'),
+            'port': db_cfg.get('port', 3306),
+            'user': db_cfg.get('user', ''),
+            'password': db_cfg.get('password', ''),
+            'database': db_cfg.get('database', 'stock_quant'),
+            'charset': db_cfg.get('charset', 'utf8mb4'),
+        }
+    else:
         _DB_CONFIG = None
     return _DB_CONFIG
 
@@ -88,7 +80,7 @@ def _open_connection():
     cfg = _load_db_config()
     if not cfg:
         # 未配置数据库：静默跳过（数据库为可选基础设施，不应报错）
-        logger.debug("未配置数据库配置(input/stock-quant.json)，跳过数据库读写")
+        logger.debug("未配置数据库配置(pyproject.toml)，跳过数据库读写")
         yield None
         return
 

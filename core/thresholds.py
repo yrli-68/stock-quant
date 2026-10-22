@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""统一阈值配置（input/stock-quant.json 的 thresholds 节）
+"""统一阈值配置（pyproject.toml 的 [tool.stock-quant.thresholds] 节）
 
 配置项（均为数值）：
     MAX_DRAWDWON_THRESHOLD  最大回撤止损阈值（百分比，15 表示 15%）
@@ -18,9 +18,7 @@
 策略未显式传入参数时从此处读取阈值；显式传参（如 None）仍可覆盖。
 """
 
-import json
-import logging
-import os
+from core.config import load_config
 
 _DEFAULTS = {
     'MAX_DRAWDWON_THRESHOLD': 15.0,
@@ -41,26 +39,19 @@ UNSET = object()
 _cache = None
 
 
-def _config_path():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, 'input', 'stock-quant.json')
-
-
 def load_thresholds(force=False):
-    """读取阈值配置；文件缺失、字段缺失或非法时使用默认值。"""
+    """读取阈值配置；字段缺失或非法时使用默认值。"""
     global _cache
     if _cache is not None and not force:
         return _cache
     vals = dict(_DEFAULTS)
-    try:
-        with open(_config_path(), 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
-        sec = cfg.get('thresholds') or {}
-        for key in vals:
-            if key in sec and sec[key] is not None:
+    sec = load_config(force=force).get('thresholds') or {}
+    for key in vals:
+        if key in sec and sec[key] is not None:
+            try:
                 vals[key] = float(sec[key])
-    except Exception as exc:
-        logging.getLogger(__name__).debug('读取 thresholds 配置失败，使用默认值: %s', exc)
+            except (TypeError, ValueError):
+                pass
     _cache = vals
     return vals
 
