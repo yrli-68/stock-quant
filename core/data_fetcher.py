@@ -13,7 +13,10 @@ Author: stock_quant
 import json
 import logging
 import re
+import socket
+import threading
 import time
+from functools import lru_cache
 from datetime import datetime
 from typing import Optional, List
 
@@ -31,35 +34,166 @@ HEADERS = {
     'Referer': 'https://finance.sina.com.cn/'
 }
 
-# 首选数据源（'sina' / 'baostock' / 'eastmoney' / 'db'）：先尝试该源，失败自动改用其它通道。
-# 'db' 为严格模式：只读 MySQL，数据不完整时抛出 DataSourceError，不回退网络。
+# 首选数据源（'auto' / 'sina' / 'baostock' / 'eastmoney' / 'akshare'）：先尝试该源，失败自动改用其它通道。
+# 'auto' 为默认：启动时对各站点测速，取最先响应的源，其余仅作失败回退。
 # 由 CLI 的 --src 选项通过 set_primary_source() 设置。
-_PRIMARY_SOURCE = 'sina'
-_SOURCES = ('sina', 'baostock', 'eastmoney', 'db')
-_NETWORK_SOURCES = ('sina', 'baostock', 'eastmoney')
+_PRIMARY_SOURCE = 'auto'
+_SOURCES = ('auto', 'sina', 'baostock', 'eastmoney', 'akshare')
+_NETWORK_SOURCES = ('sina', 'baostock', 'eastmoney', 'akshare')
+
+# auto 模式：起始日期早于该值时排除 sina（新浪 K 线接口最多约 1000 条，无法覆盖更早历史）。
+_AUTO_SINA_MIN_START = '20230101'
+
+# auto 模式的数据源测速结果（仅记录最快源），模块级缓存。
+_SPEED_FASTEST = None
+_SPEED_TEST_DONE = False
+_SPEED_TEST_LOCK = threading.Lock()
+_SPEED_PROBE_TIMEOUT = 4.0
 
 
-class DataSourceError(RuntimeError):
-    """数据源不可用或数据不满足完整性要求（如 --src db）。"""
+def _probe_sina(timeout: float) -> float:
+    url = (
+        'https://quotes.sina.com.cn/cn/api/json_v2.php/'
+        'CN_MarketData.getKLineData?symbol=sh600036&scale=240&ma=no&datalen=1'
+    )
+    t0 = time.perf_counter()
+    resp = requests.get(url, headers=HEADERS, timeout=timeout)
+    resp.raise_for_status()
+    return time.perf_counter() - t0
 
 
-def _source_fallback_chain(primary: str):
-    """返回 [首选源, 其余数据源...]；'db' 为严格模式，不参与网络回退。"""
-    if primary == 'db':
-        return ['db']
+def _probe_eastmoney(timeout: float) -> float:
+    url = (
+        'https://push2his.eastmoney.com/api/qt/stock/kline/get?'
+        'secid=1.600036&ut=fa5fd1943c7b386f172d6893dbfba10b'
+        '&fields1=f1,f2&fields2=f51,f52&klt=101&fqt=0'
+        '&beg=20240101&end=20240105'
+    )
+    t0 = time.perf_counter()
+    resp = requests.get(
+        url, timeout=timeout,
+        headers={'Referer': 'https://quote.eastmoney.com/'})
+    resp.raise_for_status()
+    return time.perf_counter() - t0
+
+
+def _probe_baostock(timeout: float) -> float:
+    host, port = 'public-api.baostock.com', 10030
+    try:
+        from baostock.common import contants as _bs_cons
+        host = getattr(_bs_cons, 'BAOSTOCK_SERVER_IP', host)
+        port = getattr(_bs_cons, 'BAOSTOCK_SERVER_PORT', port)
+    except Exception:
+        pass
+    t0 = time.perf_counter()
+    sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        return time.perf_counter() - t0
+    finally:
+        sock.close()
+
+
+def run_source_speed_test(force: bool = False):
+    """并行访问 sina / baostock / eastmoney，返回最先成功响应的数据源。
+
+    一旦某个源最先返回成功结果，立即中断其余源的测速（不再等待/排名）。
+    结果缓存在模块级，force=True 可强制重新测速；全部失败时返回 None。
+    """
+    global _SPEED_FASTEST, _SPEED_TEST_DONE
+    if _SPEED_TEST_DONE and not force:
+        return _SPEED_FASTEST
+
+    with _SPEED_TEST_LOCK:
+        if _SPEED_TEST_DONE and not force:
+            return _SPEED_FASTEST
+
+        import concurrent.futures as _cf
+
+        probes = {
+            'sina': _probe_sina,
+            'baostock': _probe_baostock,
+            'eastmoney': _probe_eastmoney,
+        }
+        ex = _cf.ThreadPoolExecutor(max_workers=len(probes))
+        futures = {
+            ex.submit(fn, _SPEED_PROBE_TIMEOUT): name
+            for name, fn in probes.items()
+        }
+        fastest = None
+        try:
+            for fut in _cf.as_completed(futures):
+                name = futures[fut]
+                try:
+                    elapsed = fut.result()
+                except Exception as e:
+                    logger.warning("数据源测速失败 %s: %s", name, e)
+                    continue
+                fastest = name
+                logger.info("数据源测速: 最快为 %s (%.3fs)，中断其余测速", name, elapsed)
+                break
+        finally:
+            # 取消尚未开始的探测；已在执行的探测不再等待（wait=False）
+            ex.shutdown(wait=False, cancel_futures=True)
+
+        _SPEED_FASTEST = fastest
+        _SPEED_TEST_DONE = True
+        if fastest is None:
+            logger.warning("数据源测速全部失败，将按默认顺序尝试")
+            print('[数据源] 测速失败，按默认顺序尝试')
+        else:
+            print(f'[数据源] 测速完成，选用: {fastest}')
+        return fastest
+
+
+def _compact_date(date_str) -> str:
+    if not date_str:
+        return ''
+    return str(date_str).replace('-', '')[:8]
+
+
+def _source_fallback_chain(primary: str, start_date: str = None):
+    """返回候选数据源顺序。
+
+    - auto：起始日期早于 2023-01-01 时长历史源优先，sina 作为最后兜底
+      （新浪约 1000 条，可覆盖近 4 年；若数据起点明显晚于请求起点会被跳过）。
+      否则按测速最快源优先，其余固定顺序回退。
+    - 其它：首选源在前，其余网络源按固定顺序回退。
+    """
+    if primary == 'auto':
+        if start_date and _compact_date(start_date) < _AUTO_SINA_MIN_START:
+            return [s for s in _NETWORK_SOURCES if s != 'sina'] + ['sina']
+        fastest = run_source_speed_test()
+        candidates = list(_NETWORK_SOURCES)
+        if fastest in candidates:
+            return [fastest] + [s for s in candidates if s != fastest]
+        return candidates
     return [primary] + [s for s in _NETWORK_SOURCES if s != primary]
 
 
 def set_primary_source(src: str) -> None:
-    """设置首选数据源（'sina' / 'baostock' / 'eastmoney'）；非法值回退为 'sina'"""
+    """设置首选数据源（'auto' / 'sina' / 'baostock' / 'eastmoney' / 'akshare'）；非法值回退为 'auto'"""
     global _PRIMARY_SOURCE
     s = str(src).strip().lower()
-    _PRIMARY_SOURCE = s if s in _SOURCES else 'sina'
+    _PRIMARY_SOURCE = s if s in _SOURCES else 'auto'
+    if _PRIMARY_SOURCE == 'auto':
+        run_source_speed_test()
 
 
 def get_primary_source() -> str:
     """获取当前首选数据源"""
     return _PRIMARY_SOURCE
+
+
+@lru_cache(maxsize=64)
+def _cached_market_trade_dates(db_start: str, db_end: str) -> frozenset:
+    """进程内缓存市场交易日（同一区间只查一次，批量回测显著提速）。"""
+    try:
+        from core.db import fetch_market_trade_dates
+        rows = fetch_market_trade_dates(db_start, db_end, force=True)
+    except Exception as e:
+        logger.warning("读取市场交易日失败: %s", e)
+        return frozenset()
+    return frozenset(pd.to_datetime(rows))
 
 
 class DataFetcher:
@@ -209,127 +343,295 @@ class DataFetcher:
         adjust: str = 'qfq'
     ) -> pd.DataFrame:
         """
-        获取A股历史数据，支持复权
+        获取A股历史数据。数据库与网络均只处理原始价格，复权在内存中完成。
 
         数据流程:
-        - `--src db`：只读 MySQL，要求「首条 ≤ start+5天 且 末条 ≥ end-1」，否则抛 DataSourceError；
-        - 其它 `--src`：不读数据库，严格按首选网络通道获取（失败时按链回退）；
-        - 新浪通道会获取复权因子并计算复权价格，并回写数据库。
+        - 结束日期为当天：直接从网络获取原始K线（不回写数据库），再在内存中复权；
+        - 结束日期非当天：先读数据库原始K线，检查完整性（起始/结束偏差、中间间隙 > 3 天），
+          仅对缺失时段从网络补齐并回写数据库，最后在内存中复权；
+        - 网络通道按首选源 + 备用源链回退。
+
+        adjust: 'qfq'（默认，前复权）/ 'hfq'（后复权）/ ''（不复权）。
+        本软件默认固定前复权。
         """
         raw_symbol = self._normalize_a_stock_symbol(symbol)
+
+        # 结束日期为当天：直接全量走网络原始行情（不读库、不回写）
+        today = datetime.now().strftime('%Y%m%d')
+        if end_date == today:
+            logger.info("结束日期为当天，直接从网络获取原始K线: %s", raw_symbol)
+            df_raw = self._fetch_from_network_chain(
+                raw_symbol, start_date, end_date, write_db=False)
+            return self._apply_in_memory_adjust(df_raw, raw_symbol, adjust)
+
+        # 结束日期非当天：数据库原始K线优先 + 缺口补齐，再于内存复权
+        df_raw = self._get_a_stock_data_db_first(raw_symbol, start_date, end_date)
+        return self._apply_in_memory_adjust(df_raw, raw_symbol, adjust)
+
+    def _apply_in_memory_adjust(
+        self, df: pd.DataFrame, symbol: str, adjust: str = 'qfq'
+    ) -> pd.DataFrame:
+        """对内存中的原始K线做复权。
+
+        数据库与网络来源的价格均为原始价，复权因子从新浪获取后在内存中应用。
+        """
+        if df is None or df.empty:
+            return df
+
+        adjust_type = '' if adjust in (None, 'None') else str(adjust).strip()
+        if adjust_type not in ('qfq', 'hfq'):
+            df.attrs['adjust'] = 'raw'
+            return df
+
+        source = df.attrs.get('source')
+        factor_df = self._get_sina_adjust_factor(symbol, adjust_type)
+        if factor_df.empty:
+            logger.warning("复权因子获取失败，返回原始价格: %s", symbol)
+            df.attrs['adjust'] = 'raw'
+            return df
+
+        adjusted = self._apply_adjust_factor(df, factor_df, adjust_type)
+        adjusted.attrs['adjust'] = adjust_type
+        if source:
+            adjusted.attrs['source'] = source
+        logger.info("已在内存中应用 %s 复权: %s (%d 条)",
+                    adjust_type, symbol, len(adjusted))
+        return adjusted
+
+    def _fetch_from_network_chain(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        write_db: bool = False
+    ) -> pd.DataFrame:
+        """按首选数据源链从网络获取 [start_date, end_date] 的原始K线。
+
+        write_db 为 True 时，把获取到的原始数据强制回写数据库
+        （新浪通道内部写库，其它通道由本方法统一写库）。
+        """
         primary = get_primary_source()
-
-        # --src db：严格只读数据库；数据缺失/不完整时抛出 DataSourceError（不回退网络）
-        if primary == 'db':
-            df_db = self._get_a_stock_data_db(raw_symbol, start_date, end_date)
-            df_db.attrs['source'] = 'db'
-            return df_db
-
-        # 其它 --src：严格走对应网络通道，不再优先读取数据库
-        chain = _source_fallback_chain(primary)
+        chain = _source_fallback_chain(primary, start_date)
         for idx, src in enumerate(chain):
             if src == 'sina':
-                df = self._get_a_stock_data_sina(raw_symbol, start_date, end_date, adjust)
+                df = self._get_a_stock_data_sina(
+                    symbol, start_date, end_date, write_db=False)
             elif src == 'baostock':
-                df = self._get_a_stock_data_baostock(raw_symbol, start_date, end_date, adjust)
+                df = self._get_a_stock_data_baostock(symbol, start_date, end_date)
+            elif src == 'eastmoney':
+                df = self._get_a_stock_data_eastmoney(symbol, start_date, end_date)
             else:
-                df = self._get_a_stock_data_eastmoney(raw_symbol, start_date, end_date, adjust)
+                df = self._get_a_stock_data_akshare(symbol, start_date, end_date)
+
+            # 新浪仅约 1000 条；若数据起点明显晚于请求起点则视为不满足
+            if df is not None and not df.empty and src == 'sina':
+                try:
+                    first = pd.to_datetime(df['date'].min())
+                    req = pd.to_datetime(start_date)
+                    if (first - req).days > 15:
+                        logger.warning(
+                            "sina 数据仅从 %s 开始，无法覆盖请求起点 %s，跳过该源",
+                            first.date(), req.date())
+                        df = pd.DataFrame()
+                except Exception:
+                    pass
+
             if df is not None and not df.empty:
+                if write_db:
+                    self._store_kline_df(symbol, df)
                 df.attrs['source'] = src
                 if idx > 0:
                     logger.info("已改用备用数据源 %s 获取 %s", src, symbol)
                 return df
-            if idx == 0:
+
+            if idx == 0 and len(chain) > 1:
                 logger.warning("首选数据源 %s 获取 %s 失败，改用备用源 %s",
                                src, symbol, chain[1])
 
         return pd.DataFrame()
 
-    def _get_a_stock_data_db(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """从 MySQL 读取K线（--src db 专用）
+    def _get_a_stock_data_db_first(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        """先读数据库原始K线，检查完整性，仅对缺失时段从网络补齐并回写数据库。"""
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
 
-        完整性要求：首条 ≤ start+5天 且 末条 ≥ end-1天。
-        数据库读取失败或不满足要求时抛出 DataSourceError（由 CLI 报警退出）。
-        """
-        db_start = start_date[:4] + '-' + start_date[4:6] + '-' + start_date[6:8]
-        db_end = end_date[:4] + '-' + end_date[4:6] + '-' + end_date[6:8]
+        df_db = self._read_db_kline(symbol, start_date, end_date)
+        if df_db.empty:
+            logger.info("数据库无 %s 的原始K线，改为全量网络获取并回写", symbol)
+            return self._fetch_from_network_chain(
+                symbol, start_date, end_date, write_db=True)
+
+        missing = self._find_missing_ranges(df_db['date'], start_dt, end_dt)
+        if missing:
+            # 过滤掉完全由非交易日构成的缺口（春节/国庆等长假），避免无意义网络补数
+            market_dates = self._read_market_trade_dates(start_date, end_date)
+            if market_dates:
+                real_missing = [
+                    (a, b) for a, b in missing
+                    if any(d in market_dates for d in pd.date_range(a, b))
+                ]
+                skipped = len(missing) - len(real_missing)
+                if skipped:
+                    logger.info("忽略 %d 个非交易日缺口（法定长假等）: %s",
+                                skipped, symbol)
+                missing = real_missing
+
+        if not missing:
+            logger.info("数据库原始K线完整，无需网络补齐: %s (%d 条)", symbol, len(df_db))
+            df_db = df_db[(df_db['date'] >= start_dt) & (df_db['date'] <= end_dt)]
+            df_db = df_db.sort_values('date').reset_index(drop=True)
+            df_db.attrs['source'] = 'db'
+            return df_db
+
+        logger.info("数据库原始K线存在 %d 个缺失时段，从网络补齐: %s", len(missing), symbol)
+        frames = [df_db]
+        filled_any = False
+        for seg_start, seg_end in missing:
+            seg_s = seg_start.strftime('%Y%m%d')
+            seg_e = seg_end.strftime('%Y%m%d')
+            logger.info("补齐 %s 缺失时段: %s ~ %s", symbol, seg_s, seg_e)
+            df_seg = self._fetch_from_network_chain(
+                symbol, seg_s, seg_e, write_db=True)
+            if df_seg is not None and not df_seg.empty:
+                frames.append(df_seg)
+                filled_any = True
+
+        df = pd.concat(frames, ignore_index=True)
+        df = df.drop_duplicates(subset=['date'], keep='last')
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        df = df.sort_values('date').reset_index(drop=True)
+        df.attrs['source'] = 'db+network' if filled_any else 'db'
+        logger.info("数据库+网络补齐完成: %s，共 %d 条", symbol, len(df))
+        return df
+
+    def _read_db_kline(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        """从数据库读取原始K线（固定 adjust_type='raw'，忽略 _DB_MODE）。"""
+        db_start = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
+        db_end = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
         try:
             from core.db import fetch_kline
-            db_rows = fetch_kline(symbol, db_start, db_end)
+            rows = fetch_kline(
+                symbol, db_start, db_end,
+                adjust_type='raw', force=True)
         except Exception as e:
-            raise DataSourceError(f"数据库读取 {symbol} 失败: {e}") from e
+            logger.warning("读取数据库K线失败(%s): %s", symbol, e)
+            return pd.DataFrame()
 
-        if not db_rows:
-            raise DataSourceError(
-                f"数据库无 {symbol} 的K线数据（请求区间 {db_start} ~ {db_end}）")
+        if not rows:
+            return pd.DataFrame()
 
-        df_db = pd.DataFrame(db_rows, columns=[
+        df = pd.DataFrame(rows, columns=[
             'date', 'open', 'high', 'low', 'close', 'volume',
             'amount', 'amplitude', 'change_pct', 'change_val', 'turnover_rate'
         ])
-        df_db['date'] = pd.to_datetime(df_db['date'])
-        df_db = df_db.dropna(axis=1, how='all')
-        if df_db.empty:
-            raise DataSourceError(f"数据库 {symbol} 的K线数据为空（{db_start} ~ {db_end}）")
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.dropna(axis=1, how='all')
+        for col in ['open', 'high', 'low', 'close', 'volume', 'amount',
+                    'amplitude', 'change_pct', 'change_val', 'turnover_rate']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+        logger.info("从数据库读取 %d 条原始 K 线记录: %s", len(df), symbol)
+        return df
 
-        db_first = df_db['date'].min()
-        db_last = df_db['date'].max()
-        start_dt = pd.to_datetime(db_start)
-        end_dt = pd.to_datetime(db_end)
-        margin = pd.Timedelta(days=5)
-        if db_first > start_dt + margin or db_last < end_dt - pd.Timedelta(days=1):
-            raise DataSourceError(
-                f"数据库K线不完整: {db_first.date()} ~ {db_last.date()}，"
-                f"需要覆盖 {db_start} ~ {db_end}"
-                f"（首条 ≤ start+5天 且 末条 ≥ end-1）")
+    def _read_market_trade_dates(self, start_date: str, end_date: str) -> frozenset:
+        """读取区间内市场实际交易日集合（用于排除长假缺口）。"""
+        db_start = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
+        db_end = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
+        return _cached_market_trade_dates(db_start, db_end)
 
-        logger.info("从数据库读取 %d 条 K 线记录: %s", len(df_db), symbol)
-        return df_db
+    def _find_missing_ranges(self, dates, start_dt, end_dt, gap_days: int = 3):
+        """找出数据库K线相对请求区间的缺失时段（闭区间列表）。
+
+        - 起始偏差：首条日期晚于 start_dt 超过 gap_days 天
+        - 结束偏差：末条日期早于 end_dt 超过 gap_days 天
+        - 中间间隙：相邻两条记录间隔超过 gap_days 天
+        """
+        s = pd.to_datetime(pd.Series(dates)).dropna().sort_values().reset_index(drop=True)
+        if s.empty:
+            return [(start_dt, end_dt)]
+
+        ranges = []
+        first, last = s.iloc[0], s.iloc[-1]
+
+        if (first - start_dt).days > gap_days:
+            ranges.append((start_dt, first - pd.Timedelta(days=1)))
+
+        for i in range(1, len(s)):
+            if (s.iloc[i] - s.iloc[i - 1]).days > gap_days:
+                ranges.append((
+                    s.iloc[i - 1] + pd.Timedelta(days=1),
+                    s.iloc[i] - pd.Timedelta(days=1),
+                ))
+
+        if (end_dt - last).days > gap_days:
+            ranges.append((last + pd.Timedelta(days=1), end_dt))
+
+        return ranges
+
+    def _store_kline_df(self, symbol: str, df: pd.DataFrame):
+        """把原始K线 DataFrame 强制回写数据库（固定 adjust_type='raw'）。"""
+        if df is None or df.empty:
+            return
+        rows = []
+        for _, row in df.iterrows():
+            ohlcv = [row.get(c) for c in ('open', 'high', 'low', 'close', 'volume')]
+            if any(pd.isna(v) for v in ohlcv):
+                continue
+            rows.append((
+                pd.to_datetime(row['date']).strftime('%Y-%m-%d'),
+                float(row['open']), float(row['high']), float(row['low']),
+                float(row['close']), float(row['volume']),
+                float(row['amount']) if pd.notna(row.get('amount')) else None,
+                float(row['amplitude']) if pd.notna(row.get('amplitude')) else None,
+                float(row['change_pct']) if pd.notna(row.get('change_pct')) else None,
+                float(row['change_val']) if pd.notna(row.get('change_val')) else None,
+                float(row['turnover_rate']) if pd.notna(row.get('turnover_rate')) else None,
+            ))
+        if not rows:
+            return
+        try:
+            from core.db import store_kline
+            store_kline(symbol, rows, adjust_type='raw', force=True)
+        except Exception as e:
+            logger.warning("回写K线数据失败(%s): %s", symbol, e)
 
     def _get_a_stock_data_sina(
         self,
         symbol: str,
         start_date: str,
         end_date: str,
-        adjust: str = 'qfq'
+        write_db: bool = True
     ) -> pd.DataFrame:
-        """从新浪 K 线 API 获取A股日线并复权（K线与复权因子并行请求）
+        """从新浪 K 线 API 获取A股日线原始价格（不复权）。
 
-        成功时返回 DataFrame，并回写数据库；获取失败返回空 DataFrame。
+        write_db 为 True 时把获取到的原始数据强制回写数据库；
+        结束日期为当天的实时请求应传 False，避免缓存未完成的当日K线。
+        复权在读取后于内存中完成，本方法不返回复权价。
+        获取失败返回空 DataFrame。
         """
         sina_code = self._get_sina_prefix(symbol)
         try:
-            adjust_type = adjust if adjust != 'None' else ''
-            need_factor = adjust_type in ('qfq', 'hfq')
-
-            # K线与复权因子并行发起 HTTP 请求（self._session 非线程安全，
-            # 每个请求用独立的 requests.Session）
-            import concurrent.futures as _cf
-
-            def _http_get(url, headers=None, timeout=15):
-                s = requests.Session()
-                s.headers.update(HEADERS)
-                if headers:
-                    s.headers.update(headers)
-                r = s.get(url, timeout=timeout)
-                return r
-
             kline_url = (
                 f'https://quotes.sina.com.cn/cn/api/json_v2.php/'
                 f'CN_MarketData.getKLineData?'
                 f'symbol={sina_code}&scale=240&ma=no&datalen=1000'
             )
-            factor_url = (
-                f'https://finance.sina.com.cn/realstock/company/{sina_code}/{adjust_type}.js'
-                if need_factor else None
-            )
 
-            logger.info("从新浪获取K线数据: %s%s", sina_code, ' (含复权因子)' if need_factor else '')
-            with _cf.ThreadPoolExecutor(max_workers=2) as ex:
-                fut_k = ex.submit(_http_get, kline_url)
-                fut_f = ex.submit(_http_get, factor_url) if need_factor else None
-                resp = fut_k.result()
-                factor_resp = fut_f.result() if fut_f else None
+            logger.info("从新浪获取原始K线数据: %s", sina_code)
+            s = requests.Session()
+            s.headers.update(HEADERS)
+            resp = s.get(kline_url, timeout=15)
 
             data = resp.json()
 
@@ -356,35 +658,28 @@ class DataFetcher:
                 logger.warning("新浪日期范围内无数据: %s", symbol)
                 return pd.DataFrame()
 
-            logger.info("新浪返回 %d 条原始K线记录 (不复权)", len(df))
+            logger.info("新浪返回 %d 条原始K线记录", len(df))
 
-            # 复权（复用已并行获取的因子响应）
-            if need_factor and factor_resp is not None:
-                factor_df = self._parse_sina_adjust_factor_text(symbol, factor_resp.text)
-                if not factor_df.empty:
-                    df = self._apply_adjust_factor(df, factor_df, adjust_type)
-                    logger.info("已应用 %s 复权因子，共 %d 条记录", adjust_type, len(df))
-
-            # 回写数据库
-            try:
-                from core.db import store_kline
-                rows = []
-                for _, row in df.iterrows():
-                    rows.append((
-                        symbol,
-                        row['date'].strftime('%Y-%m-%d'),
-                        float(row['open']), float(row['high']), float(row['low']),
-                        float(row['close']), float(row['volume']),
-                        float(row.get('amount', 0)) if pd.notna(row.get('amount')) else None,
-                        float(row.get('amplitude', 0)) if pd.notna(row.get('amplitude')) else None,
-                        float(row.get('change_pct', 0)) if pd.notna(row.get('change_pct')) else None,
-                        float(row.get('change_val', 0)) if pd.notna(row.get('change_val')) else None,
-                        float(row.get('turnover_rate', 0)) if pd.notna(row.get('turnover_rate')) else None,
-                    ))
-                if rows:
-                    store_kline(symbol, rows)
-            except Exception as e:
-                logger.debug("K 线回写数据库跳过: %s", e)
+            # 回写数据库（原始价格，固定 adjust_type='raw'）
+            if write_db:
+                try:
+                    from core.db import store_kline
+                    rows = []
+                    for _, row in df.iterrows():
+                        rows.append((
+                            row['date'].strftime('%Y-%m-%d'),
+                            float(row['open']), float(row['high']), float(row['low']),
+                            float(row['close']), float(row['volume']),
+                            float(row.get('amount', 0)) if pd.notna(row.get('amount')) else None,
+                            float(row.get('amplitude', 0)) if pd.notna(row.get('amplitude')) else None,
+                            float(row.get('change_pct', 0)) if pd.notna(row.get('change_pct')) else None,
+                            float(row.get('change_val', 0)) if pd.notna(row.get('change_val')) else None,
+                            float(row.get('turnover_rate', 0)) if pd.notna(row.get('turnover_rate')) else None,
+                        ))
+                    if rows:
+                        store_kline(symbol, rows, adjust_type='raw', force=True)
+                except Exception as e:
+                    logger.debug("K 线回写数据库跳过: %s", e)
 
             return df
 
@@ -399,13 +694,12 @@ class DataFetcher:
         self,
         symbol: str,
         start_date: str,
-        end_date: str,
-        adjust: str = 'qfq'
+        end_date: str
     ) -> pd.DataFrame:
-        """从 Baostock 获取A股历史日线（新浪K线获取失败时的备用数据源）
+        """从 Baostock 获取A股历史日线原始价格（新浪K线获取失败时的备用数据源）
 
-        使用 baostock.query_history_k_data_plus，直接返回已复权价格：
-            adjustflag: 'qfq' -> 2（前复权）、'hfq' -> 1（后复权）、其它 -> 3（不复权）
+        使用 baostock.query_history_k_data_plus，固定 adjustflag='3'（不复权），
+        复权在读取后于内存中完成。
 
         登录在 DataFetcher 实例内复用（同一批量任务仅登录一次）。
         未安装 baostock 或获取失败时返回空 DataFrame。
@@ -423,7 +717,7 @@ class DataFetcher:
 
         s = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
         e = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
-        adjustflag = {'qfq': '2', 'hfq': '1'}.get(adjust if adjust != 'None' else '', '3')
+        adjustflag = '3'
 
         try:
             fields = 'date,open,high,low,close,volume,amount,turn,pctChg'
@@ -466,20 +760,19 @@ class DataFetcher:
         self,
         symbol: str,
         start_date: str,
-        end_date: str,
-        adjust: str = 'qfq'
+        end_date: str
     ) -> pd.DataFrame:
-        """从东方财富 K 线 API 获取A股日线（支持前/后复权）
+        """从东方财富 K 线 API 获取A股日线原始价格（不复权）
 
         接口: push2his.eastmoney.com/api/qt/stock/kline/get
-        复权: fqt=1 前复权 / fqt=2 后复权 / fqt=0 不复权
+        复权: 固定 fqt=0（不复权），复权在读取后于内存中完成
         返回列: date, open, high, low, close, volume, amount, amplitude,
                 change_pct, change, turnover_rate
         """
         sina_code = self._get_sina_prefix(symbol)
         market = '1' if sina_code.startswith('sh') else '0'
         secid = f'{market}.{sina_code[2:]}'
-        fqt = {'qfq': '1', 'hfq': '2'}.get(adjust if adjust != 'None' else '', '0')
+        fqt = '0'
 
         url = (
             'https://push2his.eastmoney.com/api/qt/stock/kline/get?'
@@ -525,6 +818,57 @@ class DataFetcher:
             df = df[df['date'] <= end_dt]
         df = df.sort_values('date').reset_index(drop=True)
         logger.info("东方财富获取 %s 共 %d 条记录 (fqt=%s)", symbol, len(df), fqt)
+        return df
+
+    def _get_a_stock_data_akshare(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        """使用 akshare 新浪日线接口获取长历史原始K线（不复权）。
+
+        作为 baostock / 东方财富 不可用时的长历史兜底源；
+        新浪原始 K 线接口仅约 1000 条，本接口可覆盖更长历史。
+        """
+        try:
+            import akshare as ak
+        except ImportError:
+            logger.warning("akshare 未安装，无法使用该数据源")
+            return pd.DataFrame()
+
+        sina_code = self._get_sina_prefix(symbol)
+        s = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
+        e = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
+        try:
+            df = ak.stock_zh_a_daily(
+                symbol=sina_code, start_date=s, end_date=e, adjust='')
+        except Exception as ex:
+            logger.error("akshare 获取 %s 数据失败: %s", symbol, ex)
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            logger.warning("akshare 返回空数据: %s", symbol)
+            return pd.DataFrame()
+
+        df = df.copy()
+        if 'date' not in df.columns:
+            df = df.reset_index()
+        df = df.rename(columns=str.lower)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        for col in ['open', 'high', 'low', 'close', 'volume', 'amount']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['date'])
+
+        start_dt = pd.to_datetime(start_date, format='%Y%m%d', errors='coerce')
+        end_dt = pd.to_datetime(end_date, format='%Y%m%d', errors='coerce')
+        if pd.notna(start_dt):
+            df = df[df['date'] >= start_dt]
+        if pd.notna(end_dt):
+            df = df[df['date'] <= end_dt]
+        df = df.sort_values('date').reset_index(drop=True)
+        logger.info("akshare 获取 %s 共 %d 条记录", symbol, len(df))
         return df
 
     def _baostock_login(self):
@@ -618,7 +962,7 @@ class DataFetcher:
             return pd.DataFrame()
 
         df = pd.DataFrame(records)
-        df['date'] = pd.to_datetime(df['d'])
+        df['date'] = pd.to_datetime(df['d']).astype('datetime64[ns]')
         df['factor'] = pd.to_numeric(df['f'], errors='coerce')
         df = df.dropna(subset=['date', 'factor'])
         df = df.set_index('date')
@@ -695,7 +1039,15 @@ class DataFetcher:
         # 为每个交易日找到对应的复权因子
         # 使用 merge_asof: 对于每个交易日，取 <= 该日期的最近因子日期
         df_sorted = df.sort_values('date').copy()
-        factor_reset = factor_df.reset_index().rename(columns={'date': 'factor_date'})
+        df_sorted['date'] = pd.to_datetime(df_sorted['date']).astype('datetime64[ns]')
+        factor_reset = factor_df.reset_index()
+        if 'date' in factor_reset.columns:
+            factor_reset = factor_reset.rename(columns={'date': 'factor_date'})
+        else:
+            factor_reset = factor_reset.rename(
+                columns={factor_reset.columns[0]: 'factor_date'})
+        factor_reset['factor_date'] = pd.to_datetime(
+            factor_reset['factor_date']).astype('datetime64[ns]')
 
         # 使用 merge_asof 进行前向匹配
         df_sorted = pd.merge_asof(
@@ -896,13 +1248,13 @@ class DataFetcher:
         if cash_match:
             cash = float(cash_match.group(1)) / 10.0
 
-        # 提取"每10股送X股"
-        send_match = re.search(r'送\s*([\d.]+)\s*股', plan)
+        # 提取"每10股送X股"或"送X"
+        send_match = re.search(r'送\s*([\d.]+)\s*(?:股)?', plan)
         if send_match:
             stock += float(send_match.group(1)) / 10.0
 
-        # 提取"每10股转增X股"
-        transfer_match = re.search(r'转[增]?\s*([\d.]+)\s*股', plan)
+        # 提取"每10股转X股"或"转X"
+        transfer_match = re.search(r'转[增]?\s*([\d.]+)\s*(?:股)?', plan)
         if transfer_match:
             stock += float(transfer_match.group(1)) / 10.0
 
@@ -1365,9 +1717,6 @@ class DataFetcher:
             turnover_rate/mktcap/pe 列，按 sort_key 降序
         """
         primary = get_primary_source()
-        if primary == 'db':
-            logger.warning("--src db 不提供股票列表接口")
-            return pd.DataFrame()
         chain = _source_fallback_chain(primary)
         for idx, src in enumerate(chain):
             if src == 'sina':
@@ -1375,7 +1724,7 @@ class DataFetcher:
             elif src == 'baostock':
                 df = self._get_stock_list_baostock(sort_key)
             else:
-                # eastmoney / db 无股票列表接口
+                # eastmoney / akshare 无股票列表接口
                 df = pd.DataFrame()
             if df is not None and len(df):
                 if idx > 0:

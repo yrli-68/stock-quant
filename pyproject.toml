@@ -29,8 +29,8 @@ stock-quant = "main:cli"
 position_style = "full"
 
 [tool.stock-quant.service]
-SQ_RUN_TIME = "1450"
-SQ_STRATEGY = "all"
+SQ_RUN_TIME = "1445"
+SQ_STRATEGY = "boll,macd"
 
 [tool.stock-quant.thresholds]
 MAX_DRAWDWON_THRESHOLD = 35
@@ -51,8 +51,8 @@ key = "quant"
 [tool.stock-quant.database]
 host = "localhost"
 port = 3306
-user = "root"
-password = "your_password"
+user = "smit"
+password = "smit2024"
 database = "stock_quant"
 
 [tool.stock-quant.composite]

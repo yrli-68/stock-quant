@@ -90,15 +90,19 @@
 
 | `--src` | 取数方式 | 失败回退 |
 |:---:|---|---|
-| `sina`（默认） | 新浪 K 线 API（前/后复权用新浪复权因子） | Baostock → 东方财富 |
-| `baostock` | Baostock（`adjustflag` 直接返回复权价） | 新浪 → 东方财富 |
-| `eastmoney` | 东方财富 K 线 API（`fqt=1/2` 前/后复权） | 新浪 → Baostock |
-| `db` | 仅 MySQL（严格模式） | 无（数据不完整/缺失 → 报警退出） |
+| `auto`（默认） | 启动时对 sina / baostock / eastmoney 并行测速，取最先响应的源；起始日早于 `2023-01-01` 时用 baostock / eastmoney / akshare | 按固定顺序回退 |
+| `sina` | 新浪 K 线 API（原始价，约 1000 条） | Baostock → 东方财富 → akshare |
+| `baostock` | Baostock（`adjustflag=3`，原始价） | 新浪 → 东方财富 → akshare |
+| `eastmoney` | 东方财富 K 线 API（`fqt=0`，原始价） | 新浪 → Baostock → akshare |
+| `akshare` | akshare 新浪日线（`stock_zh_a_daily`，原始价，长历史） | 新浪 → Baostock → 东方财富 |
 
-- **网络源不再优先读 DB**：`sina` / `baostock` / `eastmoney` 只走对应网络通道，失败按上表回退，不会先读取数据库。
-- **`--src db`**：只读 MySQL，要求「首条 ≤ start+5天 且 末条 ≥ end-1」（`start` 为实际取数起点，含 90 天预热）；不满足时抛出 `DataSourceError`，CLI 报警退出，不回退网络。
-- `eastmoney` / `db` 不提供股票列表接口；`scan` / 随机抽样使用 `--src db` 时会直接报错。
-- **回测 HTML 报告**在概要区显示本次实际使用的数据来源（如 `sina`、`db`；批量回测可能显示 `sina, baostock`）。
+- **`auto` 测速规则**：软件启动后并行访问三个站点（sina/eastmoney 取 K 线接口、baostock 取 TCP 连接耗时），一旦有源最先成功返回即中断其余测速并选用该源；其余源只作失败回退，不再做速度排名。`akshare` 作为长历史兜底源排在最后。
+- **历史区间限制**：起始日期早于 `2023-01-01` 时，sina 的约 1000 条上限无法覆盖，自动排除 sina，改用 baostock / eastmoney / akshare（后两者可覆盖长历史）。
+- **所有网络源只返回原始价**：复权在读取后于内存中完成，默认前复权（qfq）。
+- **结束日期为当天**：直接走网络获取全部原始 K 线，不读写数据库。
+- **结束日期非当天**：先读数据库原始 K 线（`daily_kline.adjust_type='raw'`），检查起始/结束偏差与 >3 天中间间隙，仅对缺失时段走网络补齐并回写数据库，最后统一内存复权。
+- `eastmoney` 不提供股票列表接口；`scan` / 随机抽样会回退到其它通道。
+- **回测 HTML 报告**在概要区显示本次实际使用的数据来源（如 `sina`、`db`、`db+network`；批量回测可能显示 `sina, baostock`）。
 - 适用于 `analyze` / `scan` / `backtest` / `compare` / `indicators`；`strategy_rank_test.py` 亦支持 `--src` 并透传给 `backtest`。
 - 数据获取起点 = 分析/回测 `start` 前推 90 自然日（`_ANALYSIS_WARMUP_DAYS`）以正确计算指标，计算后截断回 `start`。
 - **股票列表同样遵守 `--src`**：`get_stock_list()` 首选源失败时自动切换备用源；sina 走行情中心分页，
@@ -413,7 +417,7 @@
 | growth | 300/301/688 开头 | ps, pcf | [0.55, 0.45] |
 | dividend | 默认 | pe_ttm, pb, ps | [0.40, 0.35, 0.25] |
 
-**打分方式：** 各维度分别做分位数打分（估值逐日 / 质量按报告期 + ffill / 筹码按报告期 + ffill / 增减持按公告日 + ffill / 波动率逐日），得分均归一化到 0~1；再按有效维度权重动态归一化加权求和。
+**打分方式：** 各维度分别做分位数打分（估值逐日 / 质量按公告日 + ffill / 筹码按报告期 + ffill / 增减持按公告日 + ffill / 波动率逐日），得分均归一化到 0~1；再按有效维度权重动态归一化加权求和。
 
 **滚动 Z-score 标准化：** 综合得分 combined 集中在小区间（如 0.4~0.7），直接阈值判断容易误判。因此先对 combined 轻度平滑（`rolling(3).mean()`），再做滚动 Z-score 标准化（窗口 20），用 Z 值阈值判定信号：
 

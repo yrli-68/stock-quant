@@ -2,6 +2,7 @@
 # 提供命令行交互界面，支持股票分析、回测、策略对比等功能
 
 import click
+from click.core import ParameterSource
 import pandas as pd
 import numpy as np
 import requests
@@ -21,7 +22,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入核心模块
-from core.data_fetcher import DataFetcher, set_primary_source, DataSourceError
+from core.data_fetcher import DataFetcher, set_primary_source
 from core.indicators import add_all_indicators, classify_trend, calc_sar, calc_rsi
 from core.backtest import BacktestEngine
 from core.risk import risk_report
@@ -949,8 +950,8 @@ def _notify_signals(all_stock_data):
     """对最新信号的股票发送钉钉通知：多条股票消息合成一条消息发出
 
     第一行（title）：key: 1.<策略1> 2.<策略2> 3.<策略3> ...
-    后续行（data）：<股票代码>, 1.<信号1> 3.<信号3> ...（仅显示买/卖信号，观望跳过）
-    （如 "quant: 1.MACD 2.KDJ 3.均线" / "600089, 1.买 3.卖"）
+    后续行（data）：<股票代码><股票名称>: <策略编号><买/卖> ...（仅显示买/卖信号，观望跳过）
+    （如 "quant: 1.MACD 2.KDJ 3.均线" / "600089 特变电工: 1买 3卖"）
     """
     _, key = _get_webhook_config()
     sig_text_map = {1.0: '买', -1.0: '卖'}
@@ -993,10 +994,12 @@ def _notify_signals(all_stock_data):
             text = sig_text_map.get(float(last))
             if text is None:
                 continue
-            sig_cells.append(f'{i}.{text}')
+            sig_cells.append(f'{i}{text}')
         if not sig_cells:
             continue
-        lines.append(f'{symbol}| ' + ' '.join(sig_cells))
+        name = str(d.get('stock_name') or '').strip()
+        label = symbol if not name or name == symbol else f'{symbol} {name}'
+        lines.append(f'{label}: ' + ' '.join(sig_cells))
 
     if len(lines) <= 1:
         return
@@ -1375,7 +1378,7 @@ def _generate_backtest_html(symbol_label, start_date, end_date, capital, tables,
         tables: [(表格标题, headers, rows), ...]
         charts_html: 已拼接好的图表 <img> 片段（可空）
         report_filename: 输出文件名（默认自动生成）
-        source_label: 数据来源展示文本（如 "sina" / "baostock" / "db"）
+        source_label: 数据来源展示文本（如 "sina" / "baostock"）
     Returns:
         报告文件路径
     """
@@ -1752,7 +1755,35 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 # ============================================================================
 
 
-@click.group()
+def _format_elapsed(seconds: float) -> str:
+    """将秒数格式化为易读的耗时文本。"""
+    if seconds < 60:
+        return f'{seconds:.2f} 秒'
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f'{int(minutes)} 分 {sec:.2f} 秒'
+    hours, minutes = divmod(minutes, 60)
+    return f'{int(hours)} 时 {int(minutes)} 分 {sec:.2f} 秒'
+
+
+def _print_total_elapsed(seconds: float) -> None:
+    """在命令执行结束后打印总耗时。"""
+    click.echo()
+    click.echo(click.style(f'  总耗时: {_format_elapsed(seconds)}', fg='cyan', bold=True))
+
+
+class _TimedGroup(click.Group):
+    """命令组：每个子命令正常执行完毕后打印总耗时。"""
+
+    def invoke(self, ctx):
+        start = time.perf_counter()
+        result = super().invoke(ctx)
+        if ctx.invoked_subcommand:
+            _print_total_elapsed(time.perf_counter() - start)
+        return result
+
+
+@click.group(cls=_TimedGroup)
 @click.version_option(version=__version__, prog_name='stock_quant')
 def cli():
     """股票量化分析软件 - 命令行工具
@@ -1909,10 +1940,22 @@ def _read_symbols_file(path):
     """从文件读取股票代码列表（空格/逗号/换行分隔）
 
     仅保留有效股票代码（6 位数字，可带 sh/sz/bj 前缀），忽略股票名称等其它内容。
+    若 path 不存在，则尝试在 input/ 目录下查找同名文件。
     """
-    if not os.path.exists(path):
-        click.echo(click.style(f'  错误: 文件不存在 ({path})', fg='red'))
-        return []
+    if not os.path.isfile(path):
+        candidates = []
+        if not os.path.isabs(path):
+            candidates.append(os.path.join('input', path))
+            candidates.append(os.path.join('input', os.path.basename(path)))
+        candidates = list(dict.fromkeys(candidates))
+        found = next((p for p in candidates if os.path.isfile(p)), None)
+        if found:
+            click.echo(click.style(f'  提示: 未找到 {path}，改用 {found}', fg='yellow'))
+            path = found
+        else:
+            searched = ', '.join([path] + candidates)
+            click.echo(click.style(f'  错误: 文件不存在（已尝试: {searched}）', fg='red'))
+            return []
     try:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
@@ -2096,13 +2139,13 @@ def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1
 
 
 def _src_option(f):
-    """通用 --src 选项：首选数据源（sina/baostock/eastmoney/db），失败自动改用其它通道"""
+    """通用 --src 选项：数据源（auto/sina/baostock/eastmoney/akshare），auto 按测速自动选择"""
     return click.option(
-        '--src', default='sina',
-        type=click.Choice(['sina', 'baostock', 'eastmoney', 'db']),
+        '--src', default='auto',
+        type=click.Choice(['auto', 'sina', 'baostock', 'eastmoney', 'akshare']),
         show_default=True,
-        help='首选数据源 [sina|baostock|eastmoney|db]，默认 sina；db=只读数据库且不完整则报错退出；'
-             '网络源失败时自动改用其它通道')(f)
+        help='数据源 [auto|sina|baostock|eastmoney|akshare]，默认 auto；auto 启动时测速并按速度选择'
+             '（起始日早于2023-01-01时优先 baostock/eastmoney/akshare），失败自动回退')(f)
 
 
 def _seqnum_option(f):
@@ -2120,12 +2163,12 @@ def _seqnum_option(f):
 @click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYYMMDD')
-@click.option('--strategy', '-g', default='macd',     help='策略选择 [ma1030|ema1030|macd|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔（默认macd）')
+@click.option('--strategy', '-g', default='boll,macd',     help='策略选择 [ma1030|ema1030|macd|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔（默认boll,macd）')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--output-file', '-of', default=None, help='指定HTML报告文件名，默认自动生成')
-@click.option('--threads', '-x', default=5, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认5）')
+@click.option('--threads', '-x', default=6, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认6）')
 @click.option('--mode', '-m', default=0, type=int, help='分析模式 [0=常规(默认)|1=资金利用最大化轮动选股|2=多持仓资金利用最大化|3=多持仓强化(买卖信号与选股优化)|4=多持仓强化(趋势择股卖出)]')
 @click.option('--filter', '-f', 'filter_signal', default=None, type=click.Choice(['b', 's', 'w']), help='信号过滤，仅输出符合指定信号的股票报告 [b=买入|s=卖出|w=观望]')
 @click.option('--chart', is_flag=True, default=False, help='生成所有股票的K线图等图形并嵌入报告（默认仅生成至少有一个策略信号非观望的股票的图表）')
@@ -2157,8 +2200,6 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
                                     filter_signal, chart, forecast, seqnum)
 
     # 确定要分析的股票列表
-    time_start = datetime.now()
-
     symbols = []
     sources = []
     s_multi = False
@@ -2353,9 +2394,6 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
     if notify and all_stock_data:
         click.echo(click.style('\n  发送钉钉通知...', fg='blue'))
         _notify_signals(all_stock_data)
-
-    elapsed = (datetime.now() - time_start).total_seconds()
-    click.echo(click.style(f'\n  总运行时间: {elapsed:.1f} 秒', fg='cyan', bold=True))
 
 
 def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file=None, batch_mode=False, cmd_params='', mode=0, filter_signal=None, chart=False, forecast=0):
@@ -3713,18 +3751,18 @@ def _apply_scan_filters(stock_list, peplus=False, nost=False, nolowcap=False):
 @cli.command('scan')
 @_src_option
 @_seqnum_option
-@click.option('--strategy', '-g', default='macd', help='策略选择，多个策略用逗号分隔，all表示全部（默认macd）')
+@click.option('--strategy', '-g', default='boll,macd', help='策略选择，多个策略用逗号分隔，all表示全部（默认boll,macd）')
 @click.option('--top', '-t', default=5, type=click.IntRange(1, 100), help='筛选排名前N只股票 -tN（N=1~100，默认10）')
 @click.option('--offset', '-o', default=0, type=click.IntRange(0, 1000000), help='从获取到的股票中第N条记录开始分析 -oN（N=0起始，默认0=第一条）')
 @click.option('--min-volume', default=None, type=float, help='最小成交量过滤')
-@click.option('--threads', '-x', default=5, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认5）')
+@click.option('--threads', '-x', default=6, type=click.IntRange(1, 6), help='并行进程数 -xN（N=1~6，默认6）')
 @click.option('--forecast', is_flag=True, default=False, help='预测次日触发买卖信号的收盘价阈值（不指定则不预测）')
-@click.option('--changepercent', 'sort_key', flag_value='changepercent', default=True, help='获取股票列表排序方式：按涨跌幅（默认）')
+@click.option('--changepercent', 'sort_key', flag_value='changepercent', default=True, help='获取股票列表排序方式：按涨跌幅（指定后覆盖默认随机）')
 @click.option('--turnoverratio', 'sort_key', flag_value='turnoverratio', default=False, help='获取股票列表排序方式：按换手率')
 @click.option('--amount', 'sort_key', flag_value='amount', default=False, help='获取股票列表排序方式：按成交额')
 @click.option('--mktcap', 'sort_key', flag_value='mktcap', default=False, help='获取股票列表排序方式：按总市值')
 @click.option('--pe', 'sort_key', flag_value='pe', default='changepercent', help='获取股票列表排序方式：按市盈率')
-@click.option('--random', is_flag=True, default=False, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 30*N 只股票分析（忽略排序与 -o 偏移）')
+@click.option('--random', is_flag=True, default=True, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 30*N 只股票分析（默认；指定排序选项可覆盖）')
 @click.option('--peplus', is_flag=True, default=False, help='排除 PE 为负（亏损）的股票')
 @click.option('--nost', is_flag=True, default=False, help='排除 ST 股票（名称含 ST）')
 @click.option('--nolowcap', is_flag=True, default=False, help='排除总市值低于 50 亿元的股票')
@@ -3735,9 +3773,14 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
     流程：获取股票列表 -> 筛选 -> 逐个运行策略（可用 -x 并行）-> 输出结果
     指定多个策略（逗号分隔）或 all 时，输出多策略汇总信号表（每只股票一行，
     列为策略名，值为买/卖/观，按信号合计值降序排序）。
-    未指定排序选项时默认按涨跌幅（--changepercent）获取股票列表；
+    未指定排序选项时默认按板块比例随机抽样（--random）；
+    指定 --changepercent 等排序选项时按对应字段排序。
     指定 --random 时按板块比例随机抽样 30*N 只。
     """
+    ctx = click.get_current_context()
+    if (ctx.get_parameter_source('random') != ParameterSource.COMMANDLINE
+            and ctx.get_parameter_source('sort_key') == ParameterSource.COMMANDLINE):
+        random = False
     try:
         set_primary_source(src)
         _set_seqnum(seqnum)
@@ -4133,8 +4176,6 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
                 strat = _build_strategy_instance(sk, STRATEGY_MAP, strat_enhance.get(sk, 0))
                 sigs[sk] = _generate_effective_signals(strat, df)
             return df, sigs
-        except DataSourceError:
-            raise
         except Exception:
             return None
 
@@ -4514,8 +4555,6 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
                                         f'alt="多策略对比">')
                             except Exception:
                                 pass
-                    except DataSourceError:
-                        raise
                     except Exception:
                         continue
 
@@ -5086,9 +5125,6 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
         click.echo(click.style('  回测完成!', fg='green', bold=True))
         click.echo()
 
-    except DataSourceError as e:
-        click.echo(click.style(f'\n  错误: {e}', fg='red', bold=True))
-        return
     except Exception as e:
         click.echo(click.style(f'\n  错误: {e}', fg='red', bold=True))
         import traceback

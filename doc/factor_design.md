@@ -211,7 +211,7 @@ MOM60 = close / close.shift(60) − 1
 | 维度 | 权重 | 打分频率 |
 |------|:---:|---------|
 | 估值（价值） | 0.35 | 逐日 |
-| 质量 | 0.30 | 报告期 + ffill |
+| 质量 | 0.30 | 公告日 + ffill |
 | 筹码（股东人数） | 0.15 | 报告期 + ffill |
 | 增减持 | 0.10 | 公告日 + ffill |
 | 波动率（低波异象） | 0.10 | 逐日 |
@@ -239,7 +239,9 @@ MOM60 = close / close.shift(60) − 1
 | 资产负债率 | 资产负债率 | 0.15 | negative |
 | 利润稳定性 | 净利润增长率 | 0.10 | positive |
 
-数据源：`ak.stock_financial_analysis_indicator`。每个报告期求分位数，再 `ffill` 到交易日。
+数据源：`ak.stock_financial_analysis_indicator`。按 `announce_date` 排序求分位数，再 `ffill` 到交易日；`announce_date` 缺失的记录不参与回测打分，不使用 `report_date` 代替。
+
+> 注意：`ak.stock_financial_analysis_indicator` 当前只返回报告期，不直接返回公告日。主数据仓库需要通过公告数据补充 `announce_date`；未补充的记录在回测中会被跳过，以避免前视偏差。
 
 ### 4.4 筹码维度（股东人数）
 

@@ -203,7 +203,7 @@ class QualityValueFactorStrategy(Strategy):
         # 先尝试从数据库读取
         try:
             from core.db import fetch_valuation
-            db_rows = fetch_valuation(symbol)
+            db_rows = fetch_valuation(symbol, asset_type='index')
             if db_rows:
                 df_db = pd.DataFrame(db_rows, columns=[
                     'date', 'pe_ttm', 'pb', 'ps', 'pcf', 'ey', 'dividend_yield'
@@ -255,7 +255,7 @@ class QualityValueFactorStrategy(Strategy):
         if 'pe_ttm' in df.columns:
             df['ey'] = 1.0 / df['pe_ttm'].replace(0, np.nan)
             df['dividend_yield'] = np.nan
-        self._save_valuation_to_db(symbol, df)
+        self._save_valuation_to_db(symbol, df, asset_type='index')
         return df
 
     def _fetch_stock_valuation(self, symbol):
@@ -293,7 +293,7 @@ class QualityValueFactorStrategy(Strategy):
                     df['ey'] = 1.0 / df['pe_ttm'].replace(0, np.nan)
                 df['dividend_yield'] = np.nan
                 # 回写数据库
-                self._save_valuation_to_db(symbol, df)
+                self._save_valuation_to_db(symbol, df, asset_type='stock')
                 return df
         except Exception:
             pass
@@ -320,12 +320,12 @@ class QualityValueFactorStrategy(Strategy):
             if 'pe_ttm' in df.columns:
                 df['ey'] = 1.0 / df['pe_ttm'].replace(0, np.nan)
             df['dividend_yield'] = np.nan
-            self._save_valuation_to_db(symbol, df)
+            self._save_valuation_to_db(symbol, df, asset_type='stock')
             return df
         except Exception:
             return None
 
-    def _save_valuation_to_db(self, symbol, df):
+    def _save_valuation_to_db(self, symbol, df, asset_type='stock'):
         """回写估值数据到数据库"""
         try:
             from core.db import store_valuation
@@ -346,7 +346,7 @@ class QualityValueFactorStrategy(Strategy):
                     float(row['dividend_yield']) if pd.notna(row.get('dividend_yield')) else None,
                 ))
             if rows:
-                store_valuation(symbol, rows)
+                store_valuation(symbol, rows, asset_type=asset_type)
         except Exception:
             pass
 
@@ -422,10 +422,14 @@ class QualityValueFactorStrategy(Strategy):
             db_rows = fetch_financials(symbol)
             if db_rows:
                 df_db = pd.DataFrame(db_rows, columns=[
-                    'report_date', 'roe', 'cashflow_net_profit_ratio',
-                    'net_margin', 'debt_ratio', 'profit_growth'
+                    'report_date', 'announce_date', 'data_version',
+                    'roe', 'cashflow_net_profit_ratio', 'net_margin',
+                    'debt_ratio', 'profit_growth', 'gross_margin', 'roa',
+                    'revenue_growth', 'eps'
                 ])
                 df_db['日期'] = pd.to_datetime(df_db['report_date'])
+                df_db['公告日期'] = pd.to_datetime(
+                    df_db['announce_date'], errors='coerce')
                 logger.info("从数据库读取 %d 条财务记录: %s", len(df_db), symbol)
                 self._financials_cache[symbol] = df_db
                 return df_db
@@ -435,6 +439,12 @@ class QualityValueFactorStrategy(Strategy):
         try:
             import akshare as ak
             df = _call_with_timeout(lambda: ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2016'), timeout=30)
+            if df is not None and not df.empty:
+                # 数据源未提供公告日时保留空值，回测不能退化为报告期。
+                if '公告日期' not in df.columns:
+                    df['公告日期'] = pd.NaT
+                if 'data_version' not in df.columns:
+                    df['data_version'] = 1
             self._financials_cache[symbol] = df
             # 回写数据库
             try:
@@ -452,12 +462,14 @@ class QualityValueFactorStrategy(Strategy):
                 return col
         return None
 
-    def _calc_percentile_score(self, series, direction='positive'):
+    def _calc_percentile_score(self, series, direction='positive',
+                               current=None):
         s = series.dropna()
         if len(s) < 4:
             return None
 
-        current = s.iloc[-1]
+        if current is None:
+            current = s.iloc[-1]
         if pd.isna(current):
             return None
 
@@ -474,7 +486,27 @@ class QualityValueFactorStrategy(Strategy):
             return pd.Series(np.nan, index=df_index)
 
         fin_df = fin_df.copy()
-        fin_df['日期'] = pd.to_datetime(fin_df['日期'])
+        report_col = '日期' if '日期' in fin_df.columns else 'report_date'
+        if report_col not in fin_df.columns:
+            return pd.Series(np.nan, index=df_index)
+        fin_df['报告期'] = pd.to_datetime(fin_df[report_col], errors='coerce')
+        announce_col = '公告日期' if '公告日期' in fin_df.columns else 'announce_date'
+        if announce_col in fin_df.columns:
+            fin_df['可用日期'] = pd.to_datetime(
+                fin_df[announce_col], errors='coerce')
+        else:
+            fin_df['可用日期'] = pd.NaT
+        fin_df = fin_df.dropna(subset=['报告期', '可用日期'])
+        if fin_df.empty:
+            logger.warning(
+                "%s 财务数据缺少有效公告日期，质量因子跳过"
+                "（回测不使用报告期代替公告日）", symbol)
+            return pd.Series(np.nan, index=df_index)
+        if 'data_version' not in fin_df.columns:
+            fin_df['data_version'] = 1
+        fin_df = (fin_df
+                  .sort_values(['可用日期', '报告期', 'data_version'])
+                  .reset_index(drop=True))
 
         factor_cols, factor_weights, factor_directions = [], [], []
         for keyword, weight, direction, _ in self.QUALITY_FACTOR_CONFIG:
@@ -488,11 +520,20 @@ class QualityValueFactorStrategy(Strategy):
             return pd.Series(np.nan, index=df_index)
 
         fin_scores = []
-        for idx in range(len(fin_df)):
+        for announce_date in fin_df['可用日期'].drop_duplicates().sort_values():
+            # 时点快照：只使用公告日 <= 当前公告日的记录，并按报告期保留最新修订版本。
+            snapshot = fin_df[fin_df['可用日期'] <= announce_date]
+            snapshot = (snapshot
+                        .sort_values(['报告期', 'data_version', '可用日期'])
+                        .drop_duplicates(subset=['报告期'], keep='last'))
+            if snapshot.empty:
+                continue
+            current = snapshot.iloc[-1]
+
             scores_parts, weights_parts = [], []
             for col, weight, direction in zip(factor_cols, factor_weights, factor_directions):
-                series = fin_df[col].iloc[:idx + 1]
-                pct = self._calc_percentile_score(series, direction)
+                pct = self._calc_percentile_score(
+                    snapshot[col], direction, current=current[col])
                 if pct is not None:
                     scores_parts.append(pct)
                     weights_parts.append(weight)
@@ -502,7 +543,7 @@ class QualityValueFactorStrategy(Strategy):
                 score = sum(s * w / total_w for s, w in zip(scores_parts, weights_parts))
             else:
                 score = np.nan
-            fin_scores.append((fin_df['日期'].iloc[idx], score))
+            fin_scores.append((announce_date, score))
 
         if not fin_scores:
             return pd.Series(np.nan, index=df_index)
