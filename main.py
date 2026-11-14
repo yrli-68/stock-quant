@@ -1594,6 +1594,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
                                              profit=_profit_int(best_return))
     if not os.path.dirname(report_path):
         report_path = os.path.join('report', report_path)
+    os.makedirs(os.path.dirname(report_path) or '.', exist_ok=True)
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(html)
     return report_path
@@ -2148,6 +2149,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
                                              profit=_profit_int(avg_return))
     if not os.path.dirname(report_path):
         report_path = os.path.join('report', report_path)
+    os.makedirs(os.path.dirname(report_path) or '.', exist_ok=True)
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(html)
     return report_path
@@ -2186,16 +2188,53 @@ class _TimedGroup(click.Group):
         return result
 
 
-@click.group(cls=_TimedGroup)
-@click.version_option(version=__version__, prog_name='stock_quant')
-def cli():
-    """股票量化分析软件 - 命令行工具
+def _launch_gui_or_help(ctx):
+    """启动图形界面；无图形环境时打印 CLI 帮助并退出。"""
+    try:
+        from gui import launch_gui
+        launch_gui()
+    except Exception as exc:
+        click.echo(click.style(f'  无法启动图形界面: {exc}', fg='yellow'),
+                   err=True)
+        click.echo()
+        click.echo(ctx.get_help())
+        ctx.exit(1)
 
-    提供股票技术分析、策略回测、策略对比、股票扫描等功能。
+
+@click.group(cls=_TimedGroup, invoke_without_command=True,
+             no_args_is_help=False)
+@click.version_option(version=__version__, prog_name='stock_quant')
+@click.option('--gui', 'gui_mode', is_flag=True, default=False,
+              help='启动图形界面（不带子命令运行 main.py 时默认启动）')
+@click.pass_context
+def cli(ctx, gui_mode):
+    """股票量化分析软件 - 命令行工具 / 图形界面
+
+    不带子命令运行时启动图形界面；带子命令时保持原有 CLI 行为。
     """
-    ctx = click.get_current_context(silent=True)
-    if ctx is not None and ctx.invoked_subcommand:
-        if not check_db_connection():
+    if ctx.invoked_subcommand is None:
+        # shell 补全等场景不要弹窗
+        if not ctx.resilient_parsing:
+            _launch_gui_or_help(ctx)
+        return
+
+    if gui_mode:
+        click.echo(click.style(
+            '  提示: --gui 仅在不带子命令时生效，本次按 CLI 执行。',
+            fg='yellow'), err=True)
+
+    if not check_db_connection():
+        try:
+            from core.sqlite_source import sqlite_source_available, sqlite_source_path
+            has_sqlite = sqlite_source_available()
+            sqlite_path = sqlite_source_path()
+        except Exception:
+            has_sqlite, sqlite_path = False, ''
+        if has_sqlite:
+            click.echo(click.style(
+                f'  提示: MySQL 未连接，使用 SQLite 数据源: {sqlite_path}',
+                fg='cyan'))
+        else:
             click.echo(click.style(
                 '  警告: 数据库连接失败，本次运行将仅从网络获取数据', fg='yellow'))
 
@@ -2212,10 +2251,26 @@ def _resolve_symbol(input_str):
     import re as _re
 
     input_str = input_str.strip()
-    for prefix in ('sh', 'sz', 'SH', 'SZ'):
+    for prefix in ('sh', 'sz', 'bj', 'SH', 'SZ', 'BJ'):
         if input_str.startswith(prefix):
             input_str = input_str[len(prefix):]
             break
+
+    # 优先查本地 stock_predict SQLite（离线可用，速度快）
+    try:
+        from core.sqlite_source import (
+            find_code_by_name, sqlite_source_available, stock_name)
+        if sqlite_source_available():
+            if input_str.isdigit():
+                name = stock_name(input_str)
+                if name:
+                    return input_str.zfill(6), name
+            else:
+                code, name = find_code_by_name(input_str)
+                if code and name:
+                    return code, name
+    except Exception:
+        pass
 
     # 通过 Sina 搜索 API 解析
     try:
@@ -2546,13 +2601,13 @@ def _compute_forecast_thresholds(df, strategy_key, strategy_map, end_date, k=0.1
 
 
 def _src_option(f):
-    """通用 --src 选项：数据源（auto/sina/baostock/eastmoney/akshare），auto 按测速自动选择"""
+    """通用 --src 选项：数据源（auto/sqlite/sina/baostock/eastmoney/akshare）"""
     return click.option(
         '--src', default='auto',
-        type=click.Choice(['auto', 'sina', 'baostock', 'eastmoney', 'akshare']),
+        type=click.Choice(['auto', 'sqlite', 'sina', 'baostock', 'eastmoney', 'akshare']),
         show_default=True,
-        help='数据源 [auto|sina|baostock|eastmoney|akshare]，默认 auto；auto 启动时测速并按速度选择'
-             '（起始日早于2023-01-01时优先 baostock/eastmoney/akshare），失败自动回退')(f)
+        help='数据源 [auto|sqlite|sina|baostock|eastmoney|akshare]，默认 auto；'
+             '本地 stock_predict SQLite 可用时优先读库，否则测速选择网络源；失败自动回退')(f)
 
 
 def _seqnum_option(f):
@@ -2792,7 +2847,7 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
 def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file=None, batch_mode=False, cmd_params='', mode=0, filter_signal=None, chart=False, forecast=0):
     """分析单只股票"""
     symbol = raw_symbol.strip()
-    for prefix in ('sh', 'sz', 'SH', 'SZ'):
+    for prefix in ('sh', 'sz', 'bj', 'SH', 'SZ', 'BJ'):
         if symbol.startswith(prefix):
             symbol = symbol[len(prefix):]
             break

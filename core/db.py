@@ -86,7 +86,8 @@ def check_db_connection(timeout: int = 3) -> bool:
         return True
     except Exception as e:
         _DB_AVAILABLE = False
-        logger.warning("数据库连接失败，后续数据将从网络获取: %s", e)
+        # 具体使用 SQLite 还是纯网络由 CLI 层提示，这里只记录调试信息。
+        logger.info("MySQL 数据库不可用: %s", e)
         return False
     finally:
         if conn is not None:
@@ -138,7 +139,7 @@ def infer_exchange(code: str, asset_type: str = 'stock') -> str:
         return 'SH'
     if c.startswith(('0', '1', '2', '3')):
         return 'SZ'
-    if c.startswith(('4', '8')):
+    if c.startswith(('4', '8', '92')):
         return 'BJ'
     return ''
 
@@ -178,7 +179,7 @@ def infer_asset_type(code: str, exchange: str = None) -> str:
         if c.startswith('1'):
             return 'bond'
     elif ex == 'BJ':
-        if c.startswith(('4', '8')):
+        if c.startswith(('4', '8', '92')):
             return 'stock'
     return 'stock'
 
@@ -254,7 +255,8 @@ def _open_connection():
         conn = pymysql.connect(**cfg, connect_timeout=5, read_timeout=10, write_timeout=10)
     except Exception as e:
         globals()['_DB_AVAILABLE'] = False
-        logger.warning("数据库连接失败，后续数据将从网络获取: %s", e)
+        # CLI 层会统一提示走 SQLite/网络；这里降为 debug，避免多进程扫描刷屏。
+        logger.debug("MySQL 数据库不可用: %s", e)
         yield None
         return
 

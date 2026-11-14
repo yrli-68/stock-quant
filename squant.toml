@@ -58,6 +58,13 @@ user = "smit"
 password = "smit2024"
 database = "stock_quant"
 
+# stock_predict 的 SQLite 本地缓存（只读，优先于网络；MySQL 不可用时的主力数据源）
+# path 支持绝对路径，也支持相对本项目根目录的路径；留空则自动探测
+# ../stock_predict/stock_cache.db。可用环境变量 STOCK_QUANT_SQLITE 覆盖。
+[tool.stock-quant.sqlite]
+enabled = true
+path = "../stock_predict/stock_cache.db"
+
 [tool.stock-quant.composite]
 strategies = [
     "ma1030",
@@ -82,7 +89,7 @@ bollinger = 0.1
 quality_value = 0.1
 
 [tool.setuptools]
-py-modules = ["main", "poolmgr", "_version"]
+py-modules = ["main", "gui", "poolmgr", "_version"]
 packages = ["core", "strategies", "visualization"]
 
 [tool.setuptools.dynamic]

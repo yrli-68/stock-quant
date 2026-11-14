@@ -62,11 +62,11 @@ HEADERS = {
     'Referer': 'https://finance.sina.com.cn/'
 }
 
-# 首选数据源（'auto' / 'sina' / 'baostock' / 'eastmoney' / 'akshare'）：先尝试该源，失败自动改用其它通道。
+# 首选数据源（'auto' / 'sqlite' / 'sina' / 'baostock' / 'eastmoney' / 'akshare'）：先尝试该源，失败自动改用其它通道。
 # 'auto' 为默认：启动时对各站点测速，取最先响应的源，其余仅作失败回退。
 # 由 CLI 的 --src 选项通过 set_primary_source() 设置。
 _PRIMARY_SOURCE = 'auto'
-_SOURCES = ('auto', 'sina', 'baostock', 'eastmoney', 'akshare')
+_SOURCES = ('auto', 'sqlite', 'sina', 'baostock', 'eastmoney', 'akshare')
 _NETWORK_SOURCES = ('sina', 'baostock', 'eastmoney', 'akshare')
 
 # auto 模式：起始日期早于该值时排除 sina（新浪 K 线接口最多约 1000 条，无法覆盖更早历史）。
@@ -246,6 +246,9 @@ def _source_fallback_chain(primary: str, start_date: str = None):
       否则按测速最快源优先，其余固定顺序回退。
     - 其它：首选源在前，其余网络源按固定顺序回退。
     """
+    if primary == 'sqlite':
+        # SQLite 不是网络通道：SQLite 未命中时直接按网络源顺序回退。
+        return list(_NETWORK_SOURCES)
     if primary == 'auto':
         if start_date and _compact_date(start_date) < _AUTO_SINA_MIN_START:
             return [s for s in _NETWORK_SOURCES if s != 'sina'] + ['sina']
@@ -258,12 +261,19 @@ def _source_fallback_chain(primary: str, start_date: str = None):
 
 
 def set_primary_source(src: str) -> None:
-    """设置首选数据源（'auto' / 'sina' / 'baostock' / 'eastmoney' / 'akshare'）；非法值回退为 'auto'"""
+    """设置首选数据源（'auto' / 'sqlite' / 'sina' / 'baostock' / 'eastmoney' / 'akshare'）；非法值回退为 'auto'"""
     global _PRIMARY_SOURCE
     s = str(src).strip().lower()
     _PRIMARY_SOURCE = s if s in _SOURCES else 'auto'
     if _PRIMARY_SOURCE == 'auto':
-        run_source_speed_test()
+        # 本地 SQLite 可用时优先读库，无需启动时测速；真正回退网络时再测速。
+        try:
+            from core.sqlite_source import sqlite_source_available
+            has_sqlite = sqlite_source_available()
+        except Exception:
+            has_sqlite = False
+        if not has_sqlite:
+            run_source_speed_test()
 
 
 def get_primary_source() -> str:
@@ -339,13 +349,17 @@ class DataFetcher:
             logger.info("yfinance 未安装，美股数据获取功能将不可用")
 
     def _is_a_stock(self, symbol: str) -> bool:
-        """判断是否为A股代码（纯数字格式）"""
-        return symbol.isdigit()
+        """判断是否为A股代码（纯数字，或带 sh/sz/bj 前缀的 6 位代码）"""
+        s = str(symbol or '').strip()
+        if s.isdigit():
+            return True
+        return (len(s) > 2 and s[:2].lower() in ('sh', 'sz', 'bj')
+                and s[2:].isdigit())
 
     def _normalize_a_stock_symbol(self, symbol: str) -> str:
-        """标准化A股代码，去除可能的前缀如 sh/sz"""
+        """标准化A股代码，去除可能的前缀如 sh/sz/bj"""
         symbol = symbol.strip().upper()
-        if symbol.startswith('SH') or symbol.startswith('SZ'):
+        if symbol[:2] in ('SH', 'SZ', 'BJ'):
             symbol = symbol[2:]
         return symbol
 
@@ -360,6 +374,8 @@ class DataFetcher:
             str: 新浪前缀，如 'sh600036' 或 'sz000001'
         """
         symbol = self._normalize_a_stock_symbol(symbol)
+        if symbol.startswith(('4', '8')) or symbol.startswith('92'):
+            return f'bj{symbol}'
         if symbol.startswith(('6', '9', '5')):
             return f'sh{symbol}'
         elif symbol.startswith(('0', '3', '2', '15', '16', '18')):
@@ -445,6 +461,13 @@ class DataFetcher:
         """
         raw_symbol = self._normalize_a_stock_symbol(symbol)
 
+        # stock_predict SQLite 缓存优先（auto 模式或显式 --src sqlite）。
+        if get_primary_source() in ('auto', 'sqlite'):
+            df_sqlite = self._get_a_stock_data_sqlite(
+                raw_symbol, start_date, end_date, adjust)
+            if df_sqlite is not None and not df_sqlite.empty:
+                return df_sqlite
+
         today = datetime.now().strftime('%Y%m%d')
         if end_date == today:
             logger.info("结束日期为当天，历史取库、今日取实时: %s", raw_symbol)
@@ -490,6 +513,109 @@ class DataFetcher:
         # 结束日期非当天：数据库原始K线优先 + 缺口补齐，再于内存复权
         df_raw = self._get_a_stock_data_db_first(raw_symbol, start_date, end_date)
         return self._apply_in_memory_adjust(df_raw, raw_symbol, adjust)
+
+    def _get_a_stock_data_sqlite(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = 'qfq',
+    ) -> pd.DataFrame:
+        """从 stock_predict SQLite 缓存读取已复权 K 线。
+
+        SQLite 库内为 hfq，``hfq * adjust.k`` 即乘法前复权(qfq)。返回前会
+        补齐 SQLite 末日之后到 end_date 的网络/实时数据；若数据过旧或标的
+        不存在则返回空 DataFrame，由调用方回退 MySQL/网络流程。
+        """
+        adjust = str(adjust or '').strip().lower()
+        if adjust not in ('qfq', 'hfq'):
+            return pd.DataFrame()
+
+        try:
+            from core.sqlite_source import fetch_daily_bars, sqlite_source_available
+            from core.trading_calendar import is_ignored_gap_range
+            if not sqlite_source_available():
+                return pd.DataFrame()
+            df = fetch_daily_bars(symbol, start_date, end_date, adjust=adjust)
+        except Exception as exc:
+            logger.warning('SQLite 取数异常(%s)，回退网络: %s', symbol, exc)
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        effective = df.attrs.get('adjust_effective', adjust)
+        first_dt = pd.to_datetime(df['date']).min()
+        last_dt = pd.to_datetime(df['date']).max()
+        end_dt = pd.to_datetime(end_date)
+        start_dt = pd.to_datetime(start_date)
+        today = pd.Timestamp(datetime.now().date())
+        gap_days = (end_dt.normalize() - last_dt.normalize()).days
+
+        # 请求起点明显早于库内首日（库只缓存了近年数据）时回退网络，
+        # 避免长周期回测在用户不知情的情况下被截断。
+        if (first_dt.normalize() - start_dt.normalize()).days > 30:
+            logger.info(
+                'SQLite %s 起始 %s 晚于请求起点 %s，回退网络获取更长历史',
+                symbol, first_dt.date(), start_dt.date())
+            return pd.DataFrame()
+
+        if gap_days <= 0:
+            return df
+
+        # 库内长期没有该标的新数据（停牌/退市/库未更新）时交给原流程判断。
+        stale_limit = 90 if end_dt.normalize() == today else 20
+        if gap_days > stale_limit:
+            logger.info(
+                'SQLite %s 末日 %s 距请求结束 %s 超过 %d 天，回退网络',
+                symbol, last_dt.date(), end_dt.date(), stale_limit)
+            return pd.DataFrame()
+
+        frames = [df]
+        tail_start = last_dt + pd.Timedelta(days=1)
+
+        if end_dt.normalize() >= today:
+            # 先补 SQLite 末日至昨天的网络缺口，再补今天的实时/网络 K 线。
+            gap_end = today - pd.Timedelta(days=1)
+            if tail_start <= gap_end and not is_ignored_gap_range(
+                    tail_start.date(), gap_end.date()):
+                seg = self._fetch_from_network_chain(
+                    symbol, tail_start.strftime('%Y%m%d'),
+                    gap_end.strftime('%Y%m%d'), write_db=False)
+                if seg is not None and not seg.empty:
+                    seg = self._apply_in_memory_adjust(seg, symbol, effective)
+                    frames.append(seg)
+
+            # 周末/节假日不请求实时行情，避免批量扫描时产生大量无效网络调用。
+            if effective == 'qfq' and not is_ignored_gap_range(
+                    today.date(), today.date()):
+                bar = self._get_today_realtime_bar(symbol)
+                if bar is not None and not bar.empty:
+                    frames.append(bar)
+        else:
+            seg = self._fetch_from_network_chain(
+                symbol, tail_start.strftime('%Y%m%d'),
+                end_dt.strftime('%Y%m%d'), write_db=False)
+            if seg is not None and not seg.empty:
+                seg = self._apply_in_memory_adjust(seg, symbol, effective)
+                frames.append(seg)
+
+        if len(frames) == 1:
+            logger.warning(
+                'SQLite 数据止于 %s，%s 之后的网络补齐失败，返回已有数据',
+                last_dt.date(), last_dt.date())
+            return df
+
+        out = pd.concat(frames, ignore_index=True)
+        out = (out.drop_duplicates(subset=['date'], keep='last')
+                  .sort_values('date').reset_index(drop=True))
+        start_dt = pd.to_datetime(start_date)
+        out = out[(out['date'] >= start_dt) & (out['date'] <= end_dt)]
+        out = out.reset_index(drop=True)
+        out.attrs.update(df.attrs)
+        out.attrs['source'] = 'sqlite+network'
+        logger.info('SQLite+网络补齐完成: %s，共 %d 条', symbol, len(out))
+        return out
 
     def _get_today_realtime_bar(self, symbol: str) -> pd.DataFrame:
         """获取今日实时行情并转换为单行原始 K 线（日期非今天则返回空）。"""
@@ -1569,6 +1695,22 @@ class DataFetcher:
                      symbol, start_date, end_date)
 
         raw_symbol = self._normalize_a_stock_symbol(symbol)
+
+        # stock_predict SQLite 缓存优先（指数无复权系数，价格可直接使用）。
+        if get_primary_source() in ('auto', 'sqlite'):
+            try:
+                from core.sqlite_source import fetch_index_bars
+                df_idx = fetch_index_bars(raw_symbol, start_date, end_date)
+                if df_idx is not None and not df_idx.empty:
+                    last_dt = pd.to_datetime(df_idx['date']).max()
+                    end_dt = pd.to_datetime(end_date)
+                    if (end_dt.normalize() - last_dt.normalize()).days <= 20:
+                        return self._standardize_dataframe(df_idx, 'qfq')
+                    logger.info('SQLite 指数 %s 数据止于 %s，回退网络',
+                                raw_symbol, last_dt.date())
+            except Exception as exc:
+                logger.debug('SQLite 指数取数跳过(%s): %s', raw_symbol, exc)
+
         # 优先使用东方财富指数接口（支持完整历史；新浪仅返回最近 1000 根）
         try:
             secid = f'0.{raw_symbol}' if raw_symbol.startswith('399') else f'1.{raw_symbol}'
@@ -1947,6 +2089,17 @@ class DataFetcher:
             turnover_rate/mktcap/pe 列，按 sort_key 降序
         """
         primary = get_primary_source()
+
+        # stock_predict SQLite 快照列表优先（auto / 显式 sqlite）。
+        if primary in ('auto', 'sqlite'):
+            try:
+                from core.sqlite_source import fetch_stock_list
+                df_sqlite = fetch_stock_list(sort_key)
+                if df_sqlite is not None and len(df_sqlite):
+                    return df_sqlite
+            except Exception as exc:
+                logger.warning('SQLite 股票列表读取失败，回退网络: %s', exc)
+
         chain = _source_fallback_chain(primary)
         for idx, src in enumerate(chain):
             if src == 'sina':
@@ -2110,7 +2263,16 @@ class DataFetcher:
         return df
 
     def get_all_stock_codes(self) -> list:
-        """获取全部 A 股代码列表（按代码排序分页拉取，供通配符展开使用）"""
+        """获取全部 A 股代码列表（优先本地 SQLite，失败回退新浪分页）。"""
+        if get_primary_source() in ('auto', 'sqlite'):
+            try:
+                from core.sqlite_source import fetch_all_stock_codes
+                codes = fetch_all_stock_codes()
+                if codes:
+                    return codes
+            except Exception as exc:
+                logger.warning('SQLite 代码表读取失败，回退网络: %s', exc)
+
         codes = []
         try:
             for page in range(1, 61):
@@ -2241,6 +2403,7 @@ class DataFetcher:
         Returns:
             pd.DataFrame: 标准化后的 DataFrame
         """
+        attrs = dict(df.attrs)
         column_mapping = {
             '日期': 'date', 'date': 'date', 'Date': 'date', 'day': 'date',
             '开盘': 'open', 'open': 'open', 'Open': 'open',
@@ -2279,6 +2442,7 @@ class DataFetcher:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
         df = df.sort_index()
+        df.attrs.update(attrs)
         return df
 
     def _normalize_date(self, date_str: str) -> str:

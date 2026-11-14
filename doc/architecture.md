@@ -31,7 +31,8 @@ stock-quant/
 │   └── breadth_confirmation.py # 涨跌比确认（指数）
 ├── visualization/
 │   └── charts.py          # 图表生成（K线/资金曲线/多策略对比）
-├── main.py                # CLI 交互主入口
+├── main.py                # CLI / GUI 主入口
+├── gui.py                 # Tkinter 桌面界面（调用同一套 CLI）
 ├── fetch_*.py             # 数据抓取脚本
 ├── run_*.py               # 各类分析/扫描/回测脚本
 └── requirements.txt
@@ -50,6 +51,9 @@ stock-quant/
 - `DataFetcher` 类统一封装数据源：**A股用 akshare，美股用 yfinance**。
 - 自动识别代码类型（纯数字=A股，字母=美股），并标准化 `sh/sz` 前缀。
 - 提供历史行情、实时行情、指数数据、股票列表等接口。
+- 可选接入 **stock_predict 的 SQLite 本地缓存**（`core/sqlite_source.py`）：
+  支持 `--src sqlite`，`auto` 模式下本地库优先，缺失时回退网络；
+  库内后复权价通过 `adjust.k` 转为前复权。详见 `doc/sqlite_source.md`。
 
 ### 2. 指标层 `core/indicators.py`
 - 纯函数式设计，输入 DataFrame 输出 Series/DataFrame，索引自动对齐。
@@ -81,11 +85,16 @@ stock-quant/
 pip install -r requirements.txt
 ```
 
-### 2. 交互式 CLI（推荐入口）
+### 2. 图形界面 / 命令行
 ```bash
-python main.py
+python main.py              # 启动图形界面 gui.py
+python main.py --gui        # 显式启动图形界面
+
+python main.py --help       # 命令行帮助
+python main.py analyze ...  # 命令行分析
 ```
-进入交互菜单，可进行单股分析、策略回测、策略对比等。
+图形界面覆盖 analyze / scan / backtest / compare / indicators 全部参数，
+详见 `doc/gui.md`。带子命令时仍按 CLI 执行，守护进程与脚本不受影响。
 
 ### 3. 单股完整分析脚本
 每个 `run_analysis_*.py` 针对特定股票，流程固定：加载数据 → 计算指标 → 运行策略 → 回测 → 风险分析 → 生成图表 → 输出报告。

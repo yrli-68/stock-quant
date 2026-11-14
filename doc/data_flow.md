@@ -31,7 +31,7 @@ flowchart LR
 
 | 层 | 主要模块 | 职责 |
 |----|----------|------|
-| 输入层 | `main.py`、`poolmgr.py` | 解析命令参数、股票池、股票名称、日期和策略 |
+| 输入层 | `main.py`、`gui.py`、`poolmgr.py` | GUI/CLI 解析参数、股票池、股票名称、日期和策略 |
 | 获取层 | `core/data_fetcher.py` | 多源测速/回退、原始 K 线、实时行情、复权因子、指数/榜单/基本面兜底 |
 | 存储层 | `core/db.py`、`data/stock_quant.sql` | MySQL 连接、读写、资产类型标准化、广度重算 |
 | 计算层 | `core/indicators.py`、`strategies/` | 技术指标、策略信号、信号过滤 |
@@ -71,12 +71,28 @@ flowchart LR
 配置统一从项目根目录或可执行文件所在目录的 `squant.toml` 读取，核心配置段：
 
 ```toml
-[tool.stock-quant.database]   # MySQL 连接
+[tool.stock-quant.database]   # MySQL 连接（可选）
+[tool.stock-quant.sqlite]     # stock_predict SQLite 缓存（只读，优先于网络）
 [tool.stock-quant.thresholds] # 策略阈值
 [tool.stock-quant.service]    # 服务运行时间/策略
 [tool.stock-quant.WEBHOOK]    # 钉钉通知
 [tool.stock-quant.composite]  # 综合因子权重
 ```
+
+SQLite 数据源示例：
+
+```toml
+[tool.stock-quant.sqlite]
+enabled = true
+path = "../stock_predict/stock_cache.db"   # 相对项目根目录或绝对路径
+```
+
+也可以用环境变量 `STOCK_QUANT_SQLITE` 覆盖路径；`path` 留空时自动探测
+`stock_predict/stock_cache.db`、`../stock_predict/stock_cache.db` 等位置。
+详见 [`sqlite_source.md`](sqlite_source.md)。
+
+SQLite 数据源可用时，`--src auto` 会优先读本地库，不再启动时测速；只有本地
+库缺失该标的/数据过旧时才回退 MySQL/网络。
 
 数据库未配置或连接失败时，相关读写会退化为空结果/跳过写库，不阻断主流程。
 
@@ -88,6 +104,7 @@ flowchart LR
 
 | 源 | 接口/用途 | 特点 |
 |----|-----------|------|
+| SQLite `sqlite` | stock_predict 本地缓存 `daily_bars`/`adjust`/`stocks` | 只读、离线、1990 年至最新缓存日；库内 hfq × k 转 qfq |
 | 新浪 `sina` | K 线、实时行情、复权因子、股票名称 | K 线约 1000 条；实时和复权因子稳定 |
 | 东方财富 `eastmoney` | 历史 K 线、股票列表 | 历史覆盖较好，接口可能限流/断连 |
 | Baostock `baostock` | 历史 K 线、股票列表 | 依赖登录，可能受账号/黑名单影响 |
@@ -96,16 +113,21 @@ flowchart LR
 
 ### 3.2 自动源选择
 
-`set_primary_source(src)` 支持 `auto` / `sina` / `baostock` / `eastmoney` / `akshare`。
+`set_primary_source(src)` 支持 `auto` / `sqlite` / `sina` / `baostock` / `eastmoney` / `akshare`。
 
-`auto` 规则（`_source_fallback_chain`）：
+`auto` 规则：
 
-1. 请求起始日早于 `2023-01-01`：  
+1. stock_predict SQLite 可用：优先读本地库（`daily_bars` + `adjust`），
+   本地缺失/过旧时才回退网络。
+2. 请求起始日早于 `2023-01-01`：  
    `baostock → eastmoney → akshare → sina`
-2. 请求起始日不早于 `2023-01-01`：  
+3. 请求起始日不早于 `2023-01-01`：  
    并行读取各源最小 K 线，成功解析出行情的最快源优先，其余按固定顺序回退。
-3. 显式指定 `--src <source>`：  
+4. 显式指定 `--src <source>`：  
    首选源优先，失败后按固定顺序回退。
+
+> `--src sqlite` 表示只把 SQLite 当首选；本地库没有的标的仍会自动回退网络，
+> 不会因为缺数据直接失败。
 
 新浪 K 线约 1000 条，因此作为最后兜底时会做覆盖检查：若返回首日比请求起点晚超过 15 天，则跳过该源，避免用不完整数据冒充长历史。
 

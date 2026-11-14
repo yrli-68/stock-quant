@@ -5,6 +5,20 @@
 - 增加大盘趋势分析，根据大盘趋势进行买卖过滤。回测收益率大幅提升！
 - 增加--onestock模式下的权益曲线图输出。
 
+## [2.4.0] - 2026-11-08
+- 新增图形界面 `gui.py`，深色桌面风格参考 stock_predict/stock_gui.py。
+- GUI 覆盖 analyze / scan / backtest / compare / indicators 全部命令与参数，后台调用同一套 CLI，行为与命令行一致。
+- 支持命令预览、后台运行/停止、日志流、报告自动识别、打开报告/输出目录、环境状态检测。
+- 标签页懒加载，窗口先显示再构建表单；`python main.py` 不带子命令时启动 GUI，`--gui` 可显式启动。
+- CLI 完全保留：`python main.py --help`、`python main.py analyze ...` 等用法不变。
+
+## [2.3.0] - 2026-11-08
+- 接入 stock_predict 的 SQLite 缓存库（`daily_bars`/`adjust`/`stocks`），默认路径 `../stock_predict/stock_cache.db`。
+- 新增 `--src sqlite`；`auto` 模式下 SQLite 可用时优先读本地库，缺失/过旧自动回退 MySQL/网络。
+- SQLite 库内 hfq 通过 `adjust.k` 转为前复权，成交量由「手」换算为「股」。
+- 股票列表、名称解析、指数数据同步支持 SQLite；扫描/回测/分析可离线运行。
+- 分析报告自动创建 `report/` 目录。
+
 ## [2.2.0] - 2026-11-06
 - 增加指标打分score，作为买卖信号的辅助参考。
 
