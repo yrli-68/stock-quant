@@ -9,12 +9,12 @@
         -sf input/pool.txt -st 20200101 -e 20251231 -d 30
 
 等价命令：
-    backtest -sf <file> -st <start> -e <end> -g boll,macd --onestock
-    backtest -sf <file> -st <start> -e <end> -g boll,macd --onestock --maxholddays N
+    backtest -sf <file> -st <start> -e <end> -g boll,macd
+    backtest -sf <file> -st <start> -e <end> -g boll,macd --maxholddays N
 
 说明：
     - maxholddays 条件：持仓超过 N 个交易日、收盘价低于 BOLL 中线且回撤 >10% 才卖出；
-    - 直接调用 backtest 的 --onestock 回测函数，避免解析控制台表格；
+    - 直接调用 backtest 的单持仓轮动回测函数，避免解析控制台表格；
     - 截获 _print_table 两次输出：第一张是策略分类统计，第二张是交易明细；
     - 需要可用的 MySQL/网络数据源，首次运行会补齐历史行情。
 """
@@ -42,7 +42,7 @@ POOL_PATH = os.path.join(_ROOT, 'input', 'pool.txt')
 
 METRIC_NAMES = [
     '总收益率', '年化收益率', '最大回撤', '夏普比率', '交易次数',
-    '胜率', '盈利因子', '平均持仓天数', '总盈亏额',
+    '胜率', '盈利因子', '持股天数', '总盈亏额',
 ]
 
 
@@ -231,8 +231,8 @@ def main_test(args):
     capped_trades = len(capped['hold_days'])
     base_max_hold = max(base['hold_days']) if base['hold_days'] else 0
     capped_max_hold = max(capped['hold_days']) if capped['hold_days'] else 0
-    base_avg_hold = _to_number(base['metrics'].get('平均持仓天数', '0'))
-    capped_avg_hold = _to_number(capped['metrics'].get('平均持仓天数', '0'))
+    base_avg_hold = _to_number(str(base['metrics'].get('持股天数', '0')).split('/')[0])
+    capped_avg_hold = _to_number(str(capped['metrics'].get('持股天数', '0')).split('/')[0])
 
     assert capped_trades > 0, f'{capped_label} 未产生任何交易'
     assert capped_trades > base_trades, \

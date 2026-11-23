@@ -11,9 +11,11 @@
                  省略时在 08:30 和 14:35 各执行一次；
                  周六、周日不执行
     -arg ARGs    传递给 analyze 的参数，默认
-                 "analyze -sf input/big.txt -g boll,macd"
+                 "analyze -sf input/pool.txt -g boma --withdrawsell 5 --trendctl 1 --notify"
                  到达执行时间后，先运行 analyze，再运行
-                 "scan --random --nost --notify"
+                 "scan -sf input/pool.txt -g boma --trendctl 1 --notify"
+
+运行过程中，在终端输入 q 并回车即可退出守护进程（正在运行的子任务会被终止）。
 
 示例：
     python3 daemon.py
@@ -24,8 +26,10 @@
 import argparse
 import os
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -43,8 +47,10 @@ def _resolve_project_root():
 PROJECT_ROOT = _resolve_project_root()
 MAIN_PATH = os.path.join(PROJECT_ROOT, 'main.py')
 DEFAULT_RUN_TIMES = ('0830', '1435')
-DEFAULT_ARGS = 'analyze -sf input/pool.txt -g boll,macd --notify'
-SCAN_ARGS = ('scan', '--random', '--nost', '--notify')
+DEFAULT_ARGS = ('analyze -sf input/pool.txt -g boma '
+                '--withdrawsell 5 --trendctl 1 --notify')
+SCAN_ARGS = ('scan', '-sf', 'input/pool.txt', '-g', 'boma',
+             '--trendctl', '1', '--notify')
 POLL_SECONDS = 20
 
 
@@ -93,6 +99,73 @@ def _log(message):
     print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {message}', flush=True)
 
 
+_QUIT = threading.Event()
+
+
+def _start_quit_watcher():
+    """后台读取 stdin，输入 q 并回车时设置退出事件。"""
+    def _watch():
+        try:
+            while not _QUIT.is_set():
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                if line.strip().lower() == 'q':
+                    _log('收到退出指令 (q)，准备退出...')
+                    _QUIT.set()
+                    break
+        except Exception:
+            pass
+
+    threading.Thread(target=_watch, name='quit-watcher', daemon=True).start()
+
+
+def _terminate(proc, label):
+    """终止正在运行的子进程（POSIX 下连同其进程组/子进程一起终止）。"""
+    _log(f'正在终止 {label} (pid={proc.pid})...')
+
+    def _signal(sig):
+        if os.name == 'posix':
+            os.killpg(proc.pid, sig)
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+
+    try:
+        _signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _signal(signal.SIGKILL)
+            proc.wait()
+    except Exception:
+        pass
+
+
+def _run_cmd(cmd, label, now_hhmm):
+    """运行子命令，期间持续检查退出事件；收到 q 时终止子进程并返回。"""
+    _log(f'到达执行时间 {now_hhmm[:2]}:{now_hhmm[2:]}，开始运行 {label}: '
+         + ' '.join(cmd))
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL,
+            start_new_session=(os.name == 'posix'))
+    except Exception as exc:
+        _log(f'{label} 启动异常: {exc}')
+        return
+    try:
+        while proc.poll() is None:
+            if _QUIT.is_set():
+                _terminate(proc, label)
+                return
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        _terminate(proc, label)
+        raise
+    _log(f'{label} 完成，退出码={proc.returncode}')
+
+
 def main():
     parser = argparse.ArgumentParser(description='每天定时调用 main.py')
     parser.add_argument('-t', dest='run_time', type=_parse_run_times,
@@ -120,27 +193,32 @@ def main():
     _log(f'守护进程已启动，每天 {run_time_labels} 执行:')
     _log(f'  1) {" ".join(analyze_cmd)}')
     _log(f'  2) {" ".join(scan_cmd)}')
+    _log('提示: 在终端输入 q 并回车可退出守护进程')
 
-    while True:
-        now = datetime.now()
-        if now.date() != ran_date:
-            ran_date = now.date()
-            ran_today = set()
-        if now.weekday() >= 5:
-            time.sleep(POLL_SECONDS)
-            continue
-        now_hhmm = now.strftime('%H%M')
-        if now_hhmm in run_times_set and now_hhmm not in ran_today:
-            for label, cmd in (('analyze', analyze_cmd), ('scan', scan_cmd)):
-                _log(f'到达执行时间 {now_hhmm[:2]}:{now_hhmm[2:]}，开始运行 {label}: '
-                     + ' '.join(cmd))
-                try:
-                    proc = subprocess.run(cmd, cwd=PROJECT_ROOT)
-                    _log(f'{label} 完成，退出码={proc.returncode}')
-                except Exception as exc:
-                    _log(f'{label} 运行异常: {exc}')
-            ran_today.add(now_hhmm)
-        time.sleep(POLL_SECONDS)
+    _start_quit_watcher()
+
+    try:
+        while not _QUIT.is_set():
+            now = datetime.now()
+            if now.date() != ran_date:
+                ran_date = now.date()
+                ran_today = set()
+            if now.weekday() >= 5:
+                _QUIT.wait(POLL_SECONDS)
+                continue
+            now_hhmm = now.strftime('%H%M')
+            if now_hhmm in run_times_set and now_hhmm not in ran_today:
+                for label, cmd in (('analyze', analyze_cmd), ('scan', scan_cmd)):
+                    if _QUIT.is_set():
+                        break
+                    _run_cmd(cmd, label, now_hhmm)
+                ran_today.add(now_hhmm)
+            _QUIT.wait(POLL_SECONDS)
+    except KeyboardInterrupt:
+        _QUIT.set()
+        _log('收到中断 (Ctrl+C)，准备退出...')
+
+    _log('守护进程已停止')
 
 
 if __name__ == '__main__':

@@ -236,6 +236,35 @@ def calc_atr(df, period=14):
     return tr.ewm(span=period, adjust=False).mean()
 
 
+def adjust_atr_stop_multiplier(multiplier, market_state):
+    """按大盘趋势调整 ATR 止损倍数：上涨+20%，下跌-20%。"""
+    try:
+        base = float(multiplier)
+    except (TypeError, ValueError):
+        base = 2.0
+    state = str(market_state or '')
+    if state in ('上涨', '过热'):
+        return base * 1.2
+    if state in ('下跌', '过冷'):
+        return base * 0.8
+    return base
+
+
+def update_atr_trailing_stop(close, atr, prev_stop=None, multiplier=2.0):
+    """ATR 动态止损价：max(前一日止损价, close - multiplier * ATR)。"""
+    try:
+        c = float(close)
+        a = float(atr)
+    except (TypeError, ValueError):
+        return prev_stop
+    if pd.isna(c) or pd.isna(a):
+        return prev_stop
+    candidate = c - multiplier * a
+    if prev_stop is None:
+        return candidate
+    return max(float(prev_stop), candidate)
+
+
 def calc_obv(df):
     """能量潮指标"""
     close_diff = df['close'].diff()
@@ -384,6 +413,52 @@ def calc_macd_divergence(df, fast=12, slow=26, signal=9, lookback=20, price_col=
     }, index=df.index)
 
 
+def calc_rsi_divergence(df, period=14, lookback=20, price_col='close'):
+    """检测 RSI 顶背离和底背离。
+
+    - 底背离：价格创新低（或接近前低），RSI 未创新低；
+    - 顶背离：价格创新高（或接近前高），RSI 未创新高。
+
+    Returns:
+        pd.DataFrame: 'bullish_divergence'（底背离）和
+                      'bearish_divergence'（顶背离），1 表示当日出现。
+    """
+    price = df[price_col]
+    rsi = df['RSI14'] if 'RSI14' in df.columns else calc_rsi(df, period)
+    rsi = pd.to_numeric(rsi, errors='coerce')
+
+    bullish = pd.Series(0, index=df.index, dtype=int)
+    bearish = pd.Series(0, index=df.index, dtype=int)
+
+    for i in range(lookback, len(df)):
+        price_window = price.iloc[i - lookback:i + 1]
+        current_price = price.iloc[i]
+        current_rsi = rsi.iloc[i]
+        if pd.isna(current_rsi):
+            continue
+
+        price_min_idx = price_window.idxmin()
+        price_min = price_window.min()
+        rsi_at_min = rsi.loc[price_min_idx]
+        if (current_price <= price_min * 1.02 and pd.notna(rsi_at_min)
+                and current_price < price.iloc[i - 1]
+                and current_rsi > rsi_at_min):
+            bullish.iloc[i] = 1
+
+        price_max_idx = price_window.idxmax()
+        price_max = price_window.max()
+        rsi_at_max = rsi.loc[price_max_idx]
+        if (current_price >= price_max * 0.98 and pd.notna(rsi_at_max)
+                and current_price > price.iloc[i - 1]
+                and current_rsi < rsi_at_max):
+            bearish.iloc[i] = 1
+
+    return pd.DataFrame({
+        'bullish_divergence': bullish,
+        'bearish_divergence': bearish,
+    }, index=df.index)
+
+
 def calc_adx(df, period=14):
     """计算 ADX / DMI 指标（平均趋向指数）
 
@@ -418,6 +493,14 @@ def calc_adx(df, period=14):
     adx = dx.ewm(alpha=1.0 / period, adjust=False).mean()
 
     return pd.DataFrame({'ADX': adx, 'PLUS_DI': plus_di, 'MINUS_DI': minus_di}, index=df.index)
+
+
+def calc_adxr(df, period=14):
+    """计算 ADXR：ADX 与其 period 日前值的平均值。"""
+    adx = (df['ADX14'] if 'ADX14' in df.columns
+           else calc_adx(df, period)['ADX'])
+    adx = pd.to_numeric(adx, errors='coerce')
+    return (adx + adx.shift(period)) / 2.0
 
 
 def classify_trend(df, date=None):

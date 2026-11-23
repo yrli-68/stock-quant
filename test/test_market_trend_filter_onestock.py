@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""对比“大盘下跌时禁止买入”与“不禁止买入”的单持仓回测效果。
+"""验证单持仓回测的大盘下跌控制（--trendctl）。
 
-等价命令（onestock 属于 backtest 命令）：
-    backtest -sf input/pool.txt -st <start> -e <end> -g boll,macd --onestock
-    backtest -sf input/pool.txt -st <start> -e <end> -g boll,macd --onestock \\
-        --block-buy-on-downtrend
+对比 --trendctl 1（下跌禁止买入，默认）与 --trendctl 0（不控制）的回测结果：
+    backtest -sf input/pool.txt -st <start> -e <end> -g boll,macd --trendctl 1
+    backtest -sf input/pool.txt -st <start> -e <end> -g boll,macd --trendctl 0
 
 测试周期：2020、2021、2022、2023、2024、2025、2026。
 """
@@ -46,10 +45,10 @@ def _year_range(year):
     return start, end
 
 
-def _run_case(symbols, start_date, end_date, block, label):
+def _run_case(symbols, start_date, end_date, label, trendctl=1):
     main._set_seqnum(0)
     main._set_fix_capital(False)
-    main._set_max_hold_days(None)
+    main._set_trendctl(trendctl)
 
     stdout = io.StringIO()
     with contextlib.redirect_stdout(stdout):
@@ -66,7 +65,6 @@ def _run_case(symbols, start_date, end_date, block, label):
             fix_capital=False,
             file_part=label,
             replace_on_buy=0,
-            block_buy_on_downtrend=block,
         )
 
     if result is None:
@@ -88,26 +86,23 @@ def main_test():
     for year in YEARS:
         start, end = _year_range(year)
         print(f'正在回测 {year}: {start} ~ {end} ...')
-        base = _run_case(symbols, start, end, False, f'trend_off_{year}')
-        capped = _run_case(symbols, start, end, True, f'trend_on_{year}')
-        rows.append((year, start, end, base, capped))
+        blocked = _run_case(symbols, start, end, f'trendctl1_{year}', trendctl=1)
+        free = _run_case(symbols, start, end, f'trendctl0_{year}', trendctl=0)
+        rows.append((year, start, end, blocked, free))
 
     print()
-    print('=' * 108)
-    print('大盘下跌时禁止买入 vs 不禁止买入（onestock）')
-    print('=' * 108)
-    print(f'{"年份":<6} {"区间":<24} {"不禁止收益率":>12} {"禁止收益率":>12} {"差异":>12} '
-          f'{"交易(不禁止)":>12} {"交易(禁止)":>10}')
-    print('-' * 108)
-    for year, start, end, base, capped in rows:
-        diff = (capped.get('total_return') or 0) - (base.get('total_return') or 0)
+    print('=' * 78)
+    print('单持仓回测（trendctl=1 下跌禁买 vs trendctl=0 不控制）')
+    print('=' * 78)
+    print(f'{"年份":<6} {"区间":<24} {"N=1收益":>12} {"N=0收益":>12} {"N=1交易":>8} {"N=0交易":>8}')
+    print('-' * 78)
+    for year, start, end, blocked, free in rows:
         print(f'{year:<6} {start} ~ {end:<10} '
-              f'{_pct(base.get("total_return")):>12} '
-              f'{_pct(capped.get("total_return")):>12} '
-              f'{diff * 100:>+10.2f}pct '
-              f'{str(base.get("total_trades")):>12} '
-              f'{str(capped.get("total_trades")):>10}')
-    print('=' * 108)
+              f'{_pct(blocked.get("total_return")):>12} '
+              f'{_pct(free.get("total_return")):>12} '
+              f'{str(blocked.get("total_trades")):>8} '
+              f'{str(free.get("total_trades")):>8}')
+    print('=' * 78)
 
     return rows
 

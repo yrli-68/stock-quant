@@ -223,8 +223,6 @@ QualityValueFactorStrategy 内置缓存(aKshare):
 | `asset_type` | ENUM | PK, NOT NULL | 资产类型 |
 | `name` | VARCHAR(50) | NOT NULL | 资产名称 |
 | `market` | VARCHAR(4) | | 市场板块 |
-| `stock_type` | VARCHAR(20) | DEFAULT 'dividend' | 股票类型 |
-| `is_etf` | TINYINT | DEFAULT 0 | 是否ETF |
 | `listed_date` | DATE | | 上市日期 |
 | `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
 | `updated_at` | TIMESTAMP | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
@@ -487,6 +485,19 @@ QualityValueFactorStrategy 内置缓存(aKshare):
 **索引:** `(strategy_key, start_date, end_date)`
 
 ---
+
+### 7.10.1 交易日历表 (`trading_calendar`)
+
+存储从网络 K 线或日历接口得到的实际交易日。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `trade_date` | DATE | 交易日，主键 |
+| `source` | VARCHAR(30) | 来源：`kline` / `baostock` / `akshare` / `market_breadth` |
+| `created_at` | TIMESTAMP | 创建时间 |
+| `updated_at` | TIMESTAMP | 更新时间 |
+
+**主键:** `trade_date`
 
 ### 7.11 市场广度表 (`market_breadth`)
 

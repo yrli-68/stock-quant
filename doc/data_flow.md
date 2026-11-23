@@ -48,7 +48,7 @@ flowchart LR
 |------|------|----------|
 | `analyze` | `-s`、`-sf`、`-h`、默认 `input/pool.txt` | 单/多股票策略分析、HTML 报告、图表 |
 | `backtest` | `-s`、`-sf`、`--random`、默认 `input/pool.txt` | 批量回测表格、报告、图表 |
-| `scan` | 全市场列表 + 排序/随机抽样 | Top N 股票及信号表 |
+| `scan` | 全市场列表 + 排序/随机抽样；或 `-s`/`-sf` 指定股票（不补网络，不足即退出） | Top N 股票及信号表 |
 | `compare` | `-s` 单只股票 | 多策略对比、对比图 |
 | `indicators` | `-s` 单只股票 | 指标 CSV / 全因子 K 线 HTML |
 | `poolmgr`（独立程序） | `-add`、`-addf`、`-rm`、`-rmf`、`-f`、`-l` | 维护 `input/pool.txt`（`代码 名称`） |
@@ -140,7 +140,8 @@ flowchart LR
 - `is_ignored_gap_range()` 忽略全部由周末/指定节假日窗口组成的缺口；
 - `stocks.listed_date` 用于跳过上市前区间；
 - 用 `fetch_market_trade_dates()` 判断区间内是否存在真实交易日，避免其他休市日误补；
-- 市场交易日按 `(start, end)` 进程内 `lru_cache` 缓存。
+- 优先读取小表 `market_breadth`（`ALL_A`）的交易日，无数据时才回退 `daily_kline`；
+- 多进程命令在父进程预取一次交易日，通过 worker 参数传递，避免每个 worker 重复查询。
 
 节假日窗口（见 `core/trading_calendar.py`）：周末、12/31~1/4、农历 12/28~1/8、4/4~4/7、4/30~5/6、农历 5/4~5/6、农历 8/14~8/17、9/30~10/8。`lunardate` 提供农历转换。
 
@@ -204,10 +205,15 @@ flowchart LR
 资产类型推断规则（简化）：
 
 ```text
-SH: 000/950 → index；51/56/58 → etf；50/52 → fund；6/9 → stock；1 → bond
+0 开头（000/001/002/003/300/301…）→ stock（即使交易所为 SH 也视为股票，不作为指数）
+SH: 950 → index；51/56/58 → etf；50/52 → fund；6/9 → stock；1 → bond
 SZ: 399 → index；159 → etf；15/16/18 → fund；000/001/002/003/300/301 → stock
 BJ: 4/8 → stock
 ```
+
+> 说明：`-s` / `-sf` 传入的 0 开头代码按股票处理；指数数据由 `get_index_data()` 显式以 `asset_type='index'` 读取/写入，不依赖代码推断。
+>
+> 代码写法兼容 `600036` / `sh600036` / `600036.SH` / `SH.600036` 等形式（`-s`、`-sf` 与数据获取层均已支持）。
 
 `fetch_kline()` / `store_kline()` 的 `asset_type=None` 时会自动推断。  
 K 线主键维度为 `(code, exchange, asset_type, trade_date, adjust_type)`，因此同一代码的股票、ETF、指数数据不会互相覆盖。
@@ -225,7 +231,9 @@ K 线主键维度为 `(code, exchange, asset_type, trade_date, adjust_type)`，�
   - `0`：不读不写（默认）；
   - `1`：只读；
   - `2`：网络优先并覆盖写。
-- K 线缓存通道使用 `force=True`，不受 `_DB_MODE` 限制。
+- K 线缓存通道使用 `force=True`，不受 `_DB_MODE` 限制；股票、指数、ETF/基金均先读数据库，缺失时段网络补齐并回写。
+- 网络 K 线写入时同步更新 `trading_calendar`；交易日历缺失时可用 Baostock/AkShare 网络源补齐并写回。
+- 当天实时数据只参与内存计算，不写入数据库。
 
 ### 5.2 表清单
 
@@ -241,6 +249,7 @@ K 线主键维度为 `(code, exchange, asset_type, trade_date, adjust_type)`，�
 | `insider_trades` | 大股东/高管增减持 | `(code, exchange, asset_type, announce_date, shareholder, change_amount)` | 质量策略回写 | `fetch_insider_trades()` |
 | `strategy_signals` | 策略信号（预留持久化） | `(code, exchange, asset_type, trade_date, strategy_key, params_hash)` | 可选 | `v_latest_signals` |
 | `backtest_results` | 回测汇总（预留持久化） | `(code, exchange, asset_type, strategy_key, start_date, end_date, params_hash)` | 可选 | 结果查询 |
+| `trading_calendar` | 交易日历 | `trade_date` | 网络 K 线/日历回写 | 交易日缺口判断 |
 | `market_breadth` | 市场广度与 ADL | `(universe_code, trade_date)` | 触发器 + 存储过程 | 广度策略、ADL 图表 |
 | `broad_index_daily` | 宽基指数日线+指标物化 | `(code, exchange, asset_type, trade_date)`，`asset_type='index'` | 指数物化流程 | 指数分析（预留） |
 | `market_breadth_dirty` | 广度重算脏日期队列 | `(universe_code, trade_date)` | `daily_kline` 触发器 | 定时事件 |
@@ -361,7 +370,7 @@ market_breadth
 | 读取函数 | 数据 | 说明 |
 |----------|------|------|
 | `fetch_kline()` | `daily_kline` | 默认 `adjust_type='qfq'`；K 线通道显式使用 `raw` 且 `force=True` |
-| `fetch_market_trade_dates()` | `daily_kline` | 取区间内实际交易日 |
+| `fetch_market_trade_dates()` | `market_breadth` → `daily_kline` | 优先取 `market_breadth(ALL_A)` 交易日，无数据时回退 `daily_kline` |
 | `fetch_market_breadth_adl()` | `market_breadth` | 默认 `ALL_A`，图表侧有 `lru_cache` |
 | `fetch_indicators()` | `daily_indicators` | 按 `adjust_type` 读取 |
 | `fetch_valuation()` | `valuation_history` | 估值因子 |
@@ -428,11 +437,6 @@ MOM60
 ### 7.3 信号与过滤
 
 - 策略通过 `Strategy.generate_signals(df)` 输出 `1/0/-1` 序列；
-- 通用过滤：
-  - 当日涨幅 ≥ 9.9% 时取消买入；
-  - `SAR_CHECK=1` 时仅保留 `SAR < close` 的买入；
-  - `INDEX_CHECK` 时按指数条件过滤买入；
-  - `--maxholddays N`：持有超过 N 个交易日、收盘价低于 BOLL 中线且持仓回撤 >10% 时卖出；
 - BOLL/MACD/SG 系列在策略内部集成部分过滤；
 - `PREV`：内部计算，对所选策略上一交易日信号做多数表决（不展示）；
 - `COMPO`（部分回测场景）：任一策略买入即持有，直到该策略卖出。

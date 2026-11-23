@@ -20,14 +20,10 @@ from core.indicators import calc_sar
 class SARStrategy(Strategy):
     """抛物线转向策略
 
-    SAR_CHECK 宏不作用于 SAR 策略本身（其买入条件已隐含 SAR < close）。
-
     Attributes:
         af_step (float): 加速因子步长，默认 0.02
         af_max (float): 加速因子上限，默认 0.2
     """
-
-    exclude_sar_check = True
 
     def __init__(self, af_step=0.02, af_max=0.2, name='SAR'):
         """

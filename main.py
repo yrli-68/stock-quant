@@ -22,33 +22,35 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入核心模块
-from core.data_fetcher import DataFetcher, set_primary_source
-from core.indicators import add_all_indicators, classify_trend, calc_sar, calc_rsi, calc_bollinger
+from core.data_fetcher import (DataFetcher, set_primary_source,
+                                preload_market_trade_dates,
+                                set_market_trade_dates_override)
+from core.indicators import (add_all_indicators, classify_trend,
+                             calc_rsi, calc_bollinger, calc_macd, calc_adxr,
+                             calc_atr, update_atr_trailing_stop,
+                             adjust_atr_stop_multiplier)
 from core.backtest import BacktestEngine
 from core.risk import risk_report
 from core.strategy import Strategy
-from core.thresholds import get_threshold, get_sar_check, get_index_check_mode
+from core.thresholds import get_threshold
 from core.config import load_config, app_root
-from core.db import check_db_connection
+from core.db import check_db_connection, fetch_valuation, infer_asset_type
 from core.constants import TRADING_DAYS_PER_YEAR
-from core.scoring import compute_daily_score_with_detail
 from core.market_trend import (analyze_market_trend, market_trend_states,
                                get_market_trend_index, get_index_name)
 from _version import __version__
 from strategies.ma_cross import MACrossStrategy
-from strategies.ema_cross import EMACrossStrategy
 from strategies.macd_strategy import MACDStrategy
 from strategies.macd1_strategy import MACD1Strategy
 from strategies.bollinger_strategy import BollingerStrategy
+from strategies.boma_strategy import BOMAStrategy, set_active_criteria
 from strategies.kdj_strategy import KDJStrategy
 from strategies.quality_value_factor import QualityValueFactorStrategy
 from strategies.momentum_tiered import MomentumTieredStrategy
 from strategies.volatility_timing import VolatilityTimingStrategy
 from strategies.breadth_confirmation import BreadthConfirmationStrategy
 from strategies.hold_strategy import HoldStrategy
-from strategies.sg1_strategy import SG1Strategy
 from strategies.sg2_strategy import SG2Strategy
-from strategies.sg3_strategy import SG3Strategy
 from strategies.sar_strategy import SARStrategy
 from visualization.charts import ChartGenerator
 
@@ -91,15 +93,13 @@ warnings.filterwarnings('ignore')
 
 STRATEGY_MAP = {
     'ma1030': ('MA1030', MACrossStrategy),
-    'ema1030': ('EMA1030', EMACrossStrategy),
     'macd': ('MACD', MACDStrategy),
     'macd1': ('MACD1', MACD1Strategy),
     'boll': ('BOLL', BollingerStrategy),
+    'boma': ('BOMA', BOMAStrategy),
     'kdj': ('KDJ', KDJStrategy),
     'sar': ('SAR', SARStrategy),
-    'ma310': ('MA310', SG1Strategy),
     'ma520': ('MA520', SG2Strategy),
-    'ema520': ('EMA520', SG3Strategy),
     'quality_value': ('多因子', QualityValueFactorStrategy),
     'hold': ('持有', HoldStrategy),
 }
@@ -110,23 +110,21 @@ INDEX_STRATEGY_MAP = {
     'breadth': ('涨跌比确认策略', BreadthConfirmationStrategy),
 }
 
-ALL_STRATEGIES = ['ma1030', 'ema1030', 'macd', 'macd1', 'boll', 'kdj', 'sar', 'ma310', 'ma520', 'ema520', 'hold']
-# -g all 使用的策略集合（排除 ma1030 / ma310 / ma520，仍可用 -g 单独指定）
-ALL_SELECTION = [k for k in ALL_STRATEGIES if k not in ('ma1030', 'ma310', 'ma520')]
+ALL_STRATEGIES = ['ma1030', 'macd', 'macd1', 'boll', 'boma', 'kdj', 'sar', 'ma520', 'hold']
+# -g all 使用的策略集合（排除 ma1030 / ma520，仍可用 -g 单独指定）
+ALL_SELECTION = [k for k in ALL_STRATEGIES if k not in ('ma1030', 'ma520')]
 ALL_INDEX_STRATEGIES = ['momentum', 'volatility', 'breadth']
 
 # scan 多策略汇总信号表使用的短栏名（仅用于汇总表列头，不影响其它输出）
 _SCAN_SHORT_NAMES = {
     'ma1030': 'MA1030',
-    'ema1030': 'EMA1030',
     'macd': 'MACD',
     'macd1': 'MACD1',
     'boll': 'BOLL',
+    'boma': 'BOMA',
     'kdj': 'KDJ',
     'sar': 'SAR',
-    'ma310': 'MA310',
     'ma520': 'MA520',
-    'ema520': 'EMA520',
     'quality_value': '多因子',
     'hold': '持有',
 }
@@ -134,33 +132,29 @@ _SCAN_SHORT_NAMES = {
 # ETF/指数基金专用策略（适配低波动、趋势跟随特性）
 ETF_STRATEGY_MAP = {
     'ma1030': ('ETF均线', lambda: MACrossStrategy(fast_period=10, slow_period=40, name='ETF MACross')),
-    'ema1030': ('ETF EMA', lambda: EMACrossStrategy(fast_period=10, slow_period=40, name='ETF EMACross')),
     'macd': ('ETF MACD', lambda: MACDStrategy(fast=16, slow=32, signal=12, name='ETF MACD')),
     'macd1': ('ETF MACD1', lambda: MACD1Strategy(name='ETF MACD1')),
     'boll': ('ETF BOLL', lambda: BollingerStrategy(period=20, std=2.5, name='ETF Bollinger')),
+    'boma': ('ETF BOMA', lambda: BOMAStrategy(boll_period=20, boll_std=2.5, macd_fast=16, macd_slow=32, macd_signal=12, name='ETF BOMA')),
     'kdj': ('ETF KDJ', lambda: KDJStrategy(n=9, m1=3, m2=3, oversold=20, overbought=80, name='ETF KDJ')),
     'sar': ('ETF SAR', lambda: SARStrategy(name='ETF SAR')),
-    'ma310': ('ETF SG1', lambda: SG1Strategy(name='ETF SG1')),
     'ma520': ('ETF SG2', lambda: SG2Strategy(name='ETF SG2')),
-    'ema520': ('ETF SG3', lambda: SG3Strategy(name='ETF SG3')),
     'quality_value': ('ETF多因子', lambda: QualityValueFactorStrategy(stock_type='auto', name='ETF QualityValue')),
     'hold': ('ETF持有', lambda: HoldStrategy(name='ETF Hold')),
 }
-ALL_ETF_STRATEGIES = ['ma1030', 'ema1030', 'macd', 'macd1', 'boll', 'kdj', 'sar', 'ma310', 'ma520', 'ema520', 'quality_value', 'hold']
-ALL_ETF_SELECTION = [k for k in ALL_ETF_STRATEGIES if k not in ('ma1030', 'ma310', 'ma520')]
+ALL_ETF_STRATEGIES = ['ma1030', 'macd', 'macd1', 'boll', 'boma', 'kdj', 'sar', 'ma520', 'quality_value', 'hold']
+ALL_ETF_SELECTION = [k for k in ALL_ETF_STRATEGIES if k not in ('ma1030', 'ma520')]
 
 # 策略 key 到类的映射
 _STRATEGY_CLASS_MAP = {
     'ma1030': MACrossStrategy,
-    'ema1030': EMACrossStrategy,
     'macd': MACDStrategy,
     'macd1': MACD1Strategy,
     'boll': BollingerStrategy,
+    'boma': BOMAStrategy,
     'kdj': KDJStrategy,
     'sar': SARStrategy,
-    'ma310': SG1Strategy,
     'ma520': SG2Strategy,
-    'ema520': SG3Strategy,
     'quality_value': QualityValueFactorStrategy,
     'hold': HoldStrategy,
     'momentum': MomentumTieredStrategy,
@@ -209,31 +203,47 @@ def _set_seqnum(v):
         _SEQNUM = 0
 
 
-# 最大持股天数：自建仓买入起，持仓超过 N 个交易日、收盘价低于 BOLL 中线且
-# 持仓期最大回撤 > 10% 时卖出；None 不限制
-_MAX_HOLD_DAYS = None
-_MAX_HOLD_DRAWDOWN = 0.10
+# 大盘趋势控制：0=不控制；1=下跌或过冷趋势禁止买入（按个股对应指数趋势）
+_TRENDCTL = 1
+
+
+def _set_trendctl(v):
+    global _TRENDCTL
+    try:
+        _TRENDCTL = int(v)
+    except (TypeError, ValueError):
+        _TRENDCTL = 1
+    if _TRENDCTL not in (0, 1):
+        _TRENDCTL = 1
+
+
 _DOWNLOSS_SELL_THRESHOLD = 0.02
 _DOWNLOSS_DAILY_DROP_THRESHOLD = 0.05
+_DOWNLOSS_RANGE_MAX_DRAWDOWN = 0.10
+
+_ATR_STOP_ENABLED = False
+_ATR_STOP_MULTIPLIER = 2.0
 
 
-def _set_max_hold_days(v):
-    global _MAX_HOLD_DAYS
-    if v is None:
-        _MAX_HOLD_DAYS = None
+def _set_withdrawsell(ratio):
+    global _ATR_STOP_ENABLED, _ATR_STOP_MULTIPLIER
+    if ratio is None:
+        _ATR_STOP_ENABLED = False
+        _ATR_STOP_MULTIPLIER = 2.0
         return
     try:
-        _MAX_HOLD_DAYS = max(1, int(v))
+        _ATR_STOP_MULTIPLIER = max(0.1, float(ratio))
     except (TypeError, ValueError):
-        _MAX_HOLD_DAYS = None
+        _ATR_STOP_MULTIPLIER = 2.0
+    _ATR_STOP_ENABLED = True
 
 
-_BLOCK_BUY_ON_DOWNTREND = False
+_DOWNLOSS_SELL = False
 
 
-def _set_block_buy_on_downtrend(v):
-    global _BLOCK_BUY_ON_DOWNTREND
-    _BLOCK_BUY_ON_DOWNTREND = bool(v)
+def _set_downloss_sell(v):
+    global _DOWNLOSS_SELL
+    _DOWNLOSS_SELL = bool(v)
 
 
 def _signal_sequence(signals):
@@ -264,182 +274,19 @@ def _signal_sequence(signals):
     return seq
 
 
-_INDEX_MA5_CACHE = {}
-_INDEX_CHECK_WARNED = False
-
-
-def _index_filter_ok(df):
-    """按 INDEX_CHECK 模式返回买入条件
-
-    - 0：None（不检查）
-    - 1：上证指数收盘 > 上证指数 5 日均线
-    - 2：上证指数收盘 > 上证指数 5 日均线 或 个股收盘 > 个股 5 日均线
-    """
-    global _INDEX_CHECK_WARNED
-    mode = get_index_check_mode()
-    if mode == 0:
-        return None
-    if df is None or len(df) == 0 or not isinstance(df.index, pd.DatetimeIndex):
-        return None
-    start = (df.index[0] - pd.Timedelta(days=30)).strftime('%Y-%m-%d')
-    end = df.index[-1].strftime('%Y-%m-%d')
-    key = (start, end)
-    if key not in _INDEX_MA5_CACHE:
-        try:
-            idx = DataFetcher().get_index_data('000001', start, end)
-        except Exception:
-            idx = None
-        if idx is None or len(idx) == 0 or 'close' not in idx.columns:
-            _INDEX_MA5_CACHE[key] = False
-            if not _INDEX_CHECK_WARNED:
-                click.echo(click.style('  警告: 上证指数数据获取失败，INDEX_CHECK 本次不生效', fg='yellow'))
-                _INDEX_CHECK_WARNED = True
-        else:
-            close = idx['close']
-            _INDEX_MA5_CACHE[key] = close > close.rolling(5).mean()
-    ok = _INDEX_MA5_CACHE[key]
-    if ok is False:
-        return None
-    index_ok = ok.reindex(df.index).ffill().fillna(False)
-    if mode == 1:
-        return index_ok
-    stock_close = df['close']
-    stock_ma5 = df['MA5'] if 'MA5' in df.columns else stock_close.rolling(5).mean()
-    stock_ok = stock_close > stock_ma5
-    return index_ok | stock_ok
-
-
-def _filter_buy_on_index(signals, df, index_ok=None):
-    """买入信号附加条件：按 INDEX_CHECK 模式过滤"""
-    if signals is None or len(signals) == 0:
-        return signals
-    if index_ok is None:
-        index_ok = _index_filter_ok(df)
-    if index_ok is None:
-        return signals
-    mask = (signals > 0) & (~index_ok.reindex(signals.index).fillna(False))
-    if mask.any():
-        signals = signals.copy()
-        signals[mask] = 0.0
-    return signals
-
-
-def _sar_buy_ok(df):
-    """SAR_CHECK=1 时返回买入条件「当日 SAR < close」，否则返回 None"""
-    if not get_sar_check():
-        return None
-    sar = df['SAR'] if 'SAR' in df.columns else calc_sar(df)
-    return sar < df['close']
-
-
-def _filter_buy_on_sar(signals, df, sar_ok=None):
-    """买入信号附加条件：SAR_CHECK=1 时，仅保留当日 SAR < close 的买入"""
-    if signals is None or len(signals) == 0:
-        return signals
-    if sar_ok is None:
-        sar_ok = _sar_buy_ok(df)
-    if sar_ok is None:
-        return signals
-    mask = (signals > 0) & (~sar_ok.reindex(signals.index).fillna(False))
-    if mask.any():
-        signals = signals.copy()
-        signals[mask] = 0.0
-    return signals
-
-
-def _apply_max_hold_days(signals, max_days, df=None):
-    """持股超过 max_days、收盘价低于 BOLL 中线且回撤 > 10% 时卖出。
-
-    以建仓后的首次买入为计时起点，持仓期间重复买入不重新计时；
-    最大回撤按持仓期内最高收盘价到当前收盘价计算。
-    max_days 为 None/0 时不限制。
-    """
-    if signals is None or len(signals) == 0 or not max_days:
-        return signals
-    try:
-        max_days = int(max_days)
-    except (TypeError, ValueError):
-        return signals
-    if max_days <= 0:
-        return signals
-
-    close = None
-    below_mid = None
-    if df is not None and 'close' in df.columns:
-        close = pd.to_numeric(df['close'], errors='coerce').reindex(signals.index)
-        try:
-            mid = df['BOLL_MIDDLE'] if 'BOLL_MIDDLE' in df.columns else calc_bollinger(df)['MIDDLE']
-            below_mid = (df['close'] < mid).reindex(signals.index).fillna(False)
-        except Exception:
-            below_mid = None
-
-    out = signals.copy()
-    entry_pos = None
-    peak = None
-    for i in range(len(out)):
-        val = out.iloc[i]
-        c = close.iloc[i] if close is not None else None
-        if pd.isna(val):
-            continue
-
-        if entry_pos is not None and c is not None and pd.notna(c):
-            if peak is None or c > peak:
-                peak = float(c)
-
-        if val < 0:
-            entry_pos = None
-            peak = None
-        elif val > 0:
-            if entry_pos is None:
-                entry_pos = i
-                peak = float(c) if c is not None and pd.notna(c) else None
-            else:
-                drawdown = ((peak - c) / peak
-                            if peak and peak > 0 and c is not None
-                            and pd.notna(c) else 0.0)
-                if (i - entry_pos > max_days and below_mid is not None
-                        and bool(below_mid.iloc[i])
-                        and drawdown > _MAX_HOLD_DRAWDOWN):
-                    out.iloc[i] = -1.0
-                    entry_pos = None
-                    peak = None
-        elif entry_pos is not None:
-            drawdown = ((peak - c) / peak
-                        if peak and peak > 0 and c is not None
-                        and pd.notna(c) else 0.0)
-            if (i - entry_pos > max_days and below_mid is not None
-                    and bool(below_mid.iloc[i])
-                    and drawdown > _MAX_HOLD_DRAWDOWN):
-                out.iloc[i] = -1.0
-                entry_pos = None
-                peak = None
-    out.attrs = dict(getattr(signals, 'attrs', {}))
-    return out
-
-
-def _attach_daily_score(signals, df):
-    """为信号序列附加每日综合评分及评分详情。"""
-    if signals is None or not hasattr(signals, 'attrs'):
-        return signals
-    try:
-        score, detail = compute_daily_score_with_detail(df)
-        if score is not None and len(score) > 0:
-            signals.attrs['score'] = score.reindex(signals.index)
-            signals.attrs['score_detail'] = detail.reindex(signals.index)
-    except Exception:
-        pass
-    return signals
-
-
 def _market_states_for_df(df):
-    """获取与 df 日期对齐的大盘趋势状态；失败时返回 None。"""
+    """获取与 df 日期对齐、按个股市值选择指数的大盘趋势状态。"""
     if df is None or len(df) == 0:
         return None
     try:
         start = pd.Timestamp(df.index[0])
         end = pd.Timestamp(df.index[-1])
-        states = market_trend_states(f'{start.year}-01-01',
-                                     end.strftime('%Y-%m-%d'))
+        symbol = str(df.attrs.get('symbol') or '').strip()
+        index_code = _symbol_index_code(symbol)
+        states = _TREND_STATES_PRECOMPUTED.get(index_code)
+        if states is None:
+            states = market_trend_states(f'{start.year}-01-01',
+                                         end.strftime('%Y-%m-%d'), index_code)
         if states is None or len(states) == 0:
             return None
         return states.reindex(df.index, method='ffill')
@@ -449,11 +296,12 @@ def _market_states_for_df(df):
 
 def _apply_market_regime_to_signals(signals, strategy, df, market_states=None,
                                     no_force_signals=None):
-    """将过热/过冷规则应用到策略原始信号。
+    """将过热/过冷/下跌规则应用到策略原始信号。
 
     - 过热：买入信号置 0；
-    - 过冷：仅由最大回撤/最大持股天数等强制条件产生的卖出置 0；
-    - --nodownbuy：下跌日买入信号置 0。
+    - 下跌或过冷（`--trendctl 1`，默认）：买入信号置 0；
+    - 过冷：另将 ATR 动态止损等强制条件产生的卖出置 0；
+    - `--trendctl 0` 时不按下跌/过冷趋势禁止买入。
     """
     if signals is None or len(signals) == 0:
         return signals
@@ -467,34 +315,34 @@ def _apply_market_regime_to_signals(signals, strategy, df, market_states=None,
 
     overheat = aligned == '过热'
     overcold = aligned == '过冷'
-    block_down = _BLOCK_BUY_ON_DOWNTREND and (aligned == '下跌').any()
-    if not overheat.any() and not overcold.any() and not block_down:
+    down_block = ((aligned == '下跌') | overcold) if _TRENDCTL == 1 else None
+    has_down = down_block is not None and bool(down_block.any())
+    if not overheat.any() and not overcold.any() and not has_down:
         return signals
 
     out = signals.copy()
+    if has_down:
+        mask = (out > 0) & down_block
+        if mask.any():
+            out[mask] = 0.0
     if overheat.any():
         mask = (out > 0) & overheat
         if mask.any():
             out[mask] = 0.0
-    if block_down:
-        mask = (out > 0) & (aligned == '下跌')
-        if mask.any():
-            out[mask] = 0.0
-
     if overcold.any():
         alt = no_force_signals
         if alt is None and strategy is not None:
-            has_dd = hasattr(strategy, 'max_drawdown')
-            old_dd = getattr(strategy, 'max_drawdown', None)
+            has_atr = hasattr(strategy, 'use_atr_stop')
+            old_atr = getattr(strategy, 'use_atr_stop', True)
             try:
-                if has_dd:
-                    strategy.max_drawdown = None
+                if has_atr:
+                    strategy.use_atr_stop = False
                 alt = _generate_effective_signals(
-                    strategy, df, apply_max_hold=False, attach_score=False,
-                    apply_market_regime=False)
+                    strategy, df, apply_market_regime=False,
+                    apply_downloss_signal=False)
             finally:
-                if has_dd:
-                    strategy.max_drawdown = old_dd
+                if has_atr:
+                    strategy.use_atr_stop = old_atr
         if alt is not None:
             forced_only = ((out < 0)
                            & (alt.reindex(out.index) >= 0)
@@ -506,40 +354,89 @@ def _apply_market_regime_to_signals(signals, strategy, df, market_states=None,
     return out
 
 
-def _generate_effective_signals(strategy, df, apply_max_hold=True, attach_score=True,
-                                apply_market_regime=True, market_states=None):
+def _apply_downloss_sell_to_signals(signals, df, market_states=None):
+    """在策略信号上模拟持仓，执行下跌趋势亏损/单日大跌止损。"""
+    if not _DOWNLOSS_SELL or signals is None or len(signals) == 0:
+        return signals
+    states = market_states if market_states is not None else _market_states_for_df(df)
+    if states is None or len(states) == 0:
+        return signals
+    try:
+        aligned = states.reindex(signals.index, method='ffill')
+        close = pd.to_numeric(df['close'], errors='coerce').reindex(signals.index)
+    except Exception:
+        return signals
+
+    out = signals.copy()
+    in_pos = False
+    entry = None
+    peak = None
+    prev = None
+    for i in range(len(out)):
+        c = close.iloc[i]
+        if pd.isna(c):
+            continue
+        c = float(c)
+        val = float(out.iloc[i])
+        state = aligned.iloc[i]
+        if not in_pos:
+            if val > 0:
+                in_pos = True
+                entry = c
+                peak = c
+        else:
+            if val < 0:
+                in_pos = False
+                entry = None
+                peak = None
+            elif state == '震荡':
+                if peak is None or c > peak:
+                    peak = c
+                if peak > 0 and (peak - c) / peak > _DOWNLOSS_RANGE_MAX_DRAWDOWN:
+                    out.iloc[i] = -1.0
+                    in_pos = False
+                    entry = None
+                    peak = None
+            elif state == '下跌' and entry is not None and entry > 0:
+                loss = c / entry - 1.0
+                day_ret = (c / prev - 1.0) if prev is not None and prev > 0 else None
+                if (loss < -_DOWNLOSS_SELL_THRESHOLD
+                        or (day_ret is not None
+                            and day_ret < -_DOWNLOSS_DAILY_DROP_THRESHOLD)):
+                    out.iloc[i] = -1.0
+                    in_pos = False
+                    entry = None
+                    peak = None
+        prev = c
+    out.attrs = dict(getattr(signals, 'attrs', {}))
+    return out
+
+
+def _generate_effective_signals(strategy, df, apply_market_regime=True,
+                                market_states=None, apply_downloss_signal=True):
     """生成最终交易信号
 
-    - BOLL：在策略内部同步 -sn、涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损；
-    - MACD：内部同步涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损，忽略 -sn；
-    - SG1/SG2/SG3：内部同步涨幅过滤、SAR_CHECK、INDEX_CHECK 与回撤止损，忽略 -sn；
-    - 其余策略：外部应用涨幅过滤、SAR_CHECK 与 INDEX_CHECK，忽略 -sn；
-    - 所有策略最后统一应用最大持股天数限制（超过 N 天、跌破 BOLL 中线且回撤 >10% 才卖出）；
-    - 最后应用大盘趋势：过热日禁止买入，过冷日抑制最大回撤/最大持股天数等强制卖出。
-
-    apply_max_hold=False 时跳过最大持股天数强平，供“过冷”状态生成无强制卖出对照信号。
+    - BOLL/BOMA：在策略内部同步 -sn 与回撤止损；
+    - MACD/SG2：内部同步回撤止损，忽略 -sn；
+    - 其余策略：直接生成信号，忽略 -sn；
+    - 最后应用大盘趋势：过热日禁止买入，过冷日抑制 ATR 动态止损等强制卖出。
     """
-    sar_ok = None
-    if get_sar_check() and not getattr(strategy, 'exclude_sar_check', False):
-        sar_ok = _sar_buy_ok(df)
-    index_ok = _index_filter_ok(df)
+    if apply_market_regime and market_states is None:
+        market_states = _market_states_for_df(df)
+    if market_states is not None:
+        df.attrs['market_states'] = market_states
+
     if getattr(strategy, 'integrates_buy_filter', False):
         seqnum = _SEQNUM if getattr(strategy, 'supports_seqnum', False) else 0
-        signals = strategy.generate_signals(
-            df, seqnum=seqnum, max_buy_gain=_MAX_BUY_DAY_GAIN, sar_ok=sar_ok,
-            index_ok=index_ok)
+        signals = strategy.generate_signals(df, seqnum=seqnum)
         signals = _mask_signal_warmup(signals)
     else:
-        signals = _filter_buy_on_big_gain(
-            _mask_signal_warmup(strategy.generate_signals(df)), df)
-        signals = _filter_buy_on_sar(signals, df, sar_ok=sar_ok)
-        signals = _filter_buy_on_index(signals, df, index_ok=index_ok)
-    if apply_max_hold:
-        signals = _apply_max_hold_days(signals, _MAX_HOLD_DAYS, df)
+        signals = _mask_signal_warmup(strategy.generate_signals(df))
     if apply_market_regime:
         signals = _apply_market_regime_to_signals(
             signals, strategy, df, market_states=market_states)
-    return _attach_daily_score(signals, df) if attach_score else signals
+    signals = _apply_stock_limit(signals, df)
+    return signals
 
 
 def _get_position_style():
@@ -624,12 +521,288 @@ def _get_market_trend():
     return _MARKET_TREND
 
 
+_HS300_INDEX_CODE = '000300.SH'
+_ZZ1000_INDEX_CODE = '000852.SH'
+_LARGE_CAP_THRESHOLD_WAN = 2_000_000.0  # 200亿 = 2,000,000 万元
+_SYMBOL_CAP_MAP = {}
+_SYMBOL_NAME_MAP = {}
+_SYMBOL_PE_MAP = {}
+_SYMBOL_PRICE_MAP = {}
+_CAP_LIST_LOADED = False
+_TREND_STATES_PRECOMPUTED = {}
+
+# --limit：命中条件时限制买入
+_LIMIT_ENABLED = False
+_LIMIT_CFG = {}
+_LIMIT_CACHE = {}
+_LIMIT_FETCHER = None
+
+
+def _preload_trend_states(start_date, end_date):
+    """在个股数据计算前一次性预计算两个指数的趋势状态。"""
+    global _TREND_STATES_PRECOMPUTED
+    _TREND_STATES_PRECOMPUTED = {
+        _HS300_INDEX_CODE: market_trend_states(
+            start_date, end_date, _HS300_INDEX_CODE),
+        _ZZ1000_INDEX_CODE: market_trend_states(
+            start_date, end_date, _ZZ1000_INDEX_CODE),
+    }
+
+
+def _update_symbol_cap_map(stock_list):
+    """从股票列表 DataFrame 更新 symbol -> 总市值（万元）/名称/PE/现价 映射。"""
+    global _SYMBOL_CAP_MAP
+    if stock_list is None or len(stock_list) == 0:
+        return
+    if 'symbol' not in stock_list.columns:
+        return
+    try:
+        syms = stock_list['symbol'].astype(str)
+        caps = (pd.to_numeric(stock_list['mktcap'], errors='coerce')
+                if 'mktcap' in stock_list.columns else None)
+        pes = (pd.to_numeric(stock_list['pe'], errors='coerce')
+               if 'pe' in stock_list.columns else None)
+        prices = (pd.to_numeric(stock_list['price'], errors='coerce')
+                  if 'price' in stock_list.columns else None)
+        names = stock_list['name'] if 'name' in stock_list.columns else None
+        for i, sym in enumerate(syms):
+            sym = str(sym)
+            if caps is not None:
+                cap = caps.iloc[i]
+                if pd.notna(cap) and float(cap) > 0:
+                    _SYMBOL_CAP_MAP[sym] = float(cap)
+            if names is not None:
+                nm = names.iloc[i]
+                if pd.notna(nm) and str(nm).strip():
+                    _SYMBOL_NAME_MAP[sym] = str(nm).strip()
+            if pes is not None:
+                pe = pes.iloc[i]
+                if pd.notna(pe):
+                    _SYMBOL_PE_MAP[sym] = float(pe)
+            if prices is not None:
+                price = prices.iloc[i]
+                if pd.notna(price) and float(price) > 0:
+                    _SYMBOL_PRICE_MAP[sym] = float(price)
+    except Exception:
+        pass
+
+
+def _ensure_symbol_cap_map(symbols=None):
+    """确保目标股票的总市值已加载；首选源列表不含总市值时回退新浪列表；仍无法获取时按中证1000处理。"""
+    global _CAP_LIST_LOADED
+    need = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+    if need and all(s in _SYMBOL_CAP_MAP for s in need):
+        return
+    if _CAP_LIST_LOADED:
+        return
+    _CAP_LIST_LOADED = True
+    pages = 60 if _LIMIT_ENABLED else 20
+    fetcher = None
+    try:
+        fetcher = DataFetcher()
+        df = fetcher.get_stock_list(sort_key='mktcap', max_pages=pages)
+        _update_symbol_cap_map(df)
+    except Exception:
+        pass
+    # 首选源（baostock/eastmoney/akshare）的股票列表可能不含总市值，改用新浪列表补充
+    if need and any(s not in _SYMBOL_CAP_MAP for s in need):
+        try:
+            if fetcher is None:
+                fetcher = DataFetcher()
+            df_sina = fetcher._get_stock_list_sina('mktcap', pages)
+            _update_symbol_cap_map(df_sina)
+        except Exception:
+            pass
+
+
+def _get_limit_fetcher():
+    global _LIMIT_FETCHER
+    if _LIMIT_FETCHER is None:
+        _LIMIT_FETCHER = DataFetcher()
+    return _LIMIT_FETCHER
+
+
+def _set_limit(enabled):
+    """设置 --limit 开关，并从 squant.toml 的 [tool.stock-quant.limit] 读取边界值。"""
+    global _LIMIT_ENABLED, _LIMIT_CFG
+    _LIMIT_ENABLED = bool(enabled)
+    _LIMIT_CACHE.clear()
+    cfg = {'LIMIT_ST': 1.0, 'LIMIT_PRICE': 2.0,
+           'LIMIT_PE': 2.0, 'LIMIT_CAPITAL': 40.0}
+    if _LIMIT_ENABLED:
+        try:
+            sec = (_load_quant_config() or {}).get('limit') or {}
+        except Exception:
+            sec = {}
+        for k in cfg:
+            if k in sec and sec[k] is not None:
+                try:
+                    cfg[k] = float(sec[k])
+                except (TypeError, ValueError):
+                    pass
+    _LIMIT_CFG = cfg
+
+
+def _stock_limit_reasons(symbol, name=None, ref_date=None):
+    """返回 --limit 命中条件的原因列表（空列表表示不限制买入）。
+
+    条件：ST；当前价 >= 一年前价 × LIMIT_PRICE；当前 PE 为负或 >= 一年前正 PE × LIMIT_PE；
+    当前总市值 < LIMIT_CAPITAL 亿元。数据缺失的条件跳过。结果按 (symbol, ref_date) 缓存。
+    """
+    if not _LIMIT_ENABLED:
+        return []
+    sym = str(symbol or '').strip()
+    if not sym:
+        return []
+    ref = str(ref_date or datetime.now().strftime('%Y-%m-%d'))[:10]
+    key = (sym, ref)
+    if key in _LIMIT_CACHE:
+        return _LIMIT_CACHE[key]
+
+    cfg = _LIMIT_CFG or {}
+
+    def _num(k, default):
+        try:
+            return float(cfg.get(k, default) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    st_limit = _num('LIMIT_ST', 1.0)
+    price_limit = _num('LIMIT_PRICE', 2.0)
+    pe_limit = _num('LIMIT_PE', 2.0)
+    cap_limit = _num('LIMIT_CAPITAL', 40.0)
+
+    reasons = []
+    nm = name if name is not None else _SYMBOL_NAME_MAP.get(sym, '')
+    today = datetime.now().strftime('%Y-%m-%d')
+    is_today = (ref == today)
+    start = (pd.Timestamp(ref) - pd.Timedelta(days=365)).strftime('%Y-%m-%d')
+
+    close_series = None
+    if price_limit > 0 or pe_limit > 0:
+        try:
+            kdf = _get_limit_fetcher().get_stock_data(sym, start, ref)
+            if kdf is not None and len(kdf) > 0 and 'close' in kdf.columns:
+                c = pd.to_numeric(kdf['close'], errors='coerce').dropna()
+                if len(c) > 0:
+                    close_series = c
+        except Exception:
+            close_series = None
+
+    # 1. ST
+    if st_limit >= 1 and 'ST' in str(nm or '').upper():
+        reasons.append('ST')
+
+    # 2. 价格翻倍
+    if price_limit > 0 and close_series is not None and len(close_series) >= 2:
+        first = float(close_series.iloc[0])
+        last = float(close_series.iloc[-1])
+        if first > 0 and last >= first * price_limit:
+            reasons.append(f'价格{last / first:.2f}倍')
+
+    # 3. PE 为负或翻倍
+    if pe_limit > 0:
+        try:
+            rows = fetch_valuation(sym, start_date=start,
+                                   asset_type=infer_asset_type(sym), force=True)
+        except Exception:
+            rows = []
+        end_ts = pd.Timestamp(ref)
+        latest = None
+        positives = []
+        for row in rows or []:
+            try:
+                d = pd.Timestamp(row[0])
+                v = float(row[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if d > end_ts or pd.isna(v):
+                continue
+            latest = v
+            if v > 0:
+                positives.append(v)
+        current = latest
+        if current is None and is_today:
+            current = _SYMBOL_PE_MAP.get(sym)
+        if current is not None:
+            if current <= 0:
+                reasons.append('PE为负')
+            elif positives and current >= positives[0] * pe_limit:
+                reasons.append(f'PE{current / positives[0]:.2f}倍')
+
+    # 4. 总市值低于阈值（市值单位：万元）
+    if cap_limit > 0:
+        cap = _SYMBOL_CAP_MAP.get(sym)
+        if cap is not None:
+            cap_ref = float(cap)
+            if not is_today and close_series is not None and len(close_series) > 0:
+                cur_price = _SYMBOL_PRICE_MAP.get(sym)
+                if cur_price and float(cur_price) > 0:
+                    cap_ref = (float(cap) * float(close_series.iloc[-1])
+                               / float(cur_price))
+            if cap_ref < cap_limit * 10000.0:
+                reasons.append(f'市值{cap_ref / 10000.0:.1f}亿')
+
+    _LIMIT_CACHE[key] = reasons
+    return reasons
+
+
+def _apply_stock_limit(signals, df):
+    """--limit：命中限制条件时禁止买入（买入信号置 0，保留卖出）。"""
+    if not _LIMIT_ENABLED or signals is None or len(signals) == 0:
+        return signals
+    attrs = getattr(df, 'attrs', {}) or {}
+    if attrs.get('limit_skip'):
+        return signals
+    symbol = str(attrs.get('symbol') or '').strip()
+    if not symbol:
+        return signals
+    reasons = _stock_limit_reasons(
+        symbol, name=attrs.get('stock_name'), ref_date=attrs.get('ref_date'))
+    if not reasons:
+        return signals
+    out = signals.copy()
+    mask = out > 0
+    if mask.any():
+        out[mask] = 0.0
+    out.attrs = dict(getattr(signals, 'attrs', {}))
+    out.attrs['limit_reasons'] = reasons
+    return out
+
+
+def _symbol_index_code(symbol):
+    """按总市值选择个股对应的大盘指数。"""
+    cap = _SYMBOL_CAP_MAP.get(str(symbol or '').strip())
+    if cap is not None and cap > _LARGE_CAP_THRESHOLD_WAN:
+        return _HS300_INDEX_CODE
+    return _ZZ1000_INDEX_CODE
+
+
+def _preferred_strategy_key():
+    """历史优先策略（当前不再启用）。"""
+    if not _DOWNLOSS_SELL:
+        return None
+    trend = _get_market_trend()
+    if isinstance(trend, (list, tuple)):
+        default_code = get_market_trend_index()
+        trend = next((t for t in trend if t.get('index_code') == default_code),
+                     trend[0] if trend else {})
+    state = str((trend or {}).get('state') or '')
+    if state == '上涨':
+        return 'macd'
+    if state in ('震荡', '过冷'):
+        return 'boll'
+    return None
+
+
 def _market_trend_color(state):
     return {'上涨': 'green', '下跌': 'red', '震荡': 'yellow',
             '过渡': 'cyan', '过热': 'magenta', '过冷': 'blue'}.get(state, 'white')
 
 
 def _format_market_trend(trend):
+    if isinstance(trend, (list, tuple)):
+        return '\n  '.join(_format_market_trend(t) for t in trend)
     if not trend:
         return '大盘趋势(指数): 未知'
     state = str(trend.get('state') or '未知')
@@ -637,18 +810,24 @@ def _format_market_trend(trend):
     date = trend.get('date')
     if state == '未知':
         return f'大盘趋势({index_name}): 未知'
-    adr = trend.get('adr')
-    adr_txt = f', ADR10={float(adr):.2f}' if adr is not None else ''
-    return f'大盘趋势({index_name}, {date}): {state}{adr_txt}'
+    reason = str(trend.get('reason') or '').strip()
+    reason_txt = f'；原因: {reason}' if reason else ''
+    return f'大盘趋势({index_name}, {date}): {state}{reason_txt}'
 
 
 def _print_market_trend(trend):
+    if isinstance(trend, (list, tuple)):
+        for t in trend:
+            _print_market_trend(t)
+        return
     state = str((trend or {}).get('state') or '未知')
     click.echo(click.style('  ' + _format_market_trend(trend),
                            fg=_market_trend_color(state), bold=True))
 
 
 def _market_trend_html(trend):
+    if isinstance(trend, (list, tuple)):
+        return '<br>'.join(_market_trend_html(t) for t in trend)
     if not trend:
         return ''
     state = str(trend.get('state') or '未知')
@@ -657,11 +836,11 @@ def _market_trend_html(trend):
     color = {'上涨': '#27ae60', '下跌': '#e74c3c', '震荡': '#f39c12',
              '过渡': '#2980b9', '过热': '#d35400', '过冷': '#2c3e50'}.get(state, '#7f8c8d')
     date_html = f' <small>({date})</small>' if date else ''
-    adr = trend.get('adr')
-    adr_html = f' <small>ADR10={float(adr):.2f}</small>' if adr is not None else ''
+    reason = str(trend.get('reason') or '').strip()
+    reason_html = f'<br><small>原因: {reason}</small>' if reason else ''
     return (f'<span><strong>大盘趋势({index_name}):</strong> '
             f'<span style="color:{color};font-weight:bold">{state}</span>'
-            f'{adr_html}{date_html}</span>')
+            f'{date_html}{reason_html}</span>')
 
 
 def _run_strategy(strategy_key, df, capital=100000, is_index=False, enhance=0):
@@ -712,16 +891,9 @@ def _run_single_analysis(df, strategy_key, capital, chart_gen, prefix='', strate
 def _run_signals_backtest(df, signals, capital, strategy_key, strategy_name, enhance=0):
     """用已有信号序列直接回测并返回结果（用于 PREV 等非标准策略）"""
     raw_signals = signals
-    no_force = _filter_buy_on_big_gain(raw_signals.copy(), df)
-    no_force = _filter_buy_on_sar(no_force, df)
-    no_force = _filter_buy_on_index(no_force, df)
-    signals = _apply_max_hold_days(raw_signals, _MAX_HOLD_DAYS, df)
-    signals = _filter_buy_on_big_gain(signals, df)
-    signals = _filter_buy_on_sar(signals, df)
-    signals = _filter_buy_on_index(signals, df)
+    no_force = raw_signals.copy()
     signals = _apply_market_regime_to_signals(
         signals, None, df, no_force_signals=no_force)
-    signals = _attach_daily_score(signals, df)
     engine = BacktestEngine(initial_capital=capital, fix_capital=_FIX_CAPITAL)
     result = engine.run(df, signals, position_style=_get_position_style())
     result['strategy_name'] = strategy_name
@@ -806,9 +978,6 @@ def _build_combo_signals(df, signals_by_key, exclude=('hold', _PREV_TOKEN)):
 # 未指定 -st 时的默认分析时段长度（日历天，start = end 前推 180 天）
 _DEFAULT_PERIOD_DAYS = 180
 
-# backtest 命令默认回测时段长度（日历天，start = end 前推 365 天，即 1 年）
-_BACKTEST_PERIOD_DAYS = 365
-
 # 数据获取预热天数：在 start 前再多取 N 天，供因子/指标正确计算
 _ANALYSIS_WARMUP_DAYS = 90
 
@@ -825,11 +994,15 @@ def _truncate_analysis_df(df, start_date):
     return df[df.index >= pd.Timestamp(start_date)]
 
 
-def _parse_dates(start, end, default_days=_DEFAULT_PERIOD_DAYS):
-    """解析日期字符串，返回默认值
+def _parse_dates(start, end, default_days=_DEFAULT_PERIOD_DAYS,
+                 duration_explicit=False):
+    """解析日期字符串，返回 (start_date, end_date)
 
-    - 缺少 -e 时，结束日期默认为今天。
-    - 缺少 -st 时，开始日期默认为结束日期前 default_days 天（默认 _DEFAULT_PERIOD_DAYS）。
+    - 未指定 -st：开始日期 = 结束日期前 default_days 天（-e 缺省为今天）。
+    - 指定 -st 且指定 -e：以 -e 为准。
+    - 指定 -st 且显式指定 -d（duration_explicit=True）且缺省 -e：
+      结束日期 = 开始日期 + default_days 天。
+    - 指定 -st 但未显式指定 -d 且缺省 -e：结束日期默认为今天。
     对 start/end 做格式校验并统一为 YYYY-MM-DD，非法时抛出明确错误。
     start/end 输入格式为 YYYYMMDD（如 20240815）。
     """
@@ -842,16 +1015,21 @@ def _parse_dates(start, end, default_days=_DEFAULT_PERIOD_DAYS):
                 continue
         raise click.ClickException(f'日期格式不正确: {d}，期望格式 YYYYMMDD')
 
-    if end is not None:
-        end_date = _normalize_date(end)
-    else:
-        end_date = datetime.now().strftime('%Y-%m-%d')
-
-    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-
     if start is not None:
         start_date = _normalize_date(start)
+        if end is not None:
+            end_date = _normalize_date(end)
+        elif duration_explicit:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_date = (start_dt + timedelta(days=default_days)).strftime('%Y-%m-%d')
+        else:
+            end_date = datetime.now().strftime('%Y-%m-%d')
     else:
+        if end is not None:
+            end_date = _normalize_date(end)
+        else:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         start_date = (end_dt - timedelta(days=default_days)).strftime('%Y-%m-%d')
     return start_date, end_date
 
@@ -942,8 +1120,7 @@ def _command_options_str():
 
 def _format_cmd_params(symbol, symbol_file, hot, start, end, strategy, is_index,
                        capital, output, output_file, threads, mode,
-                       filter_signal=None, chart=False, forecast=0, seqnum=0,
-                       max_hold_days=None):
+                       filter_signal=None, chart=False, forecast=0, seqnum=0):
     """构建命令选项参数摘要字符串，用于在报告中标注本次运行所用的选项"""
     parts = ['analyze']
     if symbol:
@@ -973,8 +1150,6 @@ def _format_cmd_params(symbol, symbol_file, hot, start, end, strategy, is_index,
         parts.append('--forecast')
     if seqnum and int(seqnum) != 0:
         parts.append(f'-sn {seqnum}')
-    if max_hold_days:
-        parts.append(f'--maxholddays {max_hold_days}')
     return ' '.join(parts)
 
 
@@ -1012,83 +1187,6 @@ def _get_signal_text(sig_series):
     return sig_map.get(float(last_sig), str(last_sig))
 
 
-def _get_latest_score(sig_series):
-    """读取信号序列 attrs 中最后一个交易日的综合评分。"""
-    if sig_series is None or len(sig_series) == 0:
-        return None
-    attrs = getattr(sig_series, 'attrs', None) or {}
-    score = attrs.get('score')
-    if score is None:
-        return None
-    try:
-        if hasattr(score, 'iloc'):
-            if len(score) == 0:
-                return None
-            value = score.iloc[-1]
-        else:
-            value = score
-        if pd.isna(value):
-            return None
-        return int(round(float(value)))
-    except Exception:
-        return None
-
-
-def _get_latest_score_detail(sig_series):
-    """读取信号序列 attrs 中最后一个交易日的评分详情。"""
-    if sig_series is None or len(sig_series) == 0:
-        return None
-    attrs = getattr(sig_series, 'attrs', None) or {}
-    detail = attrs.get('score_detail')
-    if detail is None:
-        return None
-    try:
-        if hasattr(detail, 'iloc'):
-            if len(detail) == 0:
-                return None
-            value = detail.iloc[-1]
-        else:
-            value = detail
-        if pd.isna(value):
-            return None
-        return str(value)
-    except Exception:
-        return None
-
-
-def _stock_latest_score_detail(stock_data, strategy_keys):
-    """取股票最新评分详情；评分不区分策略，返回第一个可用值。"""
-    sigs = stock_data.get('all_signals', {})
-    for sk in strategy_keys:
-        detail = _get_latest_score_detail(sigs.get(sk))
-        if detail:
-            return detail
-    return '—'
-
-
-def _stock_latest_score(stock_data, strategy_keys):
-    """取股票最新评分；评分不区分策略，返回第一个可用值。"""
-    sigs = stock_data.get('all_signals', {})
-    for sk in strategy_keys:
-        score = _get_latest_score(sigs.get(sk))
-        if score is not None:
-            return score
-    return None
-
-
-def _score_suffix(sig_series):
-    """返回用于显示的评分后缀，如 ' (+12)'。"""
-    score = _get_latest_score(sig_series)
-    if score is None:
-        return ''
-    return f' ({score:+d})'
-
-
-def _signal_text_with_score(sig_series):
-    """最新买卖信号文本 + 评分后缀。"""
-    return _get_signal_text(sig_series) + _score_suffix(sig_series)
-
-
 def _get_signal_color(sig_text):
     """获取信号对应的颜色"""
     return {'买入': 'green', '买': 'green', '卖出': 'red', '卖': 'red', '观望': 'yellow'}.get(sig_text, 'white')
@@ -1103,18 +1201,17 @@ def _signal_reason(strategy_key, signal, enhance=0):
     """按策略与信号方向给出买卖原因的文字描述（signal: >0 买 / <0 卖）"""
     base = _strat_base(strategy_key)
     buy = signal is not None and signal > 0
-    if base in ('ma1030', 'ema1030'):
-        ma = 'EMA' if base == 'ema1030' else 'MA'
-        return f'{ma}快线上穿慢线（金叉）' if buy else f'{ma}快线下穿慢线（死叉）'
+    if base == 'ma1030':
+        return 'MA快线上穿慢线（金叉）' if buy else 'MA快线下穿慢线（死叉）'
     if base in ('macd', 'macd1'):
         return 'DIF 上穿 DEA（金叉）' if buy else 'DIF 下穿 DEA（死叉）'
     if base == 'boll':
         return '跌破下轨后反弹' if buy else '触及上轨后回落或回撤止损'
     if base == 'kdj':
         return 'K 上穿 D（金叉）' if buy else 'K 下穿 D（死叉）'
-    if base in ('ma310', 'ma520', 'ema520'):
-        pair = {'ma310': 'MA3/MA10', 'ma520': 'MA5/MA20', 'ema520': 'EMA5/EMA20'}[base]
-        return f'{pair} 快线上穿慢线（金叉）且当日上涨' if buy else f'{pair} 快线下穿慢线（死叉）或回撤止损'
+    if base == 'ma520':
+        return ('MA5/MA20 快线上穿慢线（金叉）且当日上涨' if buy
+                else 'MA5/MA20 快线下穿慢线（死叉）或回撤止损')
     if base == 'quality_value':
         return '综合得分 Z 值≥阈值（买）' if buy else '综合得分 Z 值≤阈值（卖）'
     if base == _PREV_TOKEN:
@@ -1169,7 +1266,7 @@ def _build_trades_detail_table(trades_df):
     if trades_df is None or len(trades_df) == 0:
         return headers, rows
     reason_map = {'signal': '信号', 'end': '期末平仓', 'replace': '换股',
-                  'downloss': '大盘下跌止损'}
+                  'downloss': '大盘下跌/震荡止损'}
     for _, t in trades_df.iterrows():
         ed = t.get('entry_date')
         xd = t.get('exit_date')
@@ -1208,27 +1305,6 @@ def _mask_signal_warmup(signals):
     signals = signals.copy()
     n = min(_SIGNAL_WARMUP_DAYS, len(signals))
     signals.iloc[:n] = 0
-    return signals
-
-
-# 所有策略买入信号的附加条件：当日涨幅必须 < 9.9%（涨幅 >= 9.9% 时取消买入）
-_MAX_BUY_DAY_GAIN = 0.099
-
-
-def _filter_buy_on_big_gain(signals, df):
-    """买入信号附加条件：当日涨幅 >= 9.9% 时，取消该日的买入信号（signal>0 → 0）
-
-    卖出/观望信号不受影响；返回新的信号序列（不改动原序列）。
-    """
-    if signals is None or len(signals) == 0 or df is None or len(df) == 0:
-        return signals
-    if 'close' not in df.columns:
-        return signals
-    gain = df['close'].pct_change().reindex(signals.index)
-    mask = (signals > 0) & (gain >= _MAX_BUY_DAY_GAIN)
-    if mask.any():
-        signals = signals.copy()
-        signals[mask] = 0.0
     return signals
 
 
@@ -1322,10 +1398,33 @@ def _send_dingtalk_notify(content):
         return False
 
 
+def _market_trend_notify_line():
+    """构建钉钉消息中的大盘趋势行，如 '沪深300：跌；中证1000：涨'。"""
+    trend = _get_market_trend()
+    if not trend:
+        return ''
+    if isinstance(trend, dict):
+        trend = [trend]
+    state_map = {'上涨': '涨', '下跌': '跌'}
+    parts = []
+    for t in trend:
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get('index_name') or t.get('index_code') or '').strip()
+        if not name:
+            continue
+        state = str(t.get('state') or '未知').strip()
+        parts.append(f'{name}：{state_map.get(state, state)}')
+    if not parts:
+        return ''
+    return '；'.join(parts)
+
+
 def _notify_signals(all_stock_data):
     """对最新信号的股票发送钉钉通知：多条股票消息合成一条消息发出
 
     第一行（title）：key: 1.<策略1> 2.<策略2> 3.<策略3> ...
+    第二行：大盘趋势，如 "沪深300：跌；中证1000：涨"
     后续行（data）：<股票代码><股票名称>: <策略编号><买/卖> ...（仅显示买/卖信号，观望跳过）
     （如 "quant: 1.MACD 2.KDJ 3.均线" / "600089 特变电工: 1买 3卖"）
     """
@@ -1353,7 +1452,13 @@ def _notify_signals(all_stock_data):
                 names[sk] = smap[sk]
 
     lines = [f'{key}: ' + ' '.join(f'{i}.{names.get(sk, sk)}' for i, sk in enumerate(strategy_keys, 1))]
-    detail_lines = []
+    score_lines = []
+    watch_candidates = []
+
+    def _label(d):
+        symbol = str(d.get('symbol') or '')
+        name = str(d.get('stock_name') or '').strip()
+        return symbol if not name or name == symbol else f'{symbol} {name}'
 
     for d in all_stock_data:
         symbol = d.get('symbol')
@@ -1361,32 +1466,49 @@ def _notify_signals(all_stock_data):
             continue
         sigs = d.get('all_signals', {})
         sig_cells = []
+        latest_values = []
         for i, sk in enumerate(strategy_keys, 1):
             sig = sigs.get(sk)
             if sig is None or len(sig) == 0:
                 continue
-            last = float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
+            try:
+                last = float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
+            except Exception:
+                continue
             if pd.isna(last):
                 continue
-            text = sig_text_map.get(float(last))
-            if text is None:
-                continue
-            sig_cells.append(f'{i}{text}')
+            latest_values.append(last)
+            text = sig_text_map.get(last)
+            if text is not None:
+                sig_cells.append(f'{i}{text}')
+
+        total = d.get('signal_score_total')
+        if total is not None and latest_values and all(v == 0 for v in latest_values):
+            watch_candidates.append((int(total), d))
+
         if not sig_cells:
             continue
-        name = str(d.get('stock_name') or '').strip()
-        label = symbol if not name or name == symbol else f'{symbol} {name}'
+        label = _label(d)
         lines.append(f'{label}: ' + ' '.join(sig_cells))
-        detail = str(d.get('score_detail') or '').strip()
-        if detail:
-            detail_lines.append(f'{symbol}: {detail}')
+        score_text = str(d.get('signal_score') or '').strip()
+        if score_text:
+            score_lines.append(f'{symbol}: {score_text}')
 
-    if detail_lines:
-        lines.append('评分详情:')
-        lines.extend(detail_lines)
+    if score_lines:
+        lines.append('综合打分:')
+        lines.extend(score_lines)
+    if watch_candidates:
+        hi = max(watch_candidates, key=lambda x: x[0])
+        lo = min(watch_candidates, key=lambda x: x[0])
+        lines.append('观望综合打分最高: ' + _label(hi[1]) + ' ' + str(hi[1].get('signal_score') or ''))
+        if lo[1] is not hi[1]:
+            lines.append('观望综合打分最低: ' + _label(lo[1]) + ' ' + str(lo[1].get('signal_score') or ''))
 
     if len(lines) <= 1:
         return
+    trend_line = _market_trend_notify_line()
+    if trend_line:
+        lines.insert(1, trend_line)
     _send_dingtalk_notify('\n'.join(lines))
 
 
@@ -1427,13 +1549,16 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
                           strategy_map, strategies_to_run, all_results, all_risks, all_charts,
                           all_signals=None, latest_close=None, latest_date=None,
                           trading_days=None, report_filename=None, cmd_params='',
-                          strategy=None, mode=0, market_trend=None):
+                          strategy=None, mode=0, market_trend=None,
+                          signal_reasons=None):
     """生成 HTML 分析报告"""
     import base64
     from datetime import datetime as dt
 
     if all_signals is None:
         all_signals = {}
+    if signal_reasons is None:
+        signal_reasons = {}
 
     def _safe_pct_html(v):
         if v is None:
@@ -1459,7 +1584,7 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
     for sk in strategies_to_run:
         r = all_risks.get(sk, {})
         sig_text = _get_signal_text(all_signals.get(sk))
-        sig_display = _signal_text_with_score(all_signals.get(sk))
+        sig_display = _get_signal_text(all_signals.get(sk))
         rankings.append((
             _strat_label(sk, strategy_map),
             r.get('total_return'),
@@ -1471,11 +1596,12 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
             r.get('profit_factor'),
             sig_text,
             sig_display,
+            (signal_reasons.get(sk, '') if sig_text in ('买入', '卖出') else ''),
         ))
     rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
     rank_rows_html = ''
-    for i, (name, tr, sh, dd, nt, ar, wr, pf, sig, sig_display) in enumerate(rankings, 1):
+    for i, (name, tr, sh, dd, nt, ar, wr, pf, sig, sig_display, reason) in enumerate(rankings, 1):
         rank_rows_html += f'''<tr>
             <td>{i}</td><td>{name}</td>
             <td>{_safe_pct_html(tr)}</td><td>{_safe_float_html(sh)}</td>
@@ -1483,6 +1609,7 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
             <td>{_safe_pct_html(ar)}</td><td>{_safe_pct_html(wr)}</td>
             <td>{_safe_float_html(pf)}</td>
             <td style="font-weight:bold;color:{'#27ae60' if sig == '买入' else '#e74c3c' if sig == '卖出' else '#f39c12'}">{sig_display}</td>
+            <td>{reason}</td>
         </tr>'''
 
     # 各策略详情
@@ -1499,9 +1626,13 @@ def _generate_html_report(symbol, sname, start_date, end_date, capital, is_index
 
         # 最新信号
         sig_text = _get_signal_text(all_signals.get(sk))
-        sig_display = _signal_text_with_score(all_signals.get(sk))
+        sig_display = _get_signal_text(all_signals.get(sk))
         sig_color_html = {'买入': '#27ae60', '卖出': '#e74c3c', '观望': '#f39c12'}.get(sig_text, '#2c3e50')
         detail_html += f'<div class="signal" style="color:{sig_color_html};font-weight:bold;font-size:16px;margin:10px 0;">最新信号: {sig_display}</div>'
+        if sig_text in ('买入', '卖出'):
+            reason = signal_reasons.get(sk, '')
+            if reason:
+                detail_html += f'<div class="signal-reason" style="color:#666;margin:-4px 0 10px 0;">原因: {reason}</div>'
 
         detail_html += '<table class="detail"><tr><th>指标</th><th>数值</th></tr>'
         for label, func in [
@@ -1568,7 +1699,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 
 <h2>策略对比排名</h2>
 <table class="rank">
-<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th></tr>
+<tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>年化收益率</th><th>胜率</th><th>盈利因子</th><th>最新信号</th><th>信号原因</th></tr>
 {rank_rows_html}
 </table>
 
@@ -1779,7 +1910,7 @@ def _generate_backtest_html(symbol_label, start_date, end_date, capital, tables,
         return 'N/A' if v is None else f'{v:g}'
 
     _remark = (
-        f'MaxDrawdown:{_fmt_th(get_threshold("MAX_DRAWDWON_THRESHOLD"))}%; '
+        f'ATRStop:2*ATR14; '
         f'Max/MinRSI:{_fmt_th(get_threshold("MAX_RSI_THRESHOLD"))}/'
         f'{_fmt_th(get_threshold("MIN_RSI_THRESHOLD"))}; '
         f'MaxPE:{_fmt_th(get_threshold("PE_THRESHOLD"))}; '
@@ -1840,10 +1971,12 @@ tr:nth-child(even) {{ background: #f5f6fa; }}
     return report_path
 
 
-def _build_signal_table(all_stock_data, include_all=False, sort_by_signal=False):
+def _build_signal_table(all_stock_data, include_all=False, sort_by_signal=False,
+                        preferred_key=None, include_forecast=True,
+                        include_signal_score=False):
     """构建最新信号表数据，返回 (strategy_keys, strategy_names, rows, excluded)
 
-    rows 每行为 [股票标签, 最新价格, 各策略最新信号文本(买/卖/-/N/A)..., 评分, 评分详情]
+    rows 每行为 [股票标签, 最新价格, 各策略最新信号文本(买/卖/-/N/A)...]（include_signal_score 时末尾附加综合打分）
     include_all=False 时仅列示至少有一项策略信号不是"观望"（买/卖）的股票，
     include_all=True 时列出所有股票（不隐藏全部观望的股票）。
     excluded 为被过滤掉的股票数。
@@ -1885,27 +2018,40 @@ def _build_signal_table(all_stock_data, include_all=False, sort_by_signal=False)
                 return '/'.join(parts)
         return '-'
 
+    data = list(all_stock_data)
+    if preferred_key:
+        data.sort(key=lambda d: 0 if (
+            (d.get('all_signals') or {}).get(preferred_key) or 0) > 0 else 1)
+
     rows = []
+    watch_rows = []
     excluded = 0
-    for d in all_stock_data:
+    for d in data:
         s = d['symbol']
         sn = d['stock_name']
         label = f'{s} {sn}'.strip()
         lc = d.get('latest_close')
         price_str = f'{lc:.2f}' if lc is not None else 'N/A'
         sigs = d.get('all_signals', {})
-        fcs = d.get('forecast_thresholds', {})
+        fcs = (d.get('forecast_thresholds', {}) if include_forecast else {})
         cells = [_signal_text(sigs.get(sk), fcs.get(sk)) for sk in strategy_keys]
-        if not any(c in ('买', '卖') for c in cells):
+        is_watch = not any(c in ('买', '卖') for c in cells)
+        row = [label, price_str] + cells
+        if include_signal_score:
+            row.append(d.get('signal_score') or '—')
+        if is_watch:
             excluded += 1
+            total = d.get('signal_score_total')
+            if include_signal_score and total is not None:
+                watch_rows.append((int(total), row))
             if not include_all:
                 continue
-        score = _stock_latest_score(d, strategy_keys)
-        score_str = f'{score:+d}' if score is not None else 'N/A'
-        detail_str = _stock_latest_score_detail(d, strategy_keys)
-        rows.append([label, price_str] + cells + [score_str, detail_str])
+        rows.append(row)
 
     if sort_by_signal:
+        pref_pos = (strategy_keys.index(preferred_key)
+                    if preferred_key in strategy_keys else None)
+
         def _sort_key(row):
             cells = row[2:2 + len(strategy_keys)]
             buy = sum(1 for c in cells if c == '买')
@@ -1916,25 +2062,52 @@ def _build_signal_table(all_stock_data, include_all=False, sort_by_signal=False)
                 group = 1  # 卖出信号 → 排中间
             else:
                 group = 2  # 全部观望 → 排后面
-            return (group, -buy, -sell)
+            pref_group = 0
+            if pref_pos is not None:
+                pref_group = 0 if cells[pref_pos] == '买' else 1
+            return (pref_group, group, -buy, -sell)
 
         rows.sort(key=_sort_key)
+
+    if include_signal_score and not include_all and watch_rows:
+        ordered = sorted(watch_rows, key=lambda x: x[0], reverse=True)
+        top = ordered[:3]
+        bottom = ordered[-3:]
+        picked = []
+        seen = set()
+        for item in top + bottom:
+            key = id(item[1])
+            if key not in seen:
+                seen.add(key)
+                picked.append(item)
+        for _, row in picked:
+            rows.append(row)
+        excluded = max(0, excluded - len(picked))
 
     return strategy_keys, strategy_names, rows, excluded
 
 
-def _print_signal_table(all_stock_data, include_all=False):
+def _print_signal_table(all_stock_data, include_all=False,
+                        include_signal_score=False):
     """在屏幕打印最新信号表；include_all=True 时保留全部观望的股票。"""
     strategy_keys, strategy_names, rows, excluded = _build_signal_table(
-        all_stock_data, include_all=include_all)
-    headers = ['股票代码名称', '最新价格'] + [strategy_names.get(sk, sk) for sk in strategy_keys] + ['评分', '评分详情']
+        all_stock_data, include_all=include_all,
+        preferred_key=_preferred_strategy_key(),
+        include_signal_score=include_signal_score)
+    headers = ['股票代码名称', '最新价格'] + [strategy_names.get(sk, sk) for sk in strategy_keys]
+    if include_signal_score:
+        headers.append('综合打分')
     _print_section('最新信号表')
     _print_table(headers, rows, disable_numparse=True)
+    if include_signal_score:
+        click.echo(click.style(
+            '  备注: 综合打分排位：DMI|MACD|OBV|BIAS| RSI|BOLL|WR|ATR| KDJ|SAR',
+            fg='yellow'))
     if excluded and not include_all:
         click.echo(click.style(f'  备注: 未列示股票 {excluded} 只，其全部策略信号均为"观望"。', fg='yellow'))
 
 
-def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, report_filename=None, end_date=None, start_date=None, cmd_params='', source=None, mode=0, include_all_watch=False, market_trend=None):
+def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, report_filename=None, end_date=None, start_date=None, cmd_params='', source=None, mode=0, include_all_watch=False, market_trend=None, include_signal_score=False):
     """生成多股票汇总 HTML 报告"""
     import base64
     from datetime import datetime as dt
@@ -1977,7 +2150,10 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
             return base64.b64encode(f.read()).decode()
 
     # 最新信号表：每行一只股票，每列一个策略，单元格为该股票该策略的最新信号
-    strategy_keys, strategy_names, signal_table_rows, excluded = _build_signal_table(report_data, include_all=True, sort_by_signal=True)
+    strategy_keys, strategy_names, signal_table_rows, excluded = _build_signal_table(
+        report_data, include_all=True, sort_by_signal=True,
+        preferred_key=_preferred_strategy_key(), include_forecast=False,
+        include_signal_score=include_signal_score)
     excluded = 0  # 全部观望的股票已在 report_data 中剔除，不再显示隐藏备注
 
     def _signal_cell(text):
@@ -1997,17 +2173,20 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
         label = row[0]
         price = row[1]
         cells = row[2:2 + n_strat]
-        score = row[-2]
-        detail = row[-1]
+        sig_score = row[-1] if include_signal_score else None
         signal_rows += f'<tr><td>{label}</td><td>{price}</td>'
         for cell in cells:
             signal_rows += _signal_cell(cell)
-        signal_rows += f'<td>{score}</td><td>{detail}</td></tr>'
+        if include_signal_score:
+            signal_rows += f'<td>{sig_score}</td>'
+        signal_rows += '</tr>'
 
     signal_table_html = '<table><tr><th>股票代码名称</th><th>最新价格</th>'
     for sk in strategy_keys:
         signal_table_html += f'<th>{strategy_names.get(sk, sk)}</th>'
-    signal_table_html += '<th>评分</th><th>评分详情</th></tr>' + signal_rows + '</table>'
+    if include_signal_score:
+        signal_table_html += '<th>综合打分</th>'
+    signal_table_html += '</tr>' + signal_rows + '</table>'
     signal_remark_html = f'<p style="color:#f39c12;font-size:12px;">备注: 未列示股票 {excluded} 只，其全部策略信号均为"观望"。</p>' if excluded else ''
 
     # 各股票详情
@@ -2026,42 +2205,35 @@ def _generate_multi_html_report(all_stock_data, strategy, is_index, capital, rep
         charts = d.get('all_charts', {})
 
         detail_sections += f'<h2>{label} <small style="color:#666;font-weight:normal">{price_str} {date_str}</small></h2>'
+        if include_signal_score and d.get('signal_score'):
+            detail_sections += f'<div style="color:#666;margin:4px 0 10px 0;">综合打分: {d.get("signal_score")}</div>'
 
         # 排名表
         rankings = []
-        fcs = d.get('forecast_thresholds', {})
+        reasons = d.get('signal_reasons', {})
         for sk in d['strategies_to_run']:
             r = risks.get(sk, {})
-            th = fcs.get(sk)
-            fc_str = ''
-            if th:
-                parts = []
-                if th.get('buy') is not None:
-                    parts.append(f'买≥{th["buy"]:.0f}%')
-                if th.get('sell') is not None:
-                    parts.append(f'卖≤{th["sell"]:.0f}%')
-                if parts:
-                    fc_str = ' / '.join(parts)
+            sg = _get_signal_text(sigs.get(sk))
             rankings.append((
                 smap[sk], r.get('total_return'), r.get('sharpe_ratio'),
                 r.get('max_drawdown'), r.get('total_trades'),
+                sg,
                 _get_signal_text(sigs.get(sk)),
-                _signal_text_with_score(sigs.get(sk)),
-                fc_str,
+                (reasons.get(sk, '') if sg in ('买入', '卖出') else ''),
             ))
         rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
 
         rank_rows = ''
-        for i, (name, tr, sh, dd, nt, sg, sg_display, fc) in enumerate(rankings, 1):
+        for i, (name, tr, sh, dd, nt, sg, sg_display, reason) in enumerate(rankings, 1):
             rank_rows += f'''<tr>
                 <td>{i}</td><td>{name}</td>
                 <td>{_safe_pct(tr)}</td><td>{_safe_float(sh)}</td>
                 <td>{_safe_pct(dd)}</td><td>{nt if nt is not None else 'N/A'}</td>
                 <td style="font-weight:bold;color:{'#27ae60' if sg == '买入' else '#e74c3c' if sg == '卖出' else '#f39c12'}">{sg_display}</td>
-                <td>{fc}</td>
+                <td>{reason}</td>
             </tr>'''
         detail_sections += f'''<table>
-            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th><th>次日触发价位</th></tr>
+            <tr><th>排名</th><th>策略</th><th>总收益率</th><th>夏普比率</th><th>最大回撤</th><th>交易次数</th><th>最新信号</th><th>信号原因</th></tr>
             {rank_rows}
         </table>'''
 
@@ -2200,33 +2372,96 @@ def cli():
                 '  警告: 数据库连接失败，本次运行将仅从网络获取数据', fg='yellow'))
 
 
-def _resolve_symbol(input_str):
+def _exchange_from_token(token):
+    """从代码文本中提取交易所（SH/SZ/BJ），无则返回 ''。"""
+    raw = str(token or '').strip().upper()
+    if '.' in raw:
+        left, right = raw.split('.', 1)
+        if right in ('SH', 'SZ', 'BJ'):
+            return right
+        if left in ('SH', 'SZ', 'BJ'):
+            return left
+    if len(raw) > 2 and raw[:2] in ('SH', 'SZ', 'BJ') and raw[2:].isdigit():
+        return raw[:2]
+    return ''
+
+
+def _sina_realtime_code(code, exchange=''):
+    """按交易所（或代码前缀）生成新浪实时行情代码，如 sz000159 / sh600036。"""
+    ex = str(exchange or '').strip().upper()
+    if ex not in ('SH', 'SZ', 'BJ'):
+        if code.startswith(('6', '9')):
+            ex = 'SH'
+        elif code.startswith(('0', '3', '2', '15', '16', '18')):
+            ex = 'SZ'
+        elif code.startswith(('4', '8')):
+            ex = 'BJ'
+        else:
+            ex = 'SH'
+    return f'{ex.lower()}{code}'
+
+
+def _resolve_symbol(input_str, exchange=None):
     """将股票代码或名称解析为 (纯数字代码, 股票名称)
 
+    纯代码优先用实时行情（按交易所/代码前缀）取名称，避免搜索接口把同号指数
+    （如 000159 沪股通）当作股票返回。
+
     Args:
-        input_str: 股票代码或名称（如 '000725'、'京东方A'）
+        input_str: 股票代码或名称（如 '000159.SZ'、'京东方A'）
+        exchange: 可选交易所（SH/SZ/BJ），传入时优先使用
 
     Returns:
         (code, name) 或 (None, None)
     """
     import re as _re
 
-    input_str = input_str.strip()
-    for prefix in ('sh', 'sz', 'SH', 'SZ'):
-        if input_str.startswith(prefix):
-            input_str = input_str[len(prefix):]
-            break
+    raw = str(input_str or '').strip()
+    code = _parse_code_token(raw)
 
-    # 通过 Sina 搜索 API 解析
+    if code:
+        ex = (exchange or _exchange_from_token(raw) or '').upper()
+        if ex not in ('SH', 'SZ', 'BJ'):
+            ex = ''
+        # 1) 实时行情：交易所已知则用该交易所，否则按代码前缀推断
+        try:
+            sina_code = _sina_realtime_code(code, ex)
+            rt_url = f'https://hq.sinajs.cn/list={sina_code}'
+            rt_headers = {'User-Agent': 'Mozilla/5.0',
+                          'Referer': 'https://finance.sina.com.cn/'}
+            rt_resp = requests.get(rt_url, timeout=10, headers=rt_headers)
+            rt_match = _re.search(r'"([^"]*)"', rt_resp.text)
+            if rt_match:
+                rt_parts = rt_match.group(1).split(',')
+                if rt_parts and rt_parts[0]:
+                    return code, rt_parts[0]
+        except Exception:
+            pass
+        # 2) 回退：Sina 搜索接口
+        try:
+            url = f'https://suggest3.sinajs.cn/suggest/type=11&key={code}'
+            headers = {'User-Agent': 'Mozilla/5.0',
+                       'Referer': 'https://finance.sina.com.cn/'}
+            resp = requests.get(url, timeout=10, headers=headers)
+            match = _re.search(r'"([^"]*)"', resp.text)
+            if match:
+                for item in match.group(1).split(';'):
+                    fields = item.split(',')
+                    if len(fields) >= 4 and fields[2].isdigit():
+                        name = fields[4] if len(fields) > 4 and fields[4] else fields[0]
+                        return code, name
+        except Exception:
+            pass
+        return code, ''
+
+    # 名称输入：Sina 搜索接口
     try:
-        url = f'https://suggest3.sinajs.cn/suggest/type=11&key={input_str}'
+        url = f'https://suggest3.sinajs.cn/suggest/type=11&key={raw}'
         headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn/'}
         resp = requests.get(url, timeout=10, headers=headers)
-        text = resp.text
-        match = _re.search(r'"([^"]*)"', text)
+        match = _re.search(r'"([^"]*)"', resp.text)
         if match:
-            items = match.group(1).split(';')
-            for item in items:
+            for item in match.group(1).split(';'):
                 fields = item.split(',')
                 if len(fields) >= 4 and fields[2].isdigit():
                     code = fields[2]
@@ -2235,47 +2470,17 @@ def _resolve_symbol(input_str):
     except Exception:
         pass
 
-    # 如果是纯数字，尝试通过 Sina 实时行情获取名称（含 ETF/LOF/基金）
-    if input_str.isdigit():
-        try:
-            symbol = input_str
-            if symbol.startswith('6') or symbol.startswith('9'):
-                sina_code = f'sh{symbol}'
-            elif symbol.startswith(('0', '3', '2')):
-                sina_code = f'sz{symbol}'
-            elif symbol.startswith('15'):
-                sina_code = f'sz{symbol}'
-            else:
-                sina_code = f'sh{symbol}'
-
-            rt_url = f'https://hq.sinajs.cn/list={sina_code}'
-            rt_headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn/'}
-            rt_resp = requests.get(rt_url, timeout=10, headers=rt_headers)
-            rt_text = rt_resp.text
-            rt_match = _re.search(r'"([^"]*)"', rt_text)
-            if rt_match:
-                rt_parts = rt_match.group(1).split(',')
-                if len(rt_parts) >= 1 and rt_parts[0]:
-                    return symbol, rt_parts[0]
-        except Exception:
-            pass
-        return input_str, ''
-
     # 备选：akshare 全量股票列表
     try:
         import akshare as ak
         df = ak.stock_zh_a_spot_em()
-        matches = df[df['名称'].str.contains(input_str, na=False)]
+        matches = df[df['名称'].str.contains(raw, na=False)]
         if matches.empty:
             return None, None
-        exact = matches[matches['名称'] == input_str]
+        exact = matches[matches['名称'] == raw]
         if not exact.empty:
-            code = str(exact.iloc[0]['代码'])
-            name = str(exact.iloc[0]['名称'])
-            return code, name
-        code = str(matches.iloc[0]['代码'])
-        name = str(matches.iloc[0]['名称'])
-        return code, name
+            return str(exact.iloc[0]['代码']), str(exact.iloc[0]['名称'])
+        return str(matches.iloc[0]['代码']), str(matches.iloc[0]['名称'])
     except Exception:
         return None, None
 
@@ -2340,13 +2545,86 @@ def _build_strategy_instance(base_key, strategy_map, enhance=0):
     """构建策略实例（enhance 仅为兼容旧调用，已忽略）。"""
     base, _ = _parse_strategy_spec(str(base_key))
     strategy_name, strategy_class = strategy_map[base]
-    return strategy_class()
+    strategy = strategy_class()
+    if hasattr(strategy, 'use_atr_stop'):
+        strategy.use_atr_stop = _ATR_STOP_ENABLED
+        strategy.atr_stop_multiplier = _ATR_STOP_MULTIPLIER
+    return strategy
+
+
+def _parse_code_token(token):
+    """从代码文本中提取 6 位股票代码；非代码返回 None。
+
+    支持 600036 / sh600036 / SH600036 / 600036.SH / SH.600036 等写法。
+    """
+    raw = str(token or '').strip().upper()
+    if not raw:
+        return None
+    if '.' in raw:
+        left, right = raw.split('.', 1)
+        if right in ('SH', 'SZ', 'BJ') and left.isdigit():
+            return left.zfill(6)
+        if left in ('SH', 'SZ', 'BJ') and right.isdigit():
+            return right.zfill(6)
+    if len(raw) > 2 and raw[:2] in ('SH', 'SZ', 'BJ') and raw[2:].isdigit():
+        return raw[2:].zfill(6)
+    if raw.isdigit() and len(raw) <= 6:
+        return raw.zfill(6)
+    return None
+
+
+def _normalize_symbol_tokens(tokens):
+    """将代码 token 规范为 6 位代码；名称等非代码 token 原样保留。"""
+    out = []
+    for t in tokens:
+        t = t.strip()
+        if not t:
+            continue
+        code = _parse_code_token(t)
+        out.append(code if code else t)
+    return out
+
+
+def _read_symbol_names(path):
+    """从股票池文件解析 代码 -> 名称（每行形如 '000333 美的集团'）；无名称的代码不返回。"""
+    names = {}
+    if not os.path.isfile(path):
+        candidates = []
+        if not os.path.isabs(path):
+            candidates.append(os.path.join('input', path))
+            candidates.append(os.path.join('input', os.path.basename(path)))
+        found = next((p for p in candidates if os.path.isfile(p)), None)
+        if not found:
+            return names
+        path = found
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                code = None
+                name_parts = []
+                for tok in re.split(r'[,\s]+', line):
+                    if not tok:
+                        continue
+                    c = _parse_code_token(tok)
+                    if c and code is None:
+                        code = c
+                    elif c is None:
+                        name_parts.append(tok)
+                nm = ''.join(name_parts).strip()
+                if code and nm:
+                    names[code] = nm
+    except Exception:
+        pass
+    return names
 
 
 def _read_symbols_file(path):
     """从文件读取股票代码列表（空格/逗号/换行分隔）
 
-    仅保留有效股票代码（6 位数字，可带 sh/sz/bj 前缀），忽略股票名称等其它内容。
+    仅保留有效股票代码（6 位数字，可带 sh/sz/bj 前缀或 .SH/.SZ/.BJ 后缀），忽略股票名称等其它内容。
     若 path 不存在，则尝试在 input/ 目录下查找同名文件。
     """
     if not os.path.isfile(path):
@@ -2357,7 +2635,6 @@ def _read_symbols_file(path):
         candidates = list(dict.fromkeys(candidates))
         found = next((p for p in candidates if os.path.isfile(p)), None)
         if found:
-            click.echo(click.style(f'  提示: 未找到 {path}，改用 {found}', fg='yellow'))
             path = found
         else:
             searched = ', '.join([path] + candidates)
@@ -2369,16 +2646,11 @@ def _read_symbols_file(path):
         symbols = []
         seen = set()
         for token in re.split(r'[,\s]+', text):
-            token = token.strip()
-            if not token:
+            code = _parse_code_token(token)
+            if not code or code in seen:
                 continue
-            m = re.fullmatch(r'(?i)(?:sh|sz|bj)?(\d{6})', token)
-            if not m:
-                continue
-            code = m.group(1)
-            if code not in seen:
-                seen.add(code)
-                symbols.append(code)
+            seen.add(code)
+            symbols.append(code)
         return symbols
     except Exception as e:
         click.echo(click.style(f'  错误: 无法读取 {path}: {e}', fg='red'))
@@ -2562,33 +2834,70 @@ def _seqnum_option(f):
         help='买入信号序号（仅 BOLL 生效）：仅保留自上次卖出后第N次买入信号（0=不过滤，默认0；1=首次）；其它策略忽略该选项')(f)
 
 
-def _maxhold_option(f):
-    """通用 --maxholddays 选项：最大持股天数"""
+def _trendctl_option(f):
+    """大盘趋势控制：--trendctl [N]，N 默认 1。0=不控制；1=下跌或过冷禁止买入。"""
     return click.option(
-        '--maxholddays', 'max_hold_days', default=None,
-        type=click.IntRange(1, 100000),
-        help='最大持股天数：持有超过N个交易日、收盘价低于BOLL中线且持仓回撤>10%时卖出（默认不限制）')(f)
+        '--trendctl', default=1, type=click.IntRange(0, 1),
+        is_flag=False, flag_value=1, show_default=True,
+        help='大盘趋势控制：0=不控制；1=大盘趋势为下跌或过冷时所有策略禁止买入（默认1）')(f)
 
 
-def _nodownbuy_option(f):
-    """通用 --nodownbuy 选项：大盘下跌或过热时禁止买入"""
+def _parse_boma_criteria(value):
+    if value is None:
+        return None
+    tokens = set()
+    for token in re.split(r'[,\s]+', str(value).strip().lower()):
+        if not token:
+            continue
+        if not re.fullmatch(r'[bs][1-3]', token):
+            raise click.BadParameter(
+                f'无效条件 "{token}"，可用 b1,b2,b3,s1,s2,s3')
+        tokens.add(token)
+    if not tokens:
+        raise click.BadParameter('--critera 不能为空')
+    return tokens
+
+
+def _set_boma_criteria(value):
+    set_active_criteria(_parse_boma_criteria(value))
+
+
+def _critera_option(f):
+    """BOMA 生效条件：b1,b2,b3,s1,s2,s3。"""
     return click.option(
-        '--nodownbuy', '--block-buy-on-downtrend', 'block_buy_on_downtrend',
-        is_flag=True, default=False,
-        help='大盘趋势为“下跌”或“过热”时禁止买入（适用于 analyze/scan/backtest/compare）')(f)
+        '--critera', '--criteria', 'boma_criteria', default=None,
+        help='BOMA 生效条件，如 b1,s2；缺省全部生效')(f)
+
+
+def _withdrawsell_option(f):
+    """ATR 动态止损开关与倍数。"""
+    return click.option(
+        '--withdrawsell', 'atr_stop_ratio',
+        type=float, default=None, is_flag=False, flag_value=2.0,
+        help='启用ATR动态止损，stop=max(前一日stop, close-ratio*ATR14)；缺省ratio=2，不指定则不执行回撤止损')(f)
+
+
+def _limit_option(f):
+    """限制买入：ST/近一年价格翻倍/PE 翻倍或为负/总市值过低。"""
+    return click.option(
+        '--limit', is_flag=True, default=False,
+        help='限制买入：ST、当前价超一年前 LIMIT_PRICE 倍、当前PE为负或超一年前 LIMIT_PE 倍、'
+             '总市值低于 LIMIT_CAPITAL 亿元（阈值见 squant.toml [tool.stock-quant.limit]）')(f)
 
 
 @cli.command('analyze')
 @_src_option
 @_seqnum_option
-@_maxhold_option
-@_nodownbuy_option
+@_trendctl_option
+@_withdrawsell_option
+@_critera_option
+@_limit_option
 @click.option('--symbol', '-s', default=None, help='股票代码或名称，可多个，以空格/逗号分隔（如 "000725 京东方A 000021" 或 "000021,002594"）')
 @click.option('--symbol-file', '-sf', default=None, help='从指定文件读取股票代码（空格/逗号/换行分隔），仅处理有效 6 位代码并忽略名称，与 -s 同时使用时合并')
 @click.option('--hot', '-h', default=None, type=int, help='获取热门股票数量（按HotScore热度分排序，存在时忽略 -s 和 -sf）')
 @click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期（默认今天），格式: YYYYMMDD')
-@click.option('--strategy', '-g', default='boll,macd',     help='策略选择 [ma1030|ema1030|macd|macd1|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔（默认boll,macd）')
+@click.option('--strategy', '-g', default='boll,macd',     help='策略选择 [ma1030|macd|macd1|boll|boma|kdj|sar|ma520|quality_value|hold|all]，多个用逗号分隔（默认boll,macd）')
 @click.option('--index', '-i', 'is_index', is_flag=True, default=False, help='使用指数专属策略模式（动量分层/波动率择时/涨跌比确认）')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
@@ -2597,10 +2906,11 @@ def _nodownbuy_option(f):
 @click.option('--mode', '-m', default=0, type=int, help='分析模式 [0=常规(默认)|1=资金利用最大化轮动选股|2=多持仓资金利用最大化|3=多持仓强化(买卖信号与选股优化)|4=多持仓强化(趋势择股卖出)]')
 @click.option('--filter', '-f', 'filter_signal', default=None, type=click.Choice(['b', 's', 'w']), help='信号过滤，仅输出符合指定信号的股票报告 [b=买入|s=卖出|w=观望]')
 @click.option('--chart', is_flag=True, default=False, help='生成所有股票的K线图等图形并嵌入报告（默认仅生成至少有一个策略信号非观望的股票的图表）')
+@click.option('--verbose', is_flag=True, default=False, help='输出每日信号综合打分（10指标）')
 @click.option('--forecast', is_flag=True, default=False, help='预测次日触发买卖信号的收盘价阈值（不指定则不预测）')
-@click.option('--notify', is_flag=True, default=False, help='对最新信号非观望的股票通过钉钉机器人发送通知（读取 squant.toml 的 WEBHOOK 配置）')
+@click.option('--notify', is_flag=True, default=False, help='对最新信号非观望的股票通过钉钉机器人发送通知（含综合打分及观望极值；读取 squant.toml 的 WEBHOOK 配置）')
 @click.option('--plan-time', default=None, help='定时执行：到指定时间(hhmm，如 0900=09:00)才开始运行，当日已过则顺延到次日')
-def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file, threads, mode, filter_signal, chart, forecast, notify, plan_time, src, seqnum, max_hold_days, block_buy_on_downtrend):
+def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capital, output, output_file, threads, mode, filter_signal, chart, forecast, notify, plan_time, src, seqnum, trendctl, atr_stop_ratio, boma_criteria, verbose, limit):
     """量化分析：重点输出结束日当天的买卖信号
 
     流程：获取数据 -> 计算指标 -> 运行策略 -> 回测 -> 风险分析 -> 生成图表 -> 打印报告
@@ -2617,15 +2927,16 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
 
     set_primary_source(src)
     _set_seqnum(seqnum)
-    _set_max_hold_days(max_hold_days)
-    _set_block_buy_on_downtrend(block_buy_on_downtrend)
+    _set_trendctl(trendctl)
+    _set_withdrawsell(atr_stop_ratio)
+    _set_boma_criteria(boma_criteria)
+    _set_limit(limit)
     capital = capital * 10000  # -c 单位为万元，内部换算为元
 
     # 命令选项参数摘要（用于在报告中标注）
     cmd_params = _format_cmd_params(symbol, symbol_file, hot, start, end, strategy,
                                     is_index, capital, output, output_file, threads, mode,
-                                    filter_signal, chart, forecast, seqnum,
-                                    max_hold_days=max_hold_days)
+                                    filter_signal, chart, forecast, seqnum)
 
     # 确定要分析的股票列表
     symbols = []
@@ -2645,7 +2956,7 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
         sources.append(f'-h 热门股 ({len(symbols)}只, 按热度分排序)')
     else:
         if symbol:
-            symbol_list = [s.strip() for s in re.split(r'[,\s，]+', symbol) if s.strip()]
+            symbol_list = _normalize_symbol_tokens(re.split(r'[,\s，]+', symbol))
             has_wildcard = any(any(ch in s for ch in '*?') for s in symbol_list)
             if has_wildcard:
                 # 展开通配符（如 60* 表示所有 60 开头的股票）
@@ -2700,6 +3011,7 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
             seen.add(s)
             deduped.append(s)
     symbols = deduped
+    _ensure_symbol_cap_map(symbols)
 
     click.echo(click.style(f'\n  股票来源: {", ".join(sources)} → 共 {len(symbols)} 只（已去重）', fg='blue'))
 
@@ -2717,10 +3029,15 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
 
     # 解析日期：缺少 -st 默认180天前，缺少 -e 默认今天
     start_date_str, end_date_str = _parse_dates(start, end)
+    _preload_trend_states(start_date_str, end_date_str)
+    _market_dates = preload_market_trade_dates(
+        _warmup_fetch_start(start_date_str), end_date_str) or None
+    set_market_trade_dates_override(_market_dates)
 
-    market_trend = analyze_market_trend(end_date_str)
-    _set_market_trend(market_trend)
-    _print_market_trend(market_trend)
+    market_trends = [analyze_market_trend(end_date_str, _HS300_INDEX_CODE),
+                     analyze_market_trend(end_date_str, _ZZ1000_INDEX_CODE)]
+    _set_market_trend(market_trends)
+    _print_market_trend(market_trends)
 
     # 模式 1：资金利用最大化轮动选股；模式 2：多持仓资金利用最大化；模式 3/4：多持仓强化
     if mode == 1:
@@ -2745,7 +3062,9 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
         n_workers = min(threads, len(symbols))
         click.echo(click.style(f'\n  使用 {n_workers} 个进程并行分析...', fg='blue'))
 
-        tasks = [(s, start_date_str, end_date_str, strategy, is_index, capital, output, output_file, True, cmd_params, mode, filter_signal, chart, forecast) for s in symbols]
+        tasks = [(s, start_date_str, end_date_str, strategy, is_index, capital, output,
+                  output_file, True, cmd_params, mode, filter_signal, chart,
+                  forecast, _market_dates, verbose or notify) for s in symbols]
         # 单只股票独立计时，超时只回收对应进程，不影响其它 worker
         all_stock_data = _run_analyze_tasks(tasks, symbols, n_workers, per_stock_timeout=180)
     else:
@@ -2754,7 +3073,8 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
                 click.echo(click.style(f'\n  ── [{idx+1}/{len(symbols)}] ──', fg='cyan', bold=True))
             data = _analyze_single(raw_symbol, start_date_str, end_date_str, strategy, is_index, capital, output, output_file,
                                    batch_mode=len(symbols) > 1, cmd_params=cmd_params, mode=mode,
-                                   filter_signal=filter_signal, chart=chart, forecast=forecast)
+                                   filter_signal=filter_signal, chart=chart, forecast=forecast,
+                                   verbose=verbose or notify)
             if data is not None:
                 all_stock_data.append(data)
 
@@ -2767,7 +3087,8 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
 
     # 打印最新信号表到屏幕
     if all_stock_data:
-        _print_signal_table(all_stock_data, include_all=bool(symbol))
+        _print_signal_table(all_stock_data, include_all=bool(symbol),
+                            include_signal_score=verbose)
 
     # 生成汇总 HTML 报告
     if all_stock_data:
@@ -2777,8 +3098,9 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
                 report_filename=output_file, end_date=end_date_str,
                 start_date=start_date_str, cmd_params=cmd_params,
                 source=source_tag, mode=mode,
-                include_all_watch=bool(symbol),
-                market_trend=_get_market_trend())
+                include_all_watch=True,
+                market_trend=_get_market_trend(),
+                include_signal_score=verbose)
             click.echo(click.style(f'\n  汇总报告: {html_path}', fg='green'))
         except Exception as e:
             click.echo(click.style(f'\n  汇总报告生成失败: {e}', fg='yellow'))
@@ -2789,20 +3111,17 @@ def analyze_cmd(symbol, symbol_file, hot, start, end, strategy, is_index, capita
         _notify_signals(all_stock_data)
 
 
-def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file=None, batch_mode=False, cmd_params='', mode=0, filter_signal=None, chart=False, forecast=0):
+def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output, output_file=None, batch_mode=False, cmd_params='', mode=0, filter_signal=None, chart=False, forecast=0, verbose=False):
     """分析单只股票"""
-    symbol = raw_symbol.strip()
-    for prefix in ('sh', 'sz', 'SH', 'SZ'):
-        if symbol.startswith(prefix):
-            symbol = symbol[len(prefix):]
-            break
+    symbol = _parse_code_token(raw_symbol) or raw_symbol.strip()
+    exchange = _exchange_from_token(raw_symbol)
 
     try:
         # 股票代码/名称解析
         stock_name = ''
         if not symbol.isdigit():
             click.echo(click.style(f'\n  正在搜索股票: {raw_symbol}...', fg='blue'))
-            code, name = _resolve_symbol(raw_symbol)
+            code, name = _resolve_symbol(raw_symbol, exchange=exchange)
             if code is None:
                 click.echo(click.style(f'  错误: 未找到匹配 "{raw_symbol}" 的股票', fg='red'))
                 return
@@ -2811,7 +3130,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             click.echo(click.style(f'  找到: {symbol} {stock_name}', fg='green'))
         else:
             click.echo(click.style(f'\n  正在查找股票名称: {symbol}...', fg='blue'))
-            _, name = _resolve_symbol(symbol)
+            _, name = _resolve_symbol(symbol, exchange=exchange)
             if name:
                 stock_name = name
                 click.echo(click.style(f'  找到: {symbol} {stock_name}', fg='green'))
@@ -2859,6 +3178,9 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
         # 注入股票代码供策略使用
         df.attrs['symbol'] = symbol
+        df.attrs['stock_name'] = stock_name
+        df.attrs['ref_date'] = end_date
+        df.attrs['limit_skip'] = bool(is_index or is_etf)
 
         stock_label = f'{symbol}({stock_name})' if stock_name else symbol
 
@@ -2940,8 +3262,8 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 if th.get('buy') is not None or th.get('sell') is not None:
                     forecast_thresholds[sk] = th
 
-        # 生成信号图表：--chart 输出所有股票的图表；否则仅输出至少有一个策略信号非观望的股票的图表
-        if chart or _has_actionable_signal(all_signals):
+        # 生成信号图表：所有股票都生成回测效果图表（含信号为观望的股票）
+        if all_signals is not None:
             # 单个策略：生成独立图表；多个策略：合并为一个综合图表
             if len(strategies_to_run) == 1:
                 sk = strategies_to_run[0]
@@ -2996,7 +3318,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
             # 最新信号
             sig_text = _get_signal_text(sig)
-            sig_display = _signal_text_with_score(sig)
+            sig_display = _get_signal_text(sig)
             sig_color = _get_signal_color(sig_text)
             click.echo(click.style('    最新信号: ', fg='white', bold=True) +
                        click.style(sig_display, fg=sig_color, bold=True))
@@ -3030,7 +3352,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 rank_sharpe = all_risks[sk].get('sharpe_ratio')
                 rank_drawdown = all_risks[sk].get('max_drawdown')
                 rank_trades = all_risks[sk].get('total_trades')
-                rank_signal = _signal_text_with_score(all_signals.get(sk))
+                rank_signal = _get_signal_text(all_signals.get(sk))
                 rankings.append((_strat_label(sk, strategy_map), rank_total_return, rank_sharpe,
                                  rank_drawdown, rank_trades, rank_signal))
             rankings.sort(key=lambda x: x[1] if x[1] is not None else -999, reverse=True)
@@ -3044,6 +3366,32 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                 tr_str = str(trades) if trades is not None else 'N/A'
                 table_rows.append([i, name, ret_str, shp_str, dd_str, tr_str, signal])
             _print_table(headers, table_rows)
+
+        signal_score = ''
+        signal_score_total = None
+        if verbose:
+            try:
+                from core.signal_score import compute_signal_score, combine_signals
+                comp = combine_signals(
+                    {sk: all_signals.get(sk) for sk in strategies_to_report})
+                info = compute_signal_score(df, comp)
+                signal_score = info['text']
+                signal_score_total = info['total']
+            except Exception:
+                signal_score = ''
+
+        signal_reasons = {}
+        for sk in strategies_to_report:
+            sig = all_signals.get(sk)
+            if sig is None or len(sig) == 0:
+                continue
+            try:
+                val = float(sig.iloc[-1]) if hasattr(sig, 'iloc') else float(sig[-1])
+            except Exception:
+                continue
+            if val != 0:
+                signal_reasons[sk] = _latest_signal_reason_detail(
+                    sk, df, sig)
 
         # 信号过滤：仅当主信号符合 -f 指定条件时才输出报告
         if filter_signal and not _match_filter(filter_signal, all_signals, all_risks):
@@ -3067,6 +3415,7 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
                     strategy=strategy,
                     mode=mode,
                     market_trend=_get_market_trend(),
+                    signal_reasons=signal_reasons,
                 )
                 click.echo(click.style(f'\n  HTML报告: {html_path}', fg='green'))
             except Exception as e:
@@ -3095,6 +3444,9 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
             'all_charts': all_charts,
             'all_signals': all_signals,
             'forecast_thresholds': forecast_thresholds,
+            'signal_reasons': signal_reasons,
+            'signal_score': signal_score,
+            'signal_score_total': signal_score_total,
         }
 
     except Exception as e:
@@ -3105,14 +3457,18 @@ def _analyze_single(raw_symbol, start, end, strategy, is_index, capital, output,
 
 def _analyze_single_worker(args):
     """多进程 worker：分析单只股票，捕获其控制台输出，返回 (raw_symbol, data, 输出文本)"""
-    raw_symbol, start, end, strategy, is_index, capital, output, output_file, batch_mode, cmd_params, mode, filter_signal, chart, forecast = args
+    (raw_symbol, start, end, strategy, is_index, capital, output, output_file,
+     batch_mode, cmd_params, mode, filter_signal, chart, forecast,
+     market_dates, verbose) = args
+    set_market_trade_dates_override(market_dates)
     buf = io.StringIO()
     data = None
     try:
         with contextlib.redirect_stdout(buf):
             data = _analyze_single(raw_symbol, start, end, strategy, is_index, capital,
                                    output, output_file, batch_mode=batch_mode, cmd_params=cmd_params,
-                                   mode=mode, filter_signal=filter_signal, chart=chart, forecast=forecast)
+                                   mode=mode, filter_signal=filter_signal, chart=chart, forecast=forecast,
+                                   verbose=verbose)
     except Exception as e:
         buf.write(f'\n  异常: {e}\n')
     return raw_symbol, data, buf.getvalue()
@@ -4159,7 +4515,35 @@ def _random_pick_by_board(stock_list, total):
     return picked
 
 
-def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
+def _append_watch_extremes(all_results, selected):
+    """在扫描结果末尾追加观望股票中综合打分最高/最低各1只。"""
+    existing = {str(r.get('symbol')) for r in selected}
+    candidates = []
+    for r in all_results:
+        total = r.get('signal_score_total')
+        if total is None or str(r.get('symbol')) in existing:
+            continue
+        if 'signals' in r:
+            vals = list((r.get('signals') or {}).values())
+            is_watch = all(v is None or float(v) == 0 for v in vals)
+        else:
+            is_watch = r.get('signal') == 0
+        if is_watch:
+            candidates.append((int(total), r))
+    if not candidates:
+        return []
+    hi = max(candidates, key=lambda x: x[0])
+    lo = min(candidates, key=lambda x: x[0])
+    picked = [hi]
+    if lo[1] is not hi[1]:
+        picked.append(lo)
+    for _, r in picked:
+        selected.append(r)
+        existing.add(str(r.get('symbol')))
+    return picked
+
+
+def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0, verbose=False):
     """扫描单只股票：获取近一年数据 -> 运行策略 -> 返回信号、最新价及风险指标
     在独立进程中调用时自建 DataFetcher（requests.Session 非线程/进程安全）。
     forecast=True 时对观望信号计算次日触发买卖信号的收盘价阈值。
@@ -4187,8 +4571,16 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
         if signal_value is None:
             return None
 
-        score = _get_latest_score(sig_series)
-        score_detail = _get_latest_score_detail(sig_series)
+        signal_score = ''
+        signal_score_total = None
+        if verbose:
+            try:
+                from core.signal_score import compute_signal_score
+                info = compute_signal_score(df, sig_series)
+                signal_score = info['text']
+                signal_score_total = info['total']
+            except Exception:
+                signal_score = ''
 
         # 观望信号：计算次日触发买卖信号的收盘价阈值（仅 --forecast 启用时）
         forecast_val = None
@@ -4201,9 +4593,10 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
             'symbol': symbol,
             'latest_close': latest_close,
             'signal': signal_value,
-            'score': score,
-            'score_detail': score_detail,
-            'reason': _signal_reason(strategy, signal_value, enhance) if signal_value else '',
+            'signal_score': signal_score,
+            'signal_score_total': signal_score_total,
+            'reason': (_latest_signal_reason_detail(strategy, df, sig_series)
+                       if signal_value else ''),
             'forecast': forecast_val,
             'total_return': risk.get('total_return'),
             'sharpe': risk.get('sharpe_ratio'),
@@ -4217,11 +4610,12 @@ def _scan_single(symbol, strategy, capital=100000, forecast=0, enhance=0):
 
 def _scan_single_worker(args):
     """多进程 worker：扫描单只股票"""
-    symbol, strategy, capital, forecast, enhance = args
-    return _scan_single(symbol, strategy, capital, forecast, enhance)
+    symbol, strategy, capital, forecast, enhance, market_dates, verbose = args
+    set_market_trade_dates_override(market_dates)
+    return _scan_single(symbol, strategy, capital, forecast, enhance, verbose)
 
 
-def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=None):
+def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=None, verbose=False):
     """扫描单只股票并运行多个策略，返回每个策略的最新信号值、预测阈值及信号合计
     在独立进程中调用时自建 DataFetcher（requests.Session 非线程/进程安全）。
     forecast=True 时对观望信号计算次日触发买卖信号的收盘价阈值。
@@ -4240,9 +4634,8 @@ def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=No
         df = _truncate_analysis_df(df, start_date)
         df.attrs['symbol'] = symbol
         sig_map = {}
+        sig_series_map = {}
         forecast_map = {}
-        score = None
-        score_detail = None
         for sk in strategies:
             try:
                 result = _run_strategy(sk, df, capital=capital, enhance=strat_enhance.get(sk, 0))
@@ -4252,9 +4645,8 @@ def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=No
                 else:
                     v = None
                 sig_map[sk] = v
-                if score is None:
-                    score = _get_latest_score(sig_series)
-                    score_detail = _get_latest_score_detail(sig_series)
+                if sig_series is not None:
+                    sig_series_map[sk] = sig_series
                 # 观望信号：计算次日触发买卖信号的收盘价阈值（仅 --forecast 启用时）
                 if forecast and v == 0:
                     th = _compute_forecast_thresholds(df, sk, STRATEGY_MAP, end_date, enhance=strat_enhance.get(sk, 0))
@@ -4265,20 +4657,35 @@ def _scan_multi(symbol, strategies, capital=100000, forecast=0, strat_enhance=No
         if all(v is None for v in sig_map.values()):
             return None
         total = sum(v for v in sig_map.values() if v is not None)
-        return {'symbol': symbol, 'latest_close': latest_close, 'score': score,
-                'score_detail': score_detail or '—', 'signals': sig_map,
-                'forecasts': forecast_map, 'total': total}
+        signal_score = ''
+        signal_score_total = None
+        if verbose:
+            try:
+                from core.signal_score import compute_signal_score, combine_signals
+                comp = combine_signals(sig_series_map)
+                info = compute_signal_score(df, comp)
+                signal_score = info['text']
+                signal_score_total = info['total']
+            except Exception:
+                signal_score = ''
+        return {'symbol': symbol, 'latest_close': latest_close, 'signals': sig_map,
+                'signal_score': signal_score,
+                'signal_score_total': signal_score_total,
+                'forecasts': forecast_map,
+                'total': total}
     except Exception:
         return None
 
 
 def _scan_multi_worker(args):
     """多进程 worker：扫描单只股票（多策略）"""
-    symbol, strategies, capital, forecast, strat_enhance = args
-    return _scan_multi(symbol, strategies, capital, forecast, strat_enhance)
+    symbol, strategies, capital, forecast, strat_enhance, market_dates, verbose = args
+    set_market_trade_dates_override(market_dates)
+    return _scan_multi(symbol, strategies, capital, forecast, strat_enhance, verbose)
 
 
-def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None):
+def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None,
+              market_dates=None, verbose=False):
     """运行扫描（串行/并行），返回每只股票的结果列表"""
     if strat_enhance is None:
         strat_enhance = {}
@@ -4287,7 +4694,8 @@ def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None)
         from concurrent.futures import ProcessPoolExecutor, as_completed
         n_workers = min(threads, len(scan_symbols))
         click.echo(click.style(f'  使用 {n_workers} 个进程并行扫描...', fg='blue'))
-        tasks = [(s, strategies, 100000, forecast, strat_enhance) for s in scan_symbols]
+        tasks = [(s, strategies, 100000, forecast, strat_enhance,
+                  market_dates, verbose) for s in scan_symbols]
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_scan_multi_worker, task): i for i, task in enumerate(tasks)}
             for fut in as_completed(futures):
@@ -4295,20 +4703,24 @@ def _run_scan(scan_symbols, strategies, threads, forecast=0, strat_enhance=None)
                 if data is not None:
                     results.append(data)
     else:
+        set_market_trade_dates_override(market_dates)
         for s in scan_symbols:
-            data = _scan_multi(s, strategies, 100000, forecast, strat_enhance)
+            data = _scan_multi(s, strategies, 100000, forecast, strat_enhance,
+                               verbose=verbose)
             if data is not None:
                 results.append(data)
     return results
 
 
-def _scan_single_batch(symbols, sk, forecast, sk_enhance, threads):
+def _scan_single_batch(symbols, sk, forecast, sk_enhance, threads,
+                       market_dates=None, verbose=False):
     """对一批股票运行单个策略扫描（串行/并行），返回结果列表"""
     results = []
     if len(symbols) > 1 and threads > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
         n_workers = min(threads, len(symbols))
-        tasks = [(s, sk, 100000, forecast, sk_enhance) for s in symbols]
+        tasks = [(s, sk, 100000, forecast, sk_enhance, market_dates,
+                  verbose) for s in symbols]
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_scan_single_worker, task): i for i, task in enumerate(tasks)}
             for fut in as_completed(futures):
@@ -4316,8 +4728,10 @@ def _scan_single_batch(symbols, sk, forecast, sk_enhance, threads):
                 if data is not None:
                     results.append(data)
     else:
+        set_market_trade_dates_override(market_dates)
         for s in symbols:
-            data = _scan_single(s, sk, 100000, forecast, sk_enhance)
+            data = _scan_single(s, sk, 100000, forecast, sk_enhance,
+                                verbose=verbose)
             if data is not None:
                 results.append(data)
     return results
@@ -4333,18 +4747,23 @@ def _scan_has_buy(result):
 
 
 def _scan_sort_key(result):
-    """扫描排序：买 > 卖 > 观望；同组内 score 从大到小。"""
+    """扫描排序：买 > 卖 > 观望；同组内按综合打分从大到小。"""
     if result is None:
-        return (2, float('inf'))
+        return (1, 2, float('inf'))
     values = (list(result.get('signals', {}).values())
               if 'signals' in result else [result.get('signal')])
     values = [v for v in values if v is not None]
     has_buy = any(v > 0 for v in values)
     has_sell = any(v < 0 for v in values)
     group = 0 if has_buy else (1 if has_sell else 2)
-    score = result.get('score')
+    pref_group = 0
+    pref = _preferred_strategy_key()
+    if pref and 'signals' in result:
+        pv = (result.get('signals') or {}).get(pref)
+        pref_group = 0 if (pv is not None and pv > 0) else 1
+    score = result.get('signal_score_total')
     score_key = -float(score) if score is not None else float('inf')
-    return (group, score_key)
+    return (pref_group, group, score_key)
 
 
 # 新浪 mktcap 单位为「万元」：50 亿 = 5,000,000,000 元 = 500,000 万元
@@ -4378,9 +4797,12 @@ def _apply_scan_filters(stock_list, peplus=False, nost=False, nolowcap=False):
 @cli.command('scan')
 @_src_option
 @_seqnum_option
-@_maxhold_option
-@_nodownbuy_option
+@_trendctl_option
+@_withdrawsell_option
+@_critera_option
 @click.option('--strategy', '-g', default='boll,macd', help='策略选择，多个策略用逗号分隔，all表示全部（默认boll,macd）')
+@click.option('--symbol', '-s', default=None, help='指定股票代码/名称扫描（空格/逗号分隔）；指定 -s 或 -sf 后仅分析这些股票，不再从网络补充，买入信号不足时退出')
+@click.option('--symbol-file', '-sf', default=None, help='从指定文件读取股票代码扫描（空格/逗号/换行分隔）；指定 -s 或 -sf 后仅分析这些股票，不再从网络补充，买入信号不足时退出')
 @click.option('--top', '-t', default=5, type=click.IntRange(1, 100), help='筛选排名前N只股票 -tN（N=1~100，默认10）')
 @click.option('--offset', '-o', default=0, type=click.IntRange(0, 1000000), help='从获取到的股票中第N条记录开始分析 -oN（N=0起始，默认0=第一条）')
 @click.option('--min-volume', default=None, type=float, help='最小成交量过滤')
@@ -4395,9 +4817,10 @@ def _apply_scan_filters(stock_list, peplus=False, nost=False, nolowcap=False):
 @click.option('--peplus', is_flag=True, default=False, help='排除 PE 为负（亏损）的股票')
 @click.option('--nost', is_flag=True, default=False, help='排除 ST 股票（名称含 ST）')
 @click.option('--nolowcap', is_flag=True, default=False, help='排除总市值低于 50 亿元的股票')
-@click.option('--notify', is_flag=True, default=False, help='对扫描出的 Top N 股票通过钉钉机器人发送买卖信号通知')
-def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, random, notify, src, peplus, nost, nolowcap, seqnum, max_hold_days, block_buy_on_downtrend):
-    """股票筛选：从全市场股票中，重点输出符合要求或最佳的股票
+@click.option('--notify', is_flag=True, default=False, help='对扫描出的 Top N 股票通过钉钉机器人发送买卖信号通知（含综合打分及观望极值）')
+@click.option('--verbose', is_flag=True, default=False, help='输出每日信号综合打分（10指标）')
+def scan_cmd(strategy, symbol, symbol_file, top, offset, min_volume, threads, forecast, sort_key, random, notify, src, peplus, nost, nolowcap, seqnum, trendctl, atr_stop_ratio, boma_criteria, verbose):
+    """股票筛选：重点输出符合要求或最佳的股票
 
     流程：获取股票列表 -> 筛选 -> 逐个运行策略（可用 -x 并行）-> 输出结果
     指定多个策略（逗号分隔）或 all 时，输出多策略汇总信号表（每只股票一行，
@@ -4405,6 +4828,8 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
     未指定排序选项时默认按板块比例随机抽样（--random）；
     指定 --changepercent 等排序选项时按对应字段排序。
     指定 --random 时按板块比例随机抽样 30*N 只。
+    指定 -s / -sf 时仅分析指定的股票，不再从网络补充；买入信号不足 -tN 时直接退出。
+    大盘趋势对买卖的控制由各策略按 --trendctl 处理，scan 本身不做特殊拦截。
     """
     ctx = click.get_current_context()
     if (ctx.get_parameter_source('random') != ParameterSource.COMMANDLINE
@@ -4413,8 +4838,15 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
     try:
         set_primary_source(src)
         _set_seqnum(seqnum)
-        _set_max_hold_days(max_hold_days)
-        _set_block_buy_on_downtrend(block_buy_on_downtrend)
+        _set_trendctl(trendctl)
+        _set_withdrawsell(atr_stop_ratio)
+        _set_boma_criteria(boma_criteria)
+        _scan_start = (datetime.now() - timedelta(days=_DEFAULT_PERIOD_DAYS)).strftime('%Y-%m-%d')
+        _scan_end = datetime.now().strftime('%Y-%m-%d')
+        _market_dates = preload_market_trade_dates(
+            _warmup_fetch_start(_scan_start), _scan_end) or None
+        set_market_trade_dates_override(_market_dates)
+        _preload_trend_states(_scan_start, _scan_end)
         # 解析策略列表
         strat_specs = _split_strategies(strategy)
         if any(k == 'all' for k in strat_specs):
@@ -4444,52 +4876,108 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
         strat_cols = [_strat_short(k) for k in strat_keys]
 
         _print_header('股票扫描筛选')
-        market_trend = analyze_market_trend(datetime.now().strftime('%Y-%m-%d'))
-        _print_market_trend(market_trend)
+        _today = datetime.now().strftime('%Y-%m-%d')
+        market_trends = [analyze_market_trend(_today, _HS300_INDEX_CODE),
+                         analyze_market_trend(_today, _ZZ1000_INDEX_CODE)]
+        _set_market_trend(market_trends)
+        _print_market_trend(market_trends)
         click.echo(click.style(f'  策略: {", ".join(strat_names)}', fg='cyan', bold=True))
         sort_label = {'changepercent': '涨跌幅', 'turnoverratio': '换手率',
                       'amount': '成交额', 'mktcap': '总市值', 'pe': '市盈率'}.get(sort_key, sort_key)
-        mode_label = '随机抽样（板块比例 6:5:5:2）' if random else f'排序: {sort_label}'
+        if symbol or symbol_file:
+            _srcs = []
+            if symbol:
+                _srcs.append('-s')
+            if symbol_file:
+                _srcs.append(f'-sf {symbol_file}')
+            mode_label = f'指定股票: {" ".join(_srcs)}'
+        else:
+            mode_label = '随机抽样（板块比例 6:5:5:2）' if random else f'排序: {sort_label}'
         click.echo(click.style(f'  {mode_label}', fg='cyan'))
 
         fetcher = DataFetcher()
 
-        click.echo(click.style('  正在获取股票列表...', fg='blue'))
-        stock_list = fetcher.get_stock_list(
-            sort_key='changepercent' if random else sort_key, max_pages=60)
-
-        if stock_list is None or len(stock_list) == 0:
+        # 指定 -s / -sf 时仅分析这些股票，不再从网络补充
+        provided_only = bool(symbol or symbol_file)
+        if provided_only:
+            entries = []  # (code, name)
+            if symbol:
+                for tok in re.split(r'[,\s，]+', symbol):
+                    tok = tok.strip()
+                    if not tok:
+                        continue
+                    code = _parse_code_token(tok)
+                    if code:
+                        _, nm = _resolve_symbol(tok)
+                        entries.append((code, nm or ''))
+                    else:
+                        c, nm = _resolve_symbol(tok)
+                        if c:
+                            entries.append((c, nm or ''))
+            if symbol_file:
+                file_symbols = _read_symbols_file(symbol_file)
+                file_names = _read_symbol_names(symbol_file)
+                for code in file_symbols:
+                    entries.append((code, file_names.get(code, '')))
+            ordered, seen_names = [], {}
+            for code, nm in entries:
+                if code not in seen_names:
+                    seen_names[code] = nm
+                    ordered.append(code)
+                elif nm and not seen_names.get(code):
+                    seen_names[code] = nm
+            if not ordered:
+                click.echo(click.style('  错误: -s/-sf 未提供有效股票代码', fg='red'))
+                return
             click.echo(click.style(
-                f'  错误: 未能获取股票列表（首选源 {src} 及备用源均失败；'
-                f'请检查网络/数据源可用性，或改用 --src 指定其他源）', fg='red'))
-            return
+                f'  指定股票 {len(ordered)} 只（不再从网络补充）', fg='green'))
+            if min_volume is not None or peplus or nost or nolowcap:
+                click.echo(click.style(
+                    '  提示: -s/-sf 模式下按成交量/PE/ST/市值过滤不生效', fg='yellow'))
+            _ensure_symbol_cap_map(ordered)
+            random = False
+            stock_list = pd.DataFrame({
+                'symbol': ordered,
+                'name': [seen_names.get(c) or c for c in ordered],
+            })
+        else:
+            click.echo(click.style('  正在获取股票列表...', fg='blue'))
+            stock_list = fetcher.get_stock_list(
+                sort_key='changepercent' if random else sort_key, max_pages=60)
 
-        click.echo(click.style(f'  获取到 {len(stock_list)} 只股票', fg='green'))
+            if stock_list is None or len(stock_list) == 0:
+                click.echo(click.style(
+                    f'  错误: 未能获取股票列表（首选源 {src} 及备用源均失败；'
+                    f'请检查网络/数据源可用性，或改用 --src 指定其他源）', fg='red'))
+                return
 
-        # 按成交量过滤
-        if min_volume is not None:
-            click.echo(click.style(f'  正在按成交量过滤 (>= {min_volume:,.0f})...', fg='blue'))
-            stock_list = fetcher.filter_by_volume(stock_list, min_volume)
-            click.echo(click.style(f'  过滤后剩余 {len(stock_list)} 只股票', fg='green'))
+            click.echo(click.style(f'  获取到 {len(stock_list)} 只股票', fg='green'))
+            _update_symbol_cap_map(stock_list)
 
-        # 按 PE 上限（PE_THRESHOLD）/ ST / 市值过滤
-        before = len(stock_list)
-        stock_list = _apply_scan_filters(stock_list, peplus, nost, nolowcap)
-        click.echo(click.style(
-            f'  按条件过滤后剩余 {len(stock_list)} 只股票（原 {before} 只）', fg='green'))
-        _pe_missing = ('pe' not in stock_list.columns or
-                       pd.to_numeric(stock_list['pe'], errors='coerce').notna().sum() == 0)
-        if _pe_missing and (peplus or sort_key == 'pe'):
+            # 按成交量过滤
+            if min_volume is not None:
+                click.echo(click.style(f'  正在按成交量过滤 (>= {min_volume:,.0f})...', fg='blue'))
+                stock_list = fetcher.filter_by_volume(stock_list, min_volume)
+                click.echo(click.style(f'  过滤后剩余 {len(stock_list)} 只股票', fg='green'))
+
+            # 按 PE 上限（PE_THRESHOLD）/ ST / 市值过滤
+            before = len(stock_list)
+            stock_list = _apply_scan_filters(stock_list, peplus, nost, nolowcap)
             click.echo(click.style(
-                '  警告: 当前数据源不提供 PE，PE 排序/--peplus 过滤未生效', fg='yellow'))
-        _cap_missing = ('mktcap' not in stock_list.columns or
-                        pd.to_numeric(stock_list['mktcap'], errors='coerce').notna().sum() == 0)
-        if _cap_missing and (nolowcap or sort_key == 'mktcap'):
-            click.echo(click.style(
-                '  警告: 当前数据源不提供总市值，市值排序/--nolowcap 过滤未生效', fg='yellow'))
-        if len(stock_list) == 0:
-            click.echo(click.style('  错误: 过滤后无剩余股票', fg='red'))
-            return
+                f'  按条件过滤后剩余 {len(stock_list)} 只股票（原 {before} 只）', fg='green'))
+            _pe_missing = ('pe' not in stock_list.columns or
+                           pd.to_numeric(stock_list['pe'], errors='coerce').notna().sum() == 0)
+            if _pe_missing and (peplus or sort_key == 'pe'):
+                click.echo(click.style(
+                    '  警告: 当前数据源不提供 PE，PE 排序/--peplus 过滤未生效', fg='yellow'))
+            _cap_missing = ('mktcap' not in stock_list.columns or
+                            pd.to_numeric(stock_list['mktcap'], errors='coerce').notna().sum() == 0)
+            if _cap_missing and (nolowcap or sort_key == 'mktcap'):
+                click.echo(click.style(
+                    '  警告: 当前数据源不提供总市值，市值排序/--nolowcap 过滤未生效', fg='yellow'))
+            if len(stock_list) == 0:
+                click.echo(click.style('  错误: 过滤后无剩余股票', fg='red'))
+                return
 
         if random:
             # 随机模式：按板块比例随机排列全部候选（供增量扩样）
@@ -4508,63 +4996,96 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
             sym = r.get('symbol', '') or r.get('code', '')
             name_map[sym] = r.get('name', sym)
 
+        # 扫描候选池：-s/-sf 时仅这些股票（立即扫完，不足即退出）；网络模式按 Top N 分批 + 最多扩容 2 次
         batch = max(1, top * 30)
+        if provided_only:
+            batch = max(1, len(pool))
         if multi:
-            # 多策略：对候选池运行所有策略并输出汇总信号表；
-            # 若含买入信号的股票不足 Top N（即 Top N 会混入全为观望信号的记录），
-            # 则扩大扫描范围继续扫描，确保 Top N 股票都含有买入信号。
+            # 多策略：对候选池运行所有策略并输出汇总信号表
             click.echo(click.style(f'  正在扫描股票（策略: {", ".join(strat_names)}）...', fg='blue'))
             results = []
             scanned = 0
+            expansions = 0
+            buy_count = 0
             while True:
                 chunk = pool[scanned:scanned + batch]
                 if not chunk:
                     break
                 scanned += len(chunk)
-                results.extend(_run_scan(chunk, strat_keys, threads, forecast, strat_enhance))
+                results.extend(_run_scan(chunk, strat_keys, threads, forecast, strat_enhance,
+                               market_dates=_market_dates, verbose=verbose or notify))
                 buy_count = sum(1 for r in results if _scan_has_buy(r))
                 if buy_count >= top or scanned >= len(pool):
                     break
+                if expansions >= 2:
+                    break
+                expansions += 1
                 click.echo(click.style(
-                    f'  含买入信号股票不足（{buy_count}/{top}），已扫描 {scanned} 只，继续扩大扫描范围...', fg='yellow'))
+                    f'  含买入信号股票不足（{buy_count}/{top}），已扫描 {scanned} 只，'
+                    f'扩大扫描范围（第 {expansions}/2 次）...', fg='yellow'))
+            all_scan_results = list(results)
+            if buy_count == 0:
+                click.echo(click.style('  未找到符合条件的股票，退出', fg='yellow'))
+                return
+            if provided_only and buy_count < top:
+                click.echo(click.style(
+                    f'  买入信号不足（{buy_count}/{top}），-s/-sf 指定股票已扫描完，退出', fg='yellow'))
+                return
             results = [r for r in results if _scan_has_buy(r)]
         else:
-            # 单策略：仅筛选「买入」信号；不足 -t 只时逐步扩大扫描范围
+            # 单策略：仅筛选「买入」信号
             sk = strat_keys[0]
             sk_enhance = strat_enhance.get(sk, 0)
             click.echo(click.style(f'  正在扫描股票（策略: {strat_names[0]}，目标买入信号 ≥ {top} 只）...', fg='blue'))
             results = []
+            all_scan_results = []
             scanned = 0
+            expansions = 0
             while True:
                 chunk = pool[scanned:scanned + batch]
                 if not chunk:
                     break
                 scanned += len(chunk)
-                chunk_results = _scan_single_batch(chunk, sk, forecast, sk_enhance, threads)
+                chunk_results = _scan_single_batch(chunk, sk, forecast, sk_enhance, threads,
+                                        market_dates=_market_dates, verbose=verbose or notify)
+                all_scan_results.extend(chunk_results)
                 results.extend([r for r in chunk_results if r.get('signal') and r['signal'] > 0])
                 if len(results) >= top or scanned >= len(pool):
                     break
+                if expansions >= 2:
+                    break
+                expansions += 1
                 click.echo(click.style(
-                    f'  买入信号不足（{len(results)}/{top}），已扫描 {scanned} 只，继续扩大扫描范围...', fg='yellow'))
+                    f'  买入信号不足（{len(results)}/{top}），已扫描 {scanned} 只，'
+                    f'扩大扫描范围（第 {expansions}/2 次）...', fg='yellow'))
+            if not results:
+                click.echo(click.style('  未找到符合条件的股票，退出', fg='yellow'))
+                return
+            if provided_only and len(results) < top:
+                click.echo(click.style(
+                    f'  买入信号不足（{len(results)}/{top}），-s/-sf 指定股票已扫描完，退出', fg='yellow'))
+                return
 
-        if not results:
+        if not results and not verbose and not notify:
             click.echo(click.style('  未找到符合条件的股票', fg='yellow'))
             return
 
         if multi:
-            # 多策略汇总信号表：买 > 卖 > 观望，同组按 score 降序
+            # 多策略汇总信号表：买 > 卖 > 观望，同组按综合打分降序
             results.sort(key=_scan_sort_key)
             top_results = results[:top]
-            _print_section(f'多策略汇总信号表 - Top {len(top_results)}')
+            watch_added = (_append_watch_extremes(all_scan_results, top_results)
+                           if verbose else [])
+            suffix = f'（另含观望极值{len(watch_added)}只）' if watch_added else ''
+            _print_section(f'多策略汇总信号表 - Top {top} {suffix}')
 
-            headers = ['代码', '名称', '最新价格'] + strat_cols + ['评分', '评分详情']
+            headers = ['代码', '名称', '最新价格'] + strat_cols
+            if verbose:
+                headers.append('综合打分')
             table_rows = []
             for i, r in enumerate(top_results, 1):
                 lc = r.get('latest_close')
                 price_str = f'{lc:.2f}' if lc is not None else 'N/A'
-                score = r.get('score')
-                score_str = f'{score:+d}' if score is not None else 'N/A'
-                detail_str = r.get('score_detail') or '—'
                 row = [r['symbol'], name_map.get(r['symbol'], r['symbol']),
                        price_str]
                 for sk in strat_keys:
@@ -4590,14 +5111,15 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
                     else:
                         cell = 'N/A'
                     row.append(cell)
-                row.extend([score_str, detail_str])
+                if verbose:
+                    row.append(r.get('signal_score') or '—')
                 table_rows.append(row)
 
             _print_table(headers, table_rows, disable_numparse=True)
         else:
-            # 单策略：剔除观望股票，按买 > 卖 > 观望，同组按 score 降序
+            # 单策略：剔除观望股票，按买 > 卖 > 观望，同组按综合打分降序
             results = [r for r in results if r.get('signal') not in (None, 0)]
-            if not results:
+            if not results and not verbose and not notify:
                 click.echo(click.style('  未找到非观望信号的股票', fg='yellow'))
                 click.echo()
                 click.echo(click.style('  扫描完成!', fg='green', bold=True))
@@ -4605,20 +5127,24 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
                 return
             results.sort(key=_scan_sort_key)
             top_results = results[:top]
-            _print_section(f'扫描结果 - Top {len(top_results)}')
+            watch_added = (_append_watch_extremes(all_scan_results, top_results)
+                           if verbose else [])
+            suffix = f'（另含观望极值{len(watch_added)}只）' if watch_added else ''
+            _print_section(f'扫描结果 - Top {top} {suffix}')
 
-            headers = ['代码', '名称', '最新价格', '信号', '信号详情', '评分', '评分详情']
+            headers = ['代码', '名称', '最新价格', '信号', '信号详情']
+            if verbose:
+                headers.append('综合打分')
             table_rows = []
             for i, r in enumerate(top_results, 1):
                 lc = r.get('latest_close')
                 price_str = f'{lc:.2f}' if lc is not None else 'N/A'
                 sig_text = '买入' if r['signal'] > 0 else '卖出'
-                score = r.get('score')
-                score_str = f'{score:+d}' if score is not None else 'N/A'
-                detail_str = r.get('score_detail') or '—'
-                table_rows.append([r['symbol'], name_map.get(r['symbol'], r['symbol']),
-                                   price_str, sig_text, r.get('reason', ''),
-                                   score_str, detail_str])
+                row = [r['symbol'], name_map.get(r['symbol'], r['symbol']),
+                       price_str, sig_text, r.get('reason', '')]
+                if verbose:
+                    row.append(r.get('signal_score') or '—')
+                table_rows.append(row)
 
             _print_table(headers, table_rows, disable_numparse=True)
 
@@ -4646,7 +5172,7 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
             html_path = _generate_scan_html_report(headers, table_rows, strat_names, strat_cols,
                                                    charts_by_symbol=charts_by_symbol, name_map=name_map,
                                                    report_filename=f'scan_{datetime.now().strftime("%m%d%H%M")}.html',
-                                                   market_trend=market_trend)
+                                                   market_trend=_get_market_trend())
             click.echo(click.style(f'  HTML报告已保存到: {html_path}', fg='green'))
         except Exception as e:
             click.echo(click.style(f'  保存HTML失败: {e}', fg='yellow'))
@@ -4655,15 +5181,18 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
         if notify:
             click.echo(click.style('\n  发送钉钉通知...', fg='blue'))
             try:
+                notify_entries = list(top_results)
+                _append_watch_extremes(all_scan_results, notify_entries)
                 stock_entries = []
                 if multi:
                     # 多策略：每只 Top 股票携带各策略最新信号值
-                    for r in top_results:
+                    for r in notify_entries:
                         sigs = r.get('signals') or {}
                         stock_entries.append({
                             'symbol': r['symbol'],
                             'stock_name': name_map.get(r['symbol'], r['symbol']),
-                            'score_detail': r.get('score_detail') or '—',
+                            'signal_score': r.get('signal_score') or '',
+                            'signal_score_total': r.get('signal_score_total'),
                             'all_signals': {sk: [v] for sk, v in sigs.items() if v is not None},
                             'all_risks': {},
                             'strategy_map': {sk: _strat_label(sk) for sk in strat_keys},
@@ -4672,13 +5201,14 @@ def scan_cmd(strategy, top, offset, min_volume, threads, forecast, sort_key, ran
                 else:
                     # 单策略：每只 Top 股票携带该策略最新信号值
                     sk = strat_keys[0]
-                    for r in top_results:
+                    for r in notify_entries:
                         if r.get('signal') is None:
                             continue
                         stock_entries.append({
                             'symbol': r['symbol'],
                             'stock_name': name_map.get(r['symbol'], r['symbol']),
-                            'score_detail': r.get('score_detail') or '—',
+                            'signal_score': r.get('signal_score') or '',
+                            'signal_score_total': r.get('signal_score_total'),
                             'all_signals': {sk: [r['signal']]},
                             'all_risks': {},
                             'strategy_map': {sk: _strat_label(sk)},
@@ -4717,102 +5247,381 @@ def _sample_random_pool(count=100):
 
 
 def _build_onestock_breakdown(trades, source_keys, result):
-    """构建单持仓回测的「按策略分类」统计表，返回 (headers, rows)
+    """构建单持仓回测的「回测结果」统计表，返回 (headers, rows)。
 
-    列：指标 + 全部 + 各策略；策略的「总收益率」为该策略触发交易的复利累计；
-    「年化收益率」= 累计收益率 × 250 / 累计持股天数（按实际交易日）。
+    结果列为全部策略合并后的交易统计。
     """
-    strat_names = [_strat_label(k) for k in source_keys]
-
-    def _stats(ts):
-        n = len(ts)
-        rets = [t['return'] for t in ts]
-        pnls = [(t['exit_price'] - t['entry_price']) * t['position'] for t in ts]
-        wins = [r for r in rets if r > 0]
-        losses = [r for r in rets if r < 0]
-        cum = 1.0
-        for r in rets:
-            cum *= (1 + r)
-        pf = (sum(wins) / abs(sum(losses))) if losses else (float('inf') if wins else 0.0)
-        return {
-            'n': n,
-            'win_rate': (len(wins) / n) if n else 0.0,
-            'avg_ret': (sum(rets) / n) if n else 0.0,
-            'cum_ret': (cum - 1) if n else 0.0,
-            'pf': pf,
-            'avg_hold': (sum(t['holding_days'] for t in ts) / n) if n else 0.0,
-            'hold_sum': sum(t['holding_days'] for t in ts),
-            'pnl': sum(pnls) if pnls else 0.0,
-            'max_win': max(pnls) if pnls else 0.0,
-            'max_loss': min(pnls) if pnls else 0.0,
-        }
-
-    groups = {name: [t for t in trades if t['strategy'] == name] for name in strat_names}
-    all_st = _stats(trades)
-    per = {name: _stats(groups[name]) for name in strat_names}
+    n = len(trades)
+    rets = [float(t.get('return') or 0.0) for t in trades]
+    pnls = [(t['exit_price'] - t['entry_price']) * t['position']
+            for t in trades]
+    holds = [int(t.get('holding_days') or 0) for t in trades]
+    wins = [r for r in rets if r > 0]
+    losses = [r for r in rets if r < 0]
+    win_rate = len(wins) / n if n else 0.0
+    avg_ret = sum(rets) / n if n else 0.0
+    pf = (sum(wins) / abs(sum(losses))) if losses else (
+        float('inf') if wins else 0.0)
 
     def pct(v):
         return f'{v * 100:.2f}%'
 
-    def pf_fmt(v):
-        return 'inf' if v == float('inf') else f'{v:.2f}'
+    def _dist(vals):
+        if not vals:
+            return '—'
+        return (f'平均{sum(vals) / len(vals):.1f}，中位{np.median(vals):.1f}，'
+                f'最高{max(vals):.0f}，最低{min(vals):.0f}')
 
-    headers = ['指标', '全部'] + strat_names
+    if rets:
+        ret_dist = (f'总{pct(result["total_return"])},'
+                    f'中位{pct(float(np.median(rets)))},'
+                    f'最高{pct(max(rets))},最低{pct(min(rets))}')
+    else:
+        ret_dist = f'总{pct(result["total_return"])},中位—,最高—,最低—'
+
+    headers = ['指标', '结果']
     rows = [
-        ['总收益率', pct(result['total_return'])] + [pct(per[n]['cum_ret']) for n in strat_names],
-        ['年化收益率', pct(result['annual_return'])] + [
-            pct(per[n]['cum_ret'] * TRADING_DAYS_PER_YEAR / per[n]['hold_sum'])
-            if per[n]['hold_sum'] else '—' for n in strat_names],
-        ['最大回撤', pct(result['max_drawdown'])] + ['—' for _ in strat_names],
-        ['夏普比率', f"{result['sharpe_ratio']:.2f}"] + ['—' for _ in strat_names],
-        ['交易次数', str(all_st['n'])] + [str(per[n]['n']) for n in strat_names],
-        ['胜率', pct(all_st['win_rate'])] + [pct(per[n]['win_rate']) for n in strat_names],
-        ['平均收益率', pct(all_st['avg_ret'])] + [pct(per[n]['avg_ret']) for n in strat_names],
-        ['盈利因子', pf_fmt(all_st['pf'])] + [pf_fmt(per[n]['pf']) for n in strat_names],
-        ['平均持仓天数', f"{all_st['avg_hold']:.1f}"] + [f"{per[n]['avg_hold']:.1f}" for n in strat_names],
-        ['总盈亏额', f"{all_st['pnl']:,.0f}"] + [f"{per[n]['pnl']:,.0f}" for n in strat_names],
-        ['最大单笔盈利', f"{all_st['max_win']:,.0f}"] + [f"{per[n]['max_win']:,.0f}" for n in strat_names],
-        ['最大单笔亏损', f"{all_st['max_loss']:,.0f}"] + [f"{per[n]['max_loss']:,.0f}" for n in strat_names],
+        ['总收益率', ret_dist],
+        ['年化收益率', pct(result['annual_return'])],
+        ['最大回撤', pct(result['max_drawdown'])],
+        ['夏普比率', f"{result['sharpe_ratio']:.2f}"],
+        ['交易次数', str(n)],
+        ['胜率', pct(win_rate)],
+        ['平均收益率', pct(avg_ret)],
+        ['盈利因子', 'inf' if pf == float('inf') else f'{pf:.2f}'],
+        ['持股天数', _dist(holds)],
+        ['总盈亏额', f'{sum(pnls):,.0f}'],
+        ['最大单笔盈利', f'{max(pnls):,.0f}' if pnls else '0'],
+        ['最大单笔亏损', f'{min(pnls):,.0f}' if pnls else '0'],
     ]
     return headers, rows
+
+
+def _build_reason_return_table(trades, reason_key, next_key=None, day3_key=None):
+    """按买入/卖出原因分组统计收益（总/中位/最高/最低）。
+
+    可选输出“次日OK率”（next_key）与“3日OK率”（day3_key）：
+    - 买入分组：之后收盘价较信号日上涨的占比；
+    - 卖出分组：之后收盘价较信号日下跌的占比；
+    - 未来交易日不足的交易不计入对应分母。
+    """
+    groups = {}
+    for t in trades:
+        raw = str(t.get(reason_key) or '—')
+        parts = [p.strip() for p in raw.split('/') if p.strip()] or ['—']
+        for reason in parts:
+            groups.setdefault(reason, []).append(t)
+
+    headers = ['分组', '次数']
+    if next_key:
+        headers.append('次日OK率')
+    if day3_key:
+        headers.append('3日OK率')
+    headers += ['总收益率', '中位收益率', '最高收益率', '最低收益率']
+    rows = []
+    for reason, items in groups.items():
+        rets = [float(t.get('return') or 0.0) for t in items]
+        row = [reason, len(items)]
+        for key in (next_key, day3_key):
+            if not key:
+                continue
+            valid = [t for t in items if t.get(key) is not None]
+            if valid:
+                correct = sum(1 for t in valid if t.get(key))
+                row.append(f'{correct / len(valid) * 100:.2f}%')
+            else:
+                row.append('—')
+        row += [
+            f'{sum(rets) * 100:.2f}%',
+            f'{float(np.median(rets)) * 100:.2f}%',
+            f'{max(rets) * 100:.2f}%',
+            f'{min(rets) * 100:.2f}%',
+        ]
+        rows.append(row)
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    return headers, rows
+
+
+def _onestock_signal_exit_detail(sk, df, d, hold, market_state=None):
+    """推断 onestock “信号”卖出的具体触发原因。"""
+    base = _strat_base(sk)
+    try:
+        if d not in df.index:
+            return '策略卖出信号'
+        pos = int(df.index.get_loc(d))
+        if not isinstance(pos, (int, np.integer)) or pos < 0:
+            return '策略卖出信号'
+        close = pd.to_numeric(df['close'], errors='coerce')
+        c = float(close.iloc[pos])
+
+        entry_date = pd.Timestamp(hold.get('entry_date'))
+        epos_arr = df.index.get_indexer([entry_date], method='ffill')
+        epos = int(epos_arr[0]) if len(epos_arr) and epos_arr[0] >= 0 else None
+
+        peak = None
+        dd = 0.0
+        if epos is not None and epos <= pos:
+            peak = float(close.iloc[epos:pos + 1].max())
+            dd = (peak - c) / peak if peak > 0 else 0.0
+
+        # 策略内部 ATR 动态止损
+        atr_keys = {'boll', 'macd', 'macd1', 'ma520'}
+        state_series = df.attrs.get('market_states')
+        if state_series is not None and len(state_series) > 0:
+            try:
+                state_series = state_series.reindex(df.index, method='ffill')
+            except Exception:
+                state_series = None
+        else:
+            state_series = None
+
+        def _atr_mult(j):
+            st = (state_series.iloc[j] if state_series is not None
+                  else market_state)
+            return adjust_atr_stop_multiplier(_ATR_STOP_MULTIPLIER, st)
+
+        if (_ATR_STOP_ENABLED and base in atr_keys
+                and epos is not None and epos <= pos):
+            atr = (df['ATR14'] if 'ATR14' in df.columns else calc_atr(df))
+            stop_price = None
+            for j in range(epos, pos + 1):
+                stop_price = update_atr_trailing_stop(
+                    close.iloc[j], atr.iloc[j], stop_price,
+                    multiplier=_atr_mult(j))
+            if stop_price is not None and c <= stop_price:
+                return 'ATR动态止损'
+
+        # RSI 超买卖出
+        rsi_keys = {'boll', 'macd', 'macd1', 'ma1030', 'ma520'}
+        if base in rsi_keys:
+            try:
+                rsi = df['RSI14'] if 'RSI14' in df.columns else calc_rsi(df, 14)
+                rsi_thr = get_threshold('MAX_RSI_THRESHOLD')
+                rsi_v = float(rsi.iloc[pos])
+                if (rsi_thr is not None and pd.notna(rsi_v)
+                        and rsi_v > rsi_thr):
+                    return 'RSI超买'
+            except Exception:
+                pass
+
+        if base == 'boma':
+            try:
+                bb = calc_bollinger(df)
+                upper, middle = bb['UPPER'], bb['MIDDLE']
+                md = calc_macd(df, fast=12, slow=26, signal=9)
+                dif, dea, bar = md['DIF'], md['DEA'], md['MACD']
+                upper_pullback = (pos > 0
+                                  and close.iloc[pos - 1] >= upper.iloc[pos - 1]
+                                  and c < float(upper.iloc[pos]))
+                dif_turn_down = (pos > 1
+                                 and dif.iloc[pos - 1] > dif.iloc[pos - 2]
+                                 and dif.iloc[pos] < dif.iloc[pos - 1])
+                red_shrink_1 = (bar.iloc[pos] > 0
+                                and bar.iloc[pos - 1] > 0
+                                and bar.iloc[pos] < bar.iloc[pos - 1])
+                sell1 = upper_pullback and (dif_turn_down or red_shrink_1)
+
+                death_cross = (pos > 0
+                               and dif.iloc[pos - 1] >= dea.iloc[pos - 1]
+                               and dif.iloc[pos] < dea.iloc[pos])
+                adx = pd.to_numeric(df['ADX14'], errors='coerce')
+                pdi = pd.to_numeric(df['PLUS_DI'], errors='coerce')
+                mdi = pd.to_numeric(df['MINUS_DI'], errors='coerce')
+                di_bearish = (pos > 0
+                              and pdi.iloc[pos] < pdi.iloc[pos - 1]
+                              and mdi.iloc[pos] > mdi.iloc[pos - 1]
+                              and adx.iloc[pos] >= 20)
+                sell2 = death_cross and c < float(middle.iloc[pos]) and di_bearish
+
+                stop_price = None
+                if epos is not None and epos <= pos:
+                    atr = (df['ATR14'] if 'ATR14' in df.columns
+                           else calc_atr(df))
+                    for j in range(epos, pos + 1):
+                        stop_price = update_atr_trailing_stop(
+                            close.iloc[j], atr.iloc[j], stop_price,
+                            multiplier=_atr_mult(j))
+                sell3 = (_ATR_STOP_ENABLED and stop_price is not None
+                         and c < stop_price)
+
+                reasons = []
+                if sell1:
+                    reasons.append('卖出信号BOLL')
+                if sell2:
+                    reasons.append('卖出信号MACD')
+                if sell3:
+                    reasons.append('卖出信号ATR')
+                if reasons:
+                    return '/'.join(reasons)
+            except Exception:
+                pass
+            return 'BOMA卖出信号'
+
+        if base == 'boll':
+            try:
+                upper = calc_bollinger(df)['UPPER']
+                if (pos > 0 and close.iloc[pos - 1] >= upper.iloc[pos - 1]
+                        and c < float(upper.iloc[pos])):
+                    return 'BOLL上轨回落'
+            except Exception:
+                pass
+            return 'BOLL卖出信号'
+        if base in ('macd', 'macd1'):
+            try:
+                fast, slow, sig = ((12, 26, 9) if base == 'macd'
+                                   else (6, 13, 5))
+                md = calc_macd(df, fast=fast, slow=slow, signal=sig)
+                dif, dea = md['DIF'], md['DEA']
+                if (pos > 0 and dif.iloc[pos - 1] >= dea.iloc[pos - 1]
+                        and dif.iloc[pos] < dea.iloc[pos]):
+                    return 'MACD死叉'
+            except Exception:
+                pass
+            return 'MACD卖出信号'
+        if base == 'ma1030':
+            try:
+                fast = pd.to_numeric(df['MA10'], errors='coerce')
+                slow = pd.to_numeric(df['MA30'], errors='coerce')
+                if (pos > 0 and fast.iloc[pos - 1] >= slow.iloc[pos - 1]
+                        and fast.iloc[pos] < slow.iloc[pos]):
+                    return 'MA10下穿MA30'
+            except Exception:
+                pass
+            return 'MA1030卖出信号'
+        if base == 'ma520':
+            return 'MA5下穿MA20'
+        if base == 'kdj':
+            return 'KDJ死叉'
+        if base == 'sar':
+            return 'SAR转空'
+        if base == 'hold':
+            return '持有策略卖出'
+        if base == 'quality_value':
+            return '质价策略卖出'
+        return f'{_strat_label(sk)}卖出信号'
+    except Exception:
+        return '策略卖出信号'
+
+
+def _latest_signal_reason_detail(sk, df, signals):
+    """返回最新信号的详细原因；BOMA 输出具体买卖信号编号。"""
+    if signals is None or len(signals) == 0:
+        return ''
+    try:
+        val = float(signals.iloc[-1]) if hasattr(signals, 'iloc') else float(signals[-1])
+    except Exception:
+        return ''
+    if val == 0:
+        return ''
+    if _strat_base(sk) == 'boma':
+        try:
+            strat = _build_strategy_instance('boma', STRATEGY_MAP, 0)
+            raw_signals = _generate_effective_signals(
+                strat, df, apply_market_regime=False,
+                apply_downloss_signal=False, attach_score=False)
+            parts = strat.latest_signal_reasons(df, raw_signals)
+            if parts:
+                return '；'.join(parts)
+        except Exception:
+            pass
+    return _signal_reason(sk, val)
+
+
+def _onestock_signal_entry_detail(sk, df, d):
+    """推断 onestock 买入信号的具体原因。"""
+    base = _strat_base(sk)
+    if base == 'boma':
+        try:
+            if d not in df.index:
+                return '买入信号'
+            pos = int(df.index.get_loc(d))
+            if pos < 1:
+                return '买入信号'
+            close = pd.to_numeric(df['close'], errors='coerce')
+            c = float(close.iloc[pos])
+            bb = calc_bollinger(df)
+            lower, middle = bb['LOWER'], bb['MIDDLE']
+            md = calc_macd(df, fast=12, slow=26, signal=9)
+            dif, dea, bar = md['DIF'], md['DEA'], md['MACD']
+            rsi6, rsi12 = calc_rsi(df, 6), calc_rsi(df, 12)
+            rsi_order = rsi6.iloc[pos] > rsi12.iloc[pos]
+            ma5 = pd.to_numeric(df['MA5'], errors='coerce')
+            price_above_ma5 = c > float(ma5.iloc[pos])
+            lower_rebound = (close.iloc[pos - 1] <= lower.iloc[pos - 1]
+                             and c > float(lower.iloc[pos]))
+            green_short_1 = (bar.iloc[pos] < 0 and bar.iloc[pos - 1] < 0
+                             and bar.iloc[pos] > bar.iloc[pos - 1])
+            bar_ok = bar.iloc[pos] > 0 or green_short_1
+            buy1 = lower_rebound and bar_ok and rsi_order and price_above_ma5
+            golden = (dif.iloc[pos - 1] <= dea.iloc[pos - 1]
+                      and dif.iloc[pos] > dea.iloc[pos])
+            buy2 = (golden and c < float(middle.iloc[pos])
+                    and rsi_order and price_above_ma5)
+            adx = pd.to_numeric(df['ADX14'], errors='coerce')
+            pdi = pd.to_numeric(df['PLUS_DI'], errors='coerce')
+            mdi = pd.to_numeric(df['MINUS_DI'], errors='coerce')
+            adxr = calc_adxr(df)
+            cross_up = (pos > 0 and pdi.iloc[pos - 1] <= mdi.iloc[pos - 1]
+                        and pdi.iloc[pos] > mdi.iloc[pos])
+            buy3 = (cross_up and adx.iloc[pos] > 25
+                    and adxr.iloc[pos] > adx.iloc[pos]
+                    and price_above_ma5)
+            reasons = []
+            if buy1:
+                reasons.append('买入信号BOLL')
+            if buy2:
+                reasons.append('买入信号MACD')
+            if buy3:
+                reasons.append('买入信号ADX')
+            if reasons:
+                return '/'.join(reasons)
+        except Exception:
+            pass
+        return 'BOMA买入信号'
+    return _signal_reason(sk, 1, 0)
 
 
 def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enhance,
                            capital, output, random_mode=False, random_count=100, fix_capital=False,
                            file_part='onestock', replace_on_buy=0,
-                           block_buy_on_downtrend=False, down_loss_sell=False,
-                           verbose=False):
-    """--onestock：单持仓轮动回测
+                           down_loss_sell=False, verbose=False, num_positions=1):
+    """backtest 持仓轮动回测（最多同时持有 num_positions 只）
 
-    空仓时按 -g 指定的策略顺序寻找买入信号：优先选择较前面策略发出买入信号的股票，
-    同一策略内按股票池顺序选择第一只；用全部资金买入并记住触发买入的策略。
-    持仓期间仅当「该股票 + 该策略」出现卖出信号时全部卖出。任意时刻至多一只持仓。
+    num_positions=1 即原单持仓轮动：空仓时按 -g 策略顺序寻找买入信号，用全部资金买入，
+    持仓期间仅当「该股票 + 该策略」出现卖出信号时卖出。
 
-    fix_capital=True 时，每次买入均按初始资金 capital 额度买入（上轮盈亏不影响本轮资金）。
+    num_positions=N>1 时允许同时持有至多 N 只股票：每个交易日先处理卖出（各持仓对应策略
+    出现卖出信号则卖出），再用剩余空位按「策略顺序 + 股票池顺序」买入未持仓且发出买入信号
+    的股票，直至补满 N 只（当日有卖出时不买入，与单持仓规则一致）。
 
-    replace_on_buy=1 时，若已持仓且出现其它股票的买入信号，则仅当当前持仓 RSI > 75
-    时卖出换股；候选股票与当前持仓相同时不操作。
-    0 表示持仓期间忽略新的买入信号。
+    资金规则：
+      - fix_capital=True：每只买入金额固定为 初始资金 / N（现金不足也按该额度成交，现金可为负）；
+      - fix_capital=False：每只买入金额 = 可用现金 / (N - 当前持股数)。
 
-    random_mode=True 时，每次进入空仓状态（含初始）会重新随机抽取股票池。
+    replace_on_buy=1（仅 N=1 生效）：已持仓且出现其它股票买入信号、当前持仓 RSI>75 时换股。
 
-    block_buy_on_downtrend=True 时，大盘（配置指数）趋势为“下跌”或“过热”的
-    交易日禁止产生买入信号。
+    random_mode=True 时，每次完全空仓（含初始）会重新随机抽取股票池。
 
-    down_loss_sell=True 时，大盘趋势为“下跌”，且持仓亏损超过 2%
-    或当日较前一交易日下跌超过 5% 时卖出；
-    “上涨”时优先选择 MACD 买入信号，“震荡/过冷”时优先选择 BOLL 买入信号。
-
-    大盘趋势为“过热”时始终禁止买入；趋势为“过冷”时忽略最大回撤、
-    最大持股天数和亏损止损等强制卖出条件。
+    大盘趋势为“过热”时始终禁止买入；`--trendctl 1`（默认）时“下跌/过冷”禁止买入；
+    趋势为“过冷”时同时忽略 ATR 止损等强制卖出条件。
     """
     commission, slippage = 0.0003, 0.0001
+    max_positions = max(1, int(num_positions or 1))
     source_keys = [k for k in strat_keys if _strat_base(k) != 'hold']
     if not source_keys:
-        click.echo(click.style('  错误: --onestock 需要至少一个非 hold 策略', fg='red'))
+        click.echo(click.style('  错误: 至少需要一个非 hold 策略', fg='red'))
         return
 
-    trend_states = market_trend_states(start_date, end_date)
+    trend_by_code = {
+        _HS300_INDEX_CODE: market_trend_states(
+            start_date, end_date, _HS300_INDEX_CODE),
+        _ZZ1000_INDEX_CODE: market_trend_states(
+            start_date, end_date, _ZZ1000_INDEX_CODE),
+    }
+
+    def _trend_for_symbol(sym):
+        return trend_by_code.get(_symbol_index_code(sym),
+                                 trend_by_code[_ZZ1000_INDEX_CODE])
 
     fetcher = DataFetcher()
 
@@ -4827,38 +5636,41 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
             if len(df) == 0:
                 return None
             df.attrs['source'] = src_used
+            df.attrs['symbol'] = sym
+            df.attrs['ref_date'] = end_date
+            df.attrs['limit_skip'] = (infer_asset_type(sym) != 'stock')
+            sym_trend = _trend_for_symbol(sym)
             sigs = {}
             for sk in source_keys:
                 strat = _build_strategy_instance(sk, STRATEGY_MAP, strat_enhance.get(sk, 0))
-                sig = _generate_effective_signals(strat, df, market_states=trend_states)
-                if block_buy_on_downtrend and trend_states is not None and len(trend_states) > 0:
-                    trend_aligned = trend_states.reindex(sig.index, method='ffill')
-                    mask = (sig > 0) & trend_aligned.isin(['下跌', '过热'])
-                    if mask.any():
-                        sig = sig.copy()
-                        sig[mask] = 0.0
+                sig = _generate_effective_signals(
+                    strat, df, market_states=sym_trend,
+                    apply_downloss_signal=False)
                 sigs[sk] = sig
             return df, sigs
         except Exception:
             return None
 
-    def load_pool(pool, label='加载'):
+    def load_pool(pool, header=None):
         loaded = {}
         total = len(pool)
+        if header:
+            click.echo(click.style(f'\n  {header}（{total} 只）... ', fg='blue'),
+                       nl=False)
         for i, sym in enumerate(pool):
-            if total >= 20 and (i + 1) % 10 == 0:
-                click.echo(click.style(f'  {label}股票池 {i+1}/{total}...', fg='blue'))
+            if (i + 1) % 10 == 0:
+                click.echo(click.style(f'{i+1}.', fg='blue'), nl=False)
             d = load_one(sym)
             if d is not None:
                 loaded[sym] = d
+        if header:
+            click.echo()
         return loaded
 
-    _print_header('单持仓轮动回测', f'{start_date} ~ {end_date}' + (' · 随机股票池' if random_mode else ''))
-    click.echo(click.style(f'  策略: {", ".join(_strat_label(k) for k in source_keys)}', fg='cyan'))
-    click.echo(click.style(f'  初始资金: {capital:,.0f}', fg='white'))
+    _title = '单持仓轮动回测' if max_positions == 1 else f'{max_positions} 持仓轮动回测'
+    _print_header(_title)
 
-    click.echo(click.style(f'\n  正在加载股票池（{len(symbols)} 只）...', fg='blue'))
-    loaded = load_pool(symbols)
+    loaded = load_pool(symbols, header='正在加载股票池')
     if not loaded:
         click.echo(click.style('  错误: 无有效股票数据', fg='red'))
         return
@@ -4869,7 +5681,7 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
         return
 
     cash = float(capital)
-    hold = None       # {'symbol','sk','shares','cost','entry_date','entry_price'}
+    holds = {}        # symbol -> {'symbol','sk','shares','cost','entry_date','entry_price',...}
     trades = []
     equity = []
     need_refresh = False
@@ -4881,74 +5693,94 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
             p = df['close'].iloc[-1]
         return float(p)
 
-    def _prev_close(sym, d):
+    def _future_dir_sign(df, date, offset=1):
+        """之后第 offset 个交易日收盘价相对当日的涨跌符号：+1/-1/0；不足返回 None。"""
+        try:
+            ts = pd.Timestamp(date)
+            idx = int(df.index.searchsorted(ts))
+            j = idx + offset
+            if idx >= len(df.index) or df.index[idx] != ts or j >= len(df.index):
+                return None
+            c0 = float(df['close'].iloc[idx])
+            c1 = float(df['close'].iloc[j])
+            if c1 > c0:
+                return 1
+            if c1 < c0:
+                return -1
+            return 0
+        except Exception:
+            return None
+
+    def _sell_hold(h, d, reason, detail=None):
+        nonlocal cash
+        sym = h['symbol']
         df = loaded[sym][0]
-        if d not in df.index:
-            return None
-        pos = df.index.get_loc(d)
-        if not isinstance(pos, (int, np.integer)) or pos <= 0:
-            return None
-        p = df['close'].iloc[pos - 1]
-        return float(p) if pd.notna(p) else None
-
-    def _should_downloss_sell(sym, d):
-        cur = _price(sym, d)
-        if cur < hold['entry_price'] * (1 - _DOWNLOSS_SELL_THRESHOLD):
-            return True
-        prev = _prev_close(sym, d)
-        return (prev is not None and prev > 0
-                and cur < prev * (1 - _DOWNLOSS_DAILY_DROP_THRESHOLD))
-
-    def _sell(d, reason):
-        nonlocal cash, hold
-        df = loaded[hold['symbol']][0]
-        raw = float(df['close'].loc[d]) if d in df.index else _price(hold['symbol'], d)
+        raw = float(df['close'].loc[d]) if d in df.index else _price(sym, d)
         exec_px = raw * (1 - slippage)
-        proceeds = hold['shares'] * exec_px * (1 - commission)
+        proceeds = h['shares'] * exec_px * (1 - commission)
         cash += proceeds
+        reason_detail = detail if detail else reason
+        if reason == 'signal':
+            held_states = _trend_for_symbol(sym)
+            held_state = (held_states.get(d) if held_states is not None
+                          and len(held_states) > 0 else None)
+            reason_detail = _onestock_signal_exit_detail(
+                h['sk'], df, d, h, market_state=held_state)
+        elif detail is None:
+            reason_detail = {
+                'downloss': '大盘下跌/震荡止损',
+                'replace': '换股',
+                'end': '期末平仓',
+            }.get(reason, reason)
+        entry_dir = _future_dir_sign(df, h['entry_date'], 1)
+        exit_dir = _future_dir_sign(df, d, 1)
+        entry3_dir = _future_dir_sign(df, h['entry_date'], 3)
+        exit3_dir = _future_dir_sign(df, d, 3)
         trades.append({
-            'entry_date': hold['entry_date'],
+            'entry_date': h['entry_date'],
             'exit_date': d,
-            'symbol': hold['symbol'],
-            'strategy': _strat_label(hold['sk']),
-            'entry_price': hold['entry_price'],
+            'symbol': sym,
+            'strategy': _strat_label(h['sk']),
+            'entry_price': h['entry_price'],
             'exit_price': exec_px,
-            'position': hold['shares'],
-            'return': (proceeds / hold['cost'] - 1) if hold['cost'] else 0.0,
-            'holding_days': sum(1 for x in calendar if hold['entry_date'] < x <= d),
+            'position': h['shares'],
+            'return': (proceeds / h['cost'] - 1) if h['cost'] else 0.0,
+            'holding_days': sum(1 for x in calendar if h['entry_date'] < x <= d),
             'exit_reason': reason,
+            'exit_reason_detail': reason_detail,
+            'entry_reason_detail': h.get('entry_reason_detail', ''),
+            # 方向：买入看之后是否上涨，卖出看之后是否下跌；None=未来交易日不足
+            'entry_next_up': None if entry_dir is None else entry_dir > 0,
+            'exit_next_down': None if exit_dir is None else exit_dir < 0,
+            'entry_day3_up': None if entry3_dir is None else entry3_dir > 0,
+            'exit_day3_down': None if exit3_dir is None else exit3_dir < 0,
         })
-        hold = None
+        holds.pop(sym, None)
 
-    def _buy(sym, sk, df, d):
-        nonlocal cash, hold
+    def _buy(sym, sk, df, d, amount):
+        nonlocal cash
+        if amount <= 0:
+            return
         exec_px = float(df['close'].loc[d]) * (1 + slippage)
-        # 固定资金模式：按初始资金额度买入（上轮盈亏不影响本轮资金）
-        cost = float(capital) if fix_capital else cash
-        shares = cost / (exec_px * (1 + commission))
-        cash -= cost
-        hold = {'symbol': sym, 'sk': sk, 'shares': shares,
-                'cost': cost, 'entry_date': d, 'entry_price': exec_px}
+        shares = amount / (exec_px * (1 + commission))
+        cash -= amount
+        holds[sym] = {'symbol': sym, 'sk': sk, 'shares': shares,
+                      'cost': amount, 'entry_date': d, 'entry_price': exec_px,
+                      'entry_reason_detail': _onestock_signal_entry_detail(sk, df, d)}
 
-    def _source_order_for_date(d):
-        """--downlosssell：上涨优先 MACD，震荡/过冷优先 BOLL。"""
-        if not down_loss_sell or trend_states is None or len(trend_states) == 0:
-            return source_keys
-        state = trend_states.get(d)
-        target = 'macd' if state == '上涨' else (
-            'boll' if state in ('震荡', '过冷') else None)
-        if not target:
-            return source_keys
-        preferred = [k for k in source_keys if _strat_base(k) == target]
-        if not preferred:
-            return source_keys
-        others = [k for k in source_keys if _strat_base(k) != target]
-        return preferred + others
+    def _buy_amount():
+        """本次买入金额：fixcapital=初始资金/N；否则=可用现金/(N-当前持股数)。"""
+        if fix_capital:
+            return float(capital) / max_positions
+        remaining = max_positions - len(holds)
+        if remaining <= 0:
+            return 0.0
+        return cash / remaining
 
     def _pick_buy(d):
-        for sk in _source_order_for_date(d):
+        for sk in source_keys:
             for sym in symbols:
-                if sym not in loaded:
+                if sym in holds or sym not in loaded:
                     continue
                 df, sigs = loaded[sym]
                 if d not in df.index:
@@ -4966,56 +5798,52 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
         return pd.notna(val) and float(val) > 75.0
 
     for d in calendar:
-        # 1) 持仓：被记录策略出现卖出信号时清仓
-        if hold is not None:
-            df, sigs = loaded[hold['symbol']]
-            if d in df.index and float(sigs[hold['sk']].loc[d]) < 0:
-                _sell(d, 'signal')
-                need_refresh = True
-                equity.append(cash)
-                continue   # 卖出当日不再买入
+        # 1) 卖出：各持仓对应策略出现卖出信号时清仓
+        sold = False
+        if holds:
+            for sym in list(holds.keys()):
+                h = holds[sym]
+                df, sigs = loaded[sym]
+                if d in df.index and float(sigs[h['sk']].loc[d]) < 0:
+                    _sell_hold(h, d, 'signal')
+                    sold = True
 
-            # 1.1) 大盘下跌且持仓亏损>2%或单日跌幅>5%时卖出；“过冷”为独立状态，不触发该止损
-            if (down_loss_sell and trend_states is not None
-                    and len(trend_states) > 0
-                    and trend_states.get(d) == '下跌'
-                    and _should_downloss_sell(hold['symbol'], d)):
-                _sell(d, 'downloss')
-                need_refresh = True
-                equity.append(cash)
-                continue
-
-        # 2) 空仓：必要时刷新随机股票池
-        if hold is None and need_refresh:
-            if random_mode:
-                new_syms = _sample_random_pool(random_count)
-                if new_syms:
-                    symbols = new_syms
-                    click.echo(click.style(f'  空仓，刷新随机股票池 {len(symbols)} 只...', fg='blue'))
-                    loaded = load_pool(symbols, label='加载')
+        # 2) 完全空仓且需要时刷新随机股票池
+        if random_mode and not holds and need_refresh:
+            new_syms = _sample_random_pool(random_count)
+            if new_syms:
+                symbols = new_syms
+                loaded = load_pool(symbols, header='空仓，刷新随机股票池')
             need_refresh = False
 
-        # 3) 空仓：按 -g 策略顺序寻找买入信号；同一策略内按股票池顺序
-        if hold is None:
-            pick = _pick_buy(d)
-            if pick is not None:
-                _buy(*pick, d)
-
-        # 3.1) 已持仓且 N=1：有其它股票买入信号且当前 RSI > 75 时换股
-        elif replace_on_buy == 1:
-            pick = _pick_buy(d)
-            if (pick is not None and pick[0] != hold['symbol']
-                    and _rsi_above_75(hold['symbol'], d)):
-                _sell(d, 'replace')
-                _buy(*pick, d)
+        # 3) 买入（当日有卖出时不买入）
+        if not sold:
+            if max_positions == 1 and replace_on_buy == 1 and holds:
+                # 单持仓换股：出现其它股票买入信号且当前持仓 RSI>75 时换股
+                cur = next(iter(holds.values()))
+                pick = _pick_buy(d)
+                if (pick is not None and pick[0] != cur['symbol']
+                        and _rsi_above_75(cur['symbol'], d)):
+                    _sell_hold(cur, d, 'replace')
+                    _buy(*pick, d, _buy_amount())
+            else:
+                # 用剩余空位按「策略顺序 + 股票池顺序」买入，直至补满 N 只
+                while len(holds) < max_positions:
+                    pick = _pick_buy(d)
+                    if pick is None:
+                        break
+                    _buy(*pick, d, _buy_amount())
 
         # 4) 记录当日权益
-        eq = cash + (hold['shares'] * _price(hold['symbol'], d) if hold is not None else 0.0)
+        eq = cash + sum(h['shares'] * _price(sym, d) for sym, h in holds.items())
         equity.append(eq)
+        if sold and not holds:
+            need_refresh = random_mode
 
     # 期末仍持仓：按最后交易日收盘强制平仓
-    if hold is not None:
-        _sell(calendar[-1], 'end')
+    if holds:
+        for sym in list(holds.keys()):
+            _sell_hold(holds[sym], calendar[-1], 'end')
         equity[-1] = cash
 
     total_return = (equity[-1] - capital) / capital if capital else 0.0
@@ -5039,14 +5867,30 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
     }
 
     breakdown_headers, breakdown_rows = _build_onestock_breakdown(trades, source_keys, result)
-    _print_section('回测结果（按策略分类）')
+    _print_section('回测结果')
+    click.echo(click.style(f'  策略: {", ".join(_strat_label(k) for k in source_keys)}', fg='cyan'))
+    click.echo(click.style(f'  区间: {start_date} ~ {end_date}'
+                           + (' · 随机股票池' if random_mode else ''), fg='white'))
+    click.echo(click.style(f'  初始资金: {capital:,.0f}', fg='white'))
+    click.echo(click.style(f'  最大同时持仓: {max_positions}', fg='white'))
     _print_table(breakdown_headers, breakdown_rows)
+
+    buy_reason_table = sell_reason_table = None
+    if verbose:
+        buy_reason_table = _build_reason_return_table(
+            trades, 'entry_reason_detail', 'entry_next_up', 'entry_day3_up')
+        sell_reason_table = _build_reason_return_table(
+            trades, 'exit_reason_detail', 'exit_next_down', 'exit_day3_down')
+        _print_section('买入信号分组收益')
+        _print_table(*buy_reason_table)
+        _print_section('卖出信号分组收益')
+        _print_table(*sell_reason_table)
 
     # 交易明细
     trade_headers = ['买入日期', '卖出日期', '股票代码', '策略', '买入价', '卖出价',
-                     '持股数', '持仓天数', '收益率', '盈亏额', '退出原因']
+                     '持股数', '持仓天数', '收益率', '盈亏额', '买入原因', '卖出原因']
     reason_map = {'signal': '信号', 'end': '期末平仓', 'replace': '换股',
-                  'downloss': '大盘下跌止损'}
+                  'downloss': '大盘下跌/震荡止损'}
     trade_rows = []
     for t in trades:
         pnl = (t['exit_price'] - t['entry_price']) * t['position']
@@ -5057,7 +5901,9 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
             f"{t['entry_price']:.3f}", f"{t['exit_price']:.3f}",
             f"{t['position']:.0f}", t['holding_days'],
             f"{t['return'] * 100:.2f}%", f"{pnl:,.0f}",
-            reason_map.get(t['exit_reason'], t['exit_reason']),
+            t.get('entry_reason_detail') or _signal_reason(t.get('strategy', ''), 1),
+            t.get('exit_reason_detail') or reason_map.get(
+                t['exit_reason'], t['exit_reason']),
         ])
     if trade_rows:
         # 汇总行：统计持仓天数/收益率/盈亏额合计
@@ -5065,27 +5911,67 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
         _hd_sum = sum(t['holding_days'] for t in trades)
         _ret_sum = sum(t['return'] for t in trades)
         trade_rows.append(['汇总', '', '', '', '', '', '', _hd_sum,
-                           f'{_ret_sum * 100:.2f}%', f'{_pnl_sum:,.0f}', ''])
+                           f'{_ret_sum * 100:.2f}%', f'{_pnl_sum:,.0f}', '', ''])
 
     charts_html = ''
     chart_path = None
     if verbose:
         try:
-            index_code = get_market_trend_index()
-            index_name = get_index_name(index_code)
-            index_df = fetcher.get_index_data(index_code, start_date, end_date)
-            if index_df is not None and len(index_df) > 0:
+            index_data = {
+                _HS300_INDEX_CODE: fetcher.get_index_data(
+                    _HS300_INDEX_CODE, start_date, end_date),
+                _ZZ1000_INDEX_CODE: fetcher.get_index_data(
+                    _ZZ1000_INDEX_CODE, start_date, end_date),
+            }
+            buy_index = {}
+            for t in trades:
+                try:
+                    buy_index[pd.Timestamp(t['entry_date'])] = _symbol_index_code(
+                        t.get('symbol'))
+                except Exception:
+                    pass
+
+            active_code = _ZZ1000_INDEX_CODE
+            chart_dates, chart_rows = [], []
+            for d in calendar:
+                if d in buy_index:
+                    active_code = buy_index[d]
+                used_code = active_code
+                idx_df = index_data.get(used_code)
+                if idx_df is None or d not in idx_df.index:
+                    used_code = _ZZ1000_INDEX_CODE
+                    idx_df = index_data.get(used_code)
+                if idx_df is None or d not in idx_df.index:
+                    continue
+                chart_dates.append(d)
+                chart_rows.append(idx_df.loc[d])
+
+            if chart_rows:
+                chart_index_df = pd.DataFrame(
+                    chart_rows, index=pd.DatetimeIndex(chart_dates))
+                chart_dates_idx = pd.DatetimeIndex(chart_dates)
+                chart_trend_map = []
+                for _code, _label in (
+                        (_ZZ1000_INDEX_CODE, '中证1000'),
+                        (_HS300_INDEX_CODE, '沪深300')):
+                    _st = trend_by_code.get(_code)
+                    if _st is None or len(_st) == 0:
+                        continue
+                    chart_trend_map.append(
+                        (_label, _st.reindex(chart_dates_idx, method='ffill')))
                 calendar_idx = pd.DatetimeIndex(calendar[:len(equity)])
-                equity_series = pd.Series(equity, index=calendar_idx)
+                equity_series = pd.Series(equity, index=calendar_idx).reindex(
+                    chart_index_df.index, method='ffill')
                 safe_part = re.sub(r'[^\w.-]+', '_', str(file_part or 'onestock'))
                 chart_name = (f'onestock_equity_{safe_part}_'
                               f'{str(start_date).replace("-", "")}_'
                               f'{str(end_date).replace("-", "")}.png')
                 chart_path = os.path.join(output, chart_name)
                 ChartGenerator(output_dir=output).plot_index_equity_with_trades(
-                    index_df, equity_series, trades,
-                    title=f'{index_name} 指数K线与单持仓权益（{start_date} ~ {end_date}）',
-                    save_path=chart_path)
+                    chart_index_df, equity_series, trades,
+                    title=f'沪深300/中证1000指数K线与持仓权益曲线（{start_date}~{end_date}）',
+                    save_path=chart_path, trend_states=chart_trend_map,
+                    index_frames=index_data)
                 b64 = _img_to_b64(chart_path)
                 if b64:
                     charts_html = (
@@ -5104,7 +5990,10 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
 
     html_path = None
     try:
-        tables = [('回测结果（按策略分类）', breakdown_headers, breakdown_rows)]
+        tables = [('回测结果', breakdown_headers, breakdown_rows)]
+        if verbose and buy_reason_table is not None:
+            tables.append(('买入信号分组收益', *buy_reason_table))
+            tables.append(('卖出信号分组收益', *sell_reason_table))
         if trade_rows:
             tables.append(('交易明细', trade_headers, trade_rows))
         _sources = [d[0].attrs.get('source') for d in loaded.values() if d]
@@ -5114,7 +6003,9 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
         _report_filename = _report_filename[:-5] + '_onestock.html'
 
         html_path = _generate_backtest_html(
-            f'单持仓轮动({len(loaded)}只)', start_date, end_date, capital, tables=tables,
+            (f'单持仓轮动({len(loaded)}只)' if max_positions == 1
+             else f'{max_positions}持仓轮动({len(loaded)}只)'),
+            start_date, end_date, capital, tables=tables,
             report_filename=_report_filename,
             source_label=_format_sources(_sources),
             charts_html=charts_html)
@@ -5143,38 +6034,41 @@ def _run_onestock_backtest(symbols, start_date, end_date, strat_keys, strat_enha
 @cli.command('backtest')
 @_src_option
 @_seqnum_option
-@_maxhold_option
-@_nodownbuy_option
+@_trendctl_option
+@_withdrawsell_option
+@_critera_option
+@_limit_option
 @click.option('--symbol', '-s', default=None, help='股票代码（与 -sf 至少指定一个）')
 @click.option('--symbol-file', '-sf', default=None, help='从指定文件读取股票代码进行批量回测（空格/逗号/换行分隔），仅处理有效 6 位代码并忽略名称，与 -s 同时使用时合并')
 @click.option('--random', is_flag=True, default=False, help='按 沪市主板:深市主板:创业板:科创板=6:5:5:2 比例随机抽取 100 只股票回测（忽略 -s 和 -sf），完成后将代码写入 report/random_<mmddHHMM>.txt')
-@click.option('--strategy', '-g', default='boll,macd',     help='策略选择 [ma1030|ema1030|macd|macd1|boll|kdj|sar|ma310|ma520|ema520|quality_value|hold|all]，多个用逗号分隔，all表示全部（默认boll,macd）')
-@click.option('--start', '-st', default=None, help='开始日期（默认1年前），格式: YYYYMMDD')
-@click.option('--end', '-e', default=None, help='结束日期，格式: YYYYMMDD')
+@click.option('--strategy', '-g', default='boll,macd',     help='策略选择 [ma1030|macd|macd1|boll|boma|kdj|sar|ma520|quality_value|hold|all]，多个用逗号分隔，all表示全部（默认boll,macd）')
+@click.option('--start', '-st', default=None, help='开始日期；配合 -d 时结束日期 = 开始日期 + 天数；未指定时按 -d 自结束日期前推，格式: YYYYMMDD')
+@click.option('--end', '-e', default=None, help='结束日期（优先于 -d 推算），格式: YYYYMMDD')
+@click.option('--duration', '-d', default=180, type=click.IntRange(1, 100000), show_default=True, help='时段天数（默认180）：无 -st 时开始=结束前N天；有 -st 且无 -e 时结束=开始+N天')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--output', '-o', default='./output', help='图表输出目录（默认./output）')
 @click.option('--chart', is_flag=True, default=False, help='生成K线图等图形（默认仅输出表格报告）')
-@click.option('--downlosssell', 'down_loss_sell', is_flag=True, default=False,
-              help='仅 --onestock 生效：下跌且亏损>2%或单日跌幅>5%时卖出；上涨优先 MACD，震荡/过冷优先 BOLL')
-@click.option('--onestock', type=click.IntRange(0, 1), default=None, is_flag=False, flag_value=0,
-              help='单持仓轮动回测 [N]：空仓时按 -g 策略顺序优先选择靠前策略发出买入信号的股票，待该策略卖出时清仓。N=0（默认）：持仓时忽略新买入信号；N=1：持仓时若有其它股票买入信号，且当前股票 RSI > 75，则卖出换股（同一只不操作）。--random 下每次空仓刷新随机股票池')
-@click.option('--fixcapital', is_flag=True, default=False, help='固定资金模式：每次买入均按初始资金额度买入，上一轮交易的盈亏不影响本轮交易资金')
-@click.option('--verbose', is_flag=True, default=False, help='批量回测时额外输出每只股票单独 HTML 报告；--onestock 时在 HTML 中增加指数K线+权益曲线单图')
-def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, output, chart, src, onestock, fixcapital, verbose, seqnum, max_hold_days, block_buy_on_downtrend, down_loss_sell):
-    """回测：重点输出开始日期至结束日期之间的买卖点及收益率、夏普比率、回撤等信息
+@click.option('--fixcapital', is_flag=True, default=False, help='固定资金模式：每笔买入金额固定为 -c/N（N 见 -n）；现金不足时仍按该金额买入，剩余现金可为负')
+@click.option('--num-positions', '-n', default=1, type=click.IntRange(1, 100), help='同时持有的股票数量 N（默认1）；--fixcapital 时每只买入固定为 初始资金/N，否则为 可用资金/(N-当前持股数)')
+@click.option('--verbose', is_flag=True, default=False, help='backtest 时在 HTML 报告中增加指数K线与权益曲线单图')
+def backtest_cmd(symbol, symbol_file, random, strategy, start, end, duration, capital, output, chart, src, fixcapital, num_positions, verbose, seqnum, trendctl, atr_stop_ratio, boma_criteria, limit):
+    """回测：持仓轮动流程（默认单持仓，-n 可同时持有 N 只）
 
-    流程：获取数据 -> 运行策略 -> 回测 -> 展示详细结果 -> 生成图表
-    指定 -sf 时对多个股票批量回测，输出表格（每只股票一行，各项指标作为列）。
-    未指定 -s/-sf 时默认采用 -sf input/pool.txt。
-    指定 --random 时按板块比例随机抽样 100 只股票批量回测，并写入 report/random_<mmddHHMM>.txt。
+    空仓/有空位时按 -g 策略顺序选择买入信号，持仓期间按对应策略卖出；
+    -n N 允许同时持有至多 N 只：--fixcapital 时每只买入 初始资金/N，否则为 可用资金/(N-当前持股数)。
+    -d N 指定时段天数（默认180），未指定 -st 时开始日期 = 结束日期前 N 天。
+    指定 -sf 时从文件读取股票池，未指定 -s/-sf 时默认 input/pool.txt。
+    指定 --random 时按板块比例随机抽取 100 只股票，空仓时刷新股票池。
     -g 支持多个策略（逗号或竖线分隔）。
     """
     try:
         set_primary_source(src)
         _set_fix_capital(fixcapital)
         _set_seqnum(seqnum)
-        _set_max_hold_days(max_hold_days)
-        _set_block_buy_on_downtrend(block_buy_on_downtrend)
+        _set_trendctl(trendctl)
+        _set_withdrawsell(atr_stop_ratio)
+        _set_boma_criteria(boma_criteria)
+        _set_limit(limit)
         capital = capital * 10000  # -c 单位为万元，内部换算为元
         strat_specs = _split_strategies(strategy)
         if any(s == 'all' for s in strat_specs):
@@ -5193,7 +6087,11 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
                     strat_keys.append(token)
                 strat_enhance[token] = 0
 
-        start_date, end_date = _parse_dates(start, end, default_days=_BACKTEST_PERIOD_DAYS)
+        _ctx = click.get_current_context()
+        duration_explicit = (
+            _ctx.get_parameter_source('duration') == ParameterSource.COMMANDLINE)
+        start_date, end_date = _parse_dates(
+            start, end, default_days=duration, duration_explicit=duration_explicit)
         strat_names = [_strat_label(k) for k in strat_keys]
 
         # 随机抽样模式：忽略 -s 与 -sf，按板块比例随机抽取 100 只股票
@@ -5221,7 +6119,7 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
             symbols = list(random_symbols)
         else:
             if symbol:
-                symbols.extend(s.strip() for s in re.split(r'[,\s，]+', symbol) if s.strip())
+                symbols.extend(_normalize_symbol_tokens(re.split(r'[,\s，]+', symbol)))
             if symbol_file:
                 file_symbols = _read_symbols_file(symbol_file)
                 symbols.extend(file_symbols)
@@ -5238,6 +6136,8 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
             symbols = file_symbols
             symbol_file = pool_path
 
+        _ensure_symbol_cap_map(symbols)
+
         # 报告文件名中的 <file> 部分：--random → random；-sf → 文件名（不含路径/扩展名）；否则为 -s 股票代码
         if random:
             _file_part = 'random'
@@ -5246,16 +6146,15 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
         else:
             _file_part = '-'.join(str(symbol or '').split())
 
-        # --onestock：单持仓轮动回测（随机模式下每次空仓刷新股票池）
-        if onestock is not None:
-            _run_onestock_backtest(
-                symbols, start_date, end_date, strat_keys, strat_enhance,
-                capital, output, random_mode=random, fix_capital=fixcapital,
-                file_part=_file_part, replace_on_buy=onestock,
-                block_buy_on_downtrend=block_buy_on_downtrend,
-                down_loss_sell=down_loss_sell, verbose=verbose)
-            return
+        # backtest 固定采用单持仓轮动流程（原 --onestock），不再提供普通批量/单股回测入口
+        _run_onestock_backtest(
+            symbols, start_date, end_date, strat_keys, strat_enhance,
+            capital, output, random_mode=random, fix_capital=fixcapital,
+            file_part=_file_part, replace_on_buy=0,
+            verbose=verbose, num_positions=num_positions)
+        return
 
+        # 以下为原批量/单股回测路径，CLI 已固定走单持仓轮动流程，保留代码供内部参考。
         # -sf / --random 批量回测：每只股票每策略一行，各项指标作为列
         if symbol_file or random:
             _print_header('批量回测', f'{len(symbols)} 只股票 - {", ".join(strat_names)}')
@@ -5849,7 +6748,7 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
 
         # 交易明细：每笔买卖的时间与该时段盈亏
         trade_headers, trade_rows = _build_trades_detail_table(risk.get('trades_df'))
-        if trade_rows and not _MAX_HOLD_DAYS:
+        if trade_rows:
             _print_section('交易明细（买卖时间与盈亏）')
             _print_table(trade_headers, trade_rows)
 
@@ -5907,14 +6806,15 @@ def backtest_cmd(symbol, symbol_file, random, strategy, start, end, capital, out
 @cli.command('compare')
 @_src_option
 @_seqnum_option
-@_maxhold_option
-@_nodownbuy_option
+@_trendctl_option
+@_withdrawsell_option
+@_critera_option
 @click.option('--symbol', '-s', required=True, help='股票代码（必需）')
 @click.option('--start', '-st', default=None, help='开始日期（默认180天前），格式: YYYYMMDD')
 @click.option('--end', '-e', default=None, help='结束日期，格式: YYYYMMDD')
 @click.option('--capital', '-c', default=100, type=float, help='初始资金（单位：万元，默认100万元）')
 @click.option('--chart', is_flag=True, default=False, help='生成策略对比图（默认仅输出表格报告）')
-def compare_cmd(symbol, start, end, capital, chart, src, seqnum, max_hold_days, block_buy_on_downtrend):
+def compare_cmd(symbol, start, end, capital, chart, src, seqnum, trendctl, atr_stop_ratio, boma_criteria):
     """策略对比：重点输出策略的对比结果
 
     流程：同时运行所有策略 -> 对比回测结果 -> 生成对比图表 -> 输出排名
@@ -5922,10 +6822,13 @@ def compare_cmd(symbol, start, end, capital, chart, src, seqnum, max_hold_days, 
     try:
         set_primary_source(src)
         _set_seqnum(seqnum)
-        _set_max_hold_days(max_hold_days)
-        _set_block_buy_on_downtrend(block_buy_on_downtrend)
+        _set_trendctl(trendctl)
+        _set_withdrawsell(atr_stop_ratio)
+        _set_boma_criteria(boma_criteria)
         capital = capital * 10000  # -c 单位为万元，内部换算为元
         start_date, end_date = _parse_dates(start, end)
+        _ensure_symbol_cap_map([symbol])
+        _preload_trend_states(start_date, end_date)
 
         _print_header('策略对比分析', symbol)
 

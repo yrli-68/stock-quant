@@ -5,7 +5,7 @@
 
 基于布林带指标的价格触及上下轨来生成交易信号：
     - 价格触及下轨后反弹，且 RSI < MIN_RSI_THRESHOLD，且（可选）EMA60 < close、ADX > 20 → 买入信号（带宽过滤已停用）
-    - 价格触及上轨后回落，或 RSI > MAX_RSI_THRESHOLD，或买入后自最高收盘价回撤≥MAX_DRAWDWON_THRESHOLD → 卖出信号
+    - 价格触及上轨后回落，或 RSI > MAX_RSI_THRESHOLD，或触发 ATR 动态止损（止损价=max(前一日止损价, close-N*ATR14)） → 卖出信号
 
 布林带由中轨（均线）和上下轨（均线 ± K倍标准差）组成，
 用于衡量价格的相对高低和波动性。
@@ -15,9 +15,10 @@ import pandas as pd
 import numpy as np
 
 from core.strategy import Strategy
-from core.indicators import calc_bollinger, calc_rsi, calc_ema, calc_adx
-from core.thresholds import (UNSET, get_threshold, get_max_drawdown_threshold,
-                             get_ema60_check, get_adx_check)
+from core.indicators import (calc_atr, calc_bollinger, calc_rsi, calc_ema,
+                             calc_adx, update_atr_trailing_stop,
+                             adjust_atr_stop_multiplier)
+from core.thresholds import get_threshold, get_ema60_check, get_adx_check
 
 
 class BollingerStrategy(Strategy):
@@ -32,16 +33,16 @@ class BollingerStrategy(Strategy):
         period (int): 布林带中轨周期，默认 20
         std (float): 标准差倍数，默认 2
         bbw_lookback (int): 布林带宽度过滤的统计回看窗口（默认 10；当前过滤已停用）
-        max_drawdown (float): 买入后自最高收盘价的最大回撤止损阈值，默认 0.15
+        use_atr_stop (bool): 是否启用 ATR 动态止损
     """
 
-    # 由 generate_signals 内部同步 -sn 与涨幅过滤（in_pos 仅对实际入场生效）
+    # 由 generate_signals 内部同步 -sn 过滤（in_pos 仅对实际入场生效）
     integrates_buy_filter = True
     # -sn 仅对 BOLL 生效
     supports_seqnum = True
 
     def __init__(self, period=20, std=2, name='Bollinger', bbw_lookback=10,
-                 max_drawdown=UNSET):
+                 use_atr_stop=False):
         """
         初始化布林带策略
 
@@ -50,18 +51,16 @@ class BollingerStrategy(Strategy):
             std (float): 上下轨的标准差倍数，默认 2
             name (str): 策略名称
             bbw_lookback (int): 布林带宽度过滤的回看窗口，默认 10（当前过滤已停用）
-            max_drawdown (float): 最大回撤止损阈值（0.15 表示 15%；None 表示不启用；
-                未传参时读取 squant.toml 的 MAX_DRAWDWON_THRESHOLD）
+            use_atr_stop (bool): 是否启用 ATR 动态止损（止损价=max(前一日止损价, close-N*ATR14)）
         """
         super().__init__(name=name)
         self.period = period
         self.std = std
         self.bbw_lookback = bbw_lookback
-        self.max_drawdown = (get_max_drawdown_threshold()
-                             if max_drawdown is UNSET else max_drawdown)
+        self.use_atr_stop = bool(use_atr_stop)
+        self.atr_stop_multiplier = 2.0
 
-    def generate_signals(self, df, seqnum=0, max_buy_gain=None, sar_ok=None,
-                         index_ok=None):
+    def generate_signals(self, df, seqnum=0):
         """
         生成布林带交易信号
 
@@ -69,20 +68,17 @@ class BollingerStrategy(Strategy):
             - 买入：价格触及下轨后反弹，且 RSI < MIN_RSI_THRESHOLD；
               EMA60_CHECK=1 时还要求 EMA60 < close，ADX_CHECK=1 时还要求 ADX > 20 → 买入(1)
             - 卖出：价格触及上轨后回落，或 RSI > MAX_RSI_THRESHOLD，
-              或买入后自最高收盘价回撤 ≥ MAX_DRAWDWON_THRESHOLD → 卖出(-1)
+              或触发 ATR 动态止损 → 卖出(-1)
             - 其余情况 → 持有(0)
 
         注：原布林带宽度过滤（非挤压 / 非极端宽）经实测效果不佳，已停用；
         bbw_lookback / BOLL_SQUEEZE_SCALE / BOLL_EXTRAWIDE_SCALE 暂不生效。
-        最大回撤止损（回撤 ≥ max_drawdown）不受带宽过滤影响。
+        ATR 动态止损不受带宽过滤影响。
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
             seqnum (int): 买入信号序号阈值（0=不过滤）；内部据此同步 in_pos，
                 使被过滤的买入不会被视为已入场
-            max_buy_gain (float): 当日涨幅达到该值时取消买入（None=不限制）
-            sar_ok (pd.Series): 买入所需的 SAR 条件（True=允许买入；None=不检查）
-            index_ok (pd.Series): 买入所需的上证指数条件（True=允许买入；None=不检查）
 
         Returns:
             pd.Series: 交易信号序列，索引与 df 对齐
@@ -133,52 +129,58 @@ class BollingerStrategy(Strategy):
             adx = df['ADX14'] if 'ADX14' in df.columns else calc_adx(df)['ADX']
             adx_ok = adx > 20
 
-        # 逐日跟踪持仓与买入后最高收盘价，实现最大回撤止损。
-        # in_pos 只在买入信号实际生效（通过序号与涨幅过滤）后置为 True，
+        # 逐日跟踪持仓与 ATR 动态止损。
+        # in_pos 只在买入信号实际生效（通过序号与指数过滤）后置为 True，
         # 避免被过滤的买入导致后续买入被抑制或产生无持仓的孤立卖出。
-        gains = close.pct_change() if max_buy_gain is not None else None
+        atr = df['ATR14'] if 'ATR14' in df.columns else calc_atr(df)
+        market_states = df.attrs.get('market_states')
+        if market_states is not None and len(market_states) > 0:
+            try:
+                market_states = market_states.reindex(df.index, method='ffill')
+            except Exception:
+                market_states = None
         seq_target = seqnum if seqnum and seqnum > 0 else 1
         buy_count = 0
         in_pos = False
-        peak = 0.0
+        stop_price = None
         for i in range(len(df)):
             c = float(close.iloc[i])
+            state = market_states.iloc[i] if market_states is not None else None
+            atr_mult = adjust_atr_stop_multiplier(self.atr_stop_multiplier, state)
             if not in_pos:
                 # 空仓期间的卖出信号同样重置买入计数
                 if bool(sell_signal.iloc[i]):
                     buy_count = 0
                 if bool(buy_signal.iloc[i]):
-                    gain_ok = True
-                    if gains is not None:
-                        g = float(gains.iloc[i])
-                        gain_ok = (not np.isnan(g)) and g < max_buy_gain
                     if seqnum and seqnum > 0:
-                        # 序号按原始买入信号计数（包含被涨幅过滤的买入）
+                        # 序号按原始买入信号计数（包含被过滤的买入）
                         buy_count += 1
-                        allow = (buy_count == seq_target) and gain_ok
+                        allow = (buy_count == seq_target)
                     else:
-                        allow = gain_ok
+                        allow = True
                     allow = (allow
-                             and (sar_ok is None or bool(sar_ok.iloc[i]))
                              and (ema60_ok is None or bool(ema60_ok.iloc[i]))
-                             and (adx_ok is None or bool(adx_ok.iloc[i]))
-                             and (index_ok is None or bool(index_ok.iloc[i])))
+                             and (adx_ok is None or bool(adx_ok.iloc[i])))
                     if allow:
                         signals.iloc[i] = self.signal_value(1)
                         in_pos = True
-                        peak = c
+                        stop_price = update_atr_trailing_stop(
+                            c, atr.iloc[i], multiplier=atr_mult)
                         buy_count = 0
             else:
-                if c > peak:
-                    peak = c
-                dd = (peak - c) / peak if peak > 0 else 0.0
-                if self.max_drawdown is not None and dd >= self.max_drawdown:
-                    signals.iloc[i] = self.signal_value(-1)       # 回撤止损
-                    in_pos = False
-                    buy_count = 0
-                elif bool(sell_signal.iloc[i]):
+                if self.use_atr_stop:
+                    stop_price = update_atr_trailing_stop(
+                        c, atr.iloc[i], stop_price, multiplier=atr_mult)
+                    if stop_price is not None and c <= stop_price:
+                        signals.iloc[i] = self.signal_value(-1)
+                        in_pos = False
+                        stop_price = None
+                        buy_count = 0
+                        continue
+                if bool(sell_signal.iloc[i]):
                     signals.iloc[i] = self.signal_value(-1)
                     in_pos = False
+                    stop_price = None
                     buy_count = 0
 
         return signals

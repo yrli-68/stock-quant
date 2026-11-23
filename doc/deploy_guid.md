@@ -280,16 +280,13 @@ URL = "https://oapi.dingtalk.com/robot/send?access_token=请替换"
 key = "quant"
 
 [tool.stock-quant.thresholds]
-MAX_DRAWDWON_THRESHOLD = 35
 MAX_RSI_THRESHOLD = 85
 MIN_RSI_THRESHOLD = 65
 PE_THRESHOLD = 100
 BOLL_SQUEEZE_SCALE = 0.01
 BOLL_EXTRAWIDE_SCALE = 3
-SAR_CHECK = 0
 EMA60_CHECK = 0
 ADX_CHECK = 0
-INDEX_CHECK = 0
 ```
 
 ### 5.1 配置安全
@@ -949,7 +946,7 @@ squant backtest -sf input/pool.txt -st 20200101 -e 20251231 -g boll,macd
 
 # 单持仓轮动回测
 squant backtest -sf input/pool.txt -st 20200101 -e 20251231 \
-  -g boll,macd --onestock
+  -g boll,macd
 
 # 扫描
 squant scan --random -g boll,macd -t 10

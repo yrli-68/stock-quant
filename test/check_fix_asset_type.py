@@ -2,7 +2,7 @@
 """检查并修正 daily_kline.asset_type（历史上全部默认成了 stock）。
 
 判定优先级：
-1. stocks 表：is_etf=1 -> etf；asset_type 为非 stock 的有效类型 -> 使用该值；
+1. stocks 表：asset_type 为非 stock 的有效类型 -> 使用该值；
 2. 否则按代码 + 交易所规则推断（区分 index/etf/fund/bond/stock）。
 
 用法：
@@ -39,12 +39,11 @@ def _connect():
 
 
 def _load_stocks_ref(cur):
-    cur.execute("SELECT code, exchange, asset_type, is_etf, name FROM stocks")
+    cur.execute("SELECT code, exchange, asset_type, name FROM stocks")
     ref = {}
-    for code, ex, at, is_etf, name in cur.fetchall():
+    for code, ex, at, name in cur.fetchall():
         ref[(str(code), str(ex))] = {
             'asset_type': str(at or 'stock'),
-            'is_etf': int(is_etf or 0),
             'name': name or '',
         }
     return ref
@@ -53,8 +52,6 @@ def _load_stocks_ref(cur):
 def _target_type(code, ex, ref):
     info = ref.get((str(code), str(ex)))
     if info:
-        if info['is_etf'] == 1:
-            return 'etf'
         if info['asset_type'] in ('index', 'etf', 'fund', 'bond'):
             return info['asset_type']
     return infer_asset_type(code, ex)

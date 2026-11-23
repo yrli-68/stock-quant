@@ -19,12 +19,19 @@ CREATE TABLE stocks (
                  NOT NULL DEFAULT 'stock',
     name         VARCHAR(50) NOT NULL,
     market       VARCHAR(4),
-    stock_type   VARCHAR(20) DEFAULT 'dividend',
-    is_etf       TINYINT DEFAULT 0,
     listed_date  DATE,
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (code, exchange, asset_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 1.1 交易日历（网络/行情回写）
+CREATE TABLE IF NOT EXISTS trading_calendar (
+    trade_date    DATE NOT NULL,
+    source        VARCHAR(30) DEFAULT 'kline',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 2. 日K线 (OHLCV)

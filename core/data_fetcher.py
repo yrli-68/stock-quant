@@ -271,6 +271,92 @@ def get_primary_source() -> str:
     return _PRIMARY_SOURCE
 
 
+def _fetch_trade_calendar_baostock(start_date: str, end_date: str) -> list:
+    """从 Baostock 网络获取交易日历并写入数据库。"""
+    try:
+        import baostock as bs
+        import contextlib
+        import io
+        import socket
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(15)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                lg = bs.login()
+            if getattr(lg, 'error_code', '0') != '0':
+                return []
+            try:
+                rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
+                if getattr(rs, 'error_code', '0') != '0':
+                    return []
+                rows = []
+                while rs.next():
+                    d, flag = rs.get_row_data()[:2]
+                    if str(flag) == '1':
+                        rows.append(d)
+            finally:
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        bs.logout()
+                except Exception:
+                    pass
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+        if rows:
+            try:
+                from core.db import store_trade_calendar
+                store_trade_calendar(rows, source='baostock', force=True)
+            except Exception:
+                pass
+        return rows
+    except Exception:
+        return []
+
+
+def _fetch_trade_calendar_akshare(start_date: str, end_date: str) -> list:
+    """从 AkShare 网络获取交易日历并写入数据库。"""
+    try:
+        import akshare as ak
+        df = ak.tool_trade_date_hist_sina()
+        if df is None or len(df) == 0:
+            return []
+        dates = pd.to_datetime(df['trade_date'], errors='coerce').dropna()
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        dates = dates[(dates >= start_dt) & (dates <= end_dt)]
+        rows = [d.strftime('%Y-%m-%d') for d in dates]
+        if rows:
+            try:
+                from core.db import store_trade_calendar
+                store_trade_calendar(rows, source='akshare', force=True)
+            except Exception:
+                pass
+        return rows
+    except Exception:
+        return []
+
+
+def _fetch_trade_calendar_network(start_date: str, end_date: str) -> list:
+    rows = _fetch_trade_calendar_baostock(start_date, end_date)
+    if rows:
+        return rows
+    return _fetch_trade_calendar_akshare(start_date, end_date)
+
+
+_MARKET_TRADE_DATES_OVERRIDE = None
+
+
+def set_market_trade_dates_override(dates) -> None:
+    """在多进程 worker 中注入父进程预取的市场交易日集合。"""
+    global _MARKET_TRADE_DATES_OVERRIDE
+    _MARKET_TRADE_DATES_OVERRIDE = frozenset(dates) if dates is not None else None
+
+
+def preload_market_trade_dates(start_date: str, end_date: str) -> frozenset:
+    """父进程预取市场交易日，供 worker 复用。"""
+    return _cached_market_trade_dates(start_date, end_date)
+
+
 @lru_cache(maxsize=64)
 def _cached_market_trade_dates(db_start: str, db_end: str) -> frozenset:
     """进程内缓存市场交易日（同一区间只查一次，批量回测显著提速）。"""
@@ -279,7 +365,9 @@ def _cached_market_trade_dates(db_start: str, db_end: str) -> frozenset:
         rows = fetch_market_trade_dates(db_start, db_end, force=True)
     except Exception as e:
         logger.warning("读取市场交易日失败: %s", e)
-        return frozenset()
+        rows = []
+    if not rows:
+        rows = _fetch_trade_calendar_network(db_start, db_end)
     return frozenset(pd.to_datetime(rows))
 
 
@@ -343,9 +431,18 @@ class DataFetcher:
         return symbol.isdigit()
 
     def _normalize_a_stock_symbol(self, symbol: str) -> str:
-        """标准化A股代码，去除可能的前缀如 sh/sz"""
-        symbol = symbol.strip().upper()
-        if symbol.startswith('SH') or symbol.startswith('SZ'):
+        """标准化A股代码：去除 sh/sz/bj 前缀或 .SH/.SZ/.BJ 后缀，返回 6 位数字代码。
+
+        支持 sh600036 / SH.600036 / 600036.SH / 600036 等写法。
+        """
+        symbol = str(symbol).strip().upper()
+        if '.' in symbol:
+            left, right = symbol.split('.', 1)
+            if right in ('SH', 'SZ', 'BJ') and left:
+                symbol = left
+            elif left in ('SH', 'SZ', 'BJ') and right:
+                symbol = right
+        if len(symbol) > 2 and symbol[:2] in ('SH', 'SZ', 'BJ') and symbol[2:].isdigit():
             symbol = symbol[2:]
         return symbol
 
@@ -714,7 +811,8 @@ class DataFetcher:
         self,
         symbol: str,
         start_date: str,
-        end_date: str
+        end_date: str,
+        asset_type: str = None
     ) -> pd.DataFrame:
         """从数据库读取原始K线（固定 adjust_type='raw'，忽略 _DB_MODE）。"""
         db_start = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
@@ -722,7 +820,7 @@ class DataFetcher:
         try:
             from core.db import fetch_kline
             rows = fetch_kline(
-                symbol, db_start, db_end,
+                symbol, db_start, db_end, asset_type=asset_type,
                 adjust_type='raw', force=True)
         except Exception as e:
             logger.warning("读取数据库K线失败(%s): %s", symbol, e)
@@ -747,6 +845,8 @@ class DataFetcher:
 
     def _read_market_trade_dates(self, start_date: str, end_date: str) -> frozenset:
         """读取区间内市场实际交易日集合（用于排除长假缺口）。"""
+        if _MARKET_TRADE_DATES_OVERRIDE is not None:
+            return _MARKET_TRADE_DATES_OVERRIDE
         db_start = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
         db_end = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
         return _cached_market_trade_dates(db_start, db_end)
@@ -780,7 +880,7 @@ class DataFetcher:
 
         return ranges
 
-    def _store_kline_df(self, symbol: str, df: pd.DataFrame):
+    def _store_kline_df(self, symbol: str, df: pd.DataFrame, asset_type: str = None):
         """把原始K线 DataFrame 强制回写数据库（固定 adjust_type='raw'）。"""
         if df is None or df.empty:
             return
@@ -803,7 +903,8 @@ class DataFetcher:
             return
         try:
             from core.db import store_kline
-            store_kline(symbol, rows, adjust_type='raw', force=True)
+            store_kline(symbol, rows, asset_type=asset_type,
+                        adjust_type='raw', force=True)
         except Exception as e:
             logger.warning("回写K线数据失败(%s): %s", symbol, e)
 
@@ -1545,6 +1646,106 @@ class DataFetcher:
         start_date: str,
         end_date: str
     ) -> pd.DataFrame:
+        """获取指数数据：数据库优先，缺失时网络补齐并回写。"""
+        start_date = self._normalize_date(start_date)
+        end_date = self._normalize_date(end_date)
+        today = datetime.now().strftime('%Y%m%d')
+
+        if end_date == today:
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            frames = []
+            if start_date <= yesterday:
+                df_hist = self._get_index_data_db_first(
+                    symbol, start_date, yesterday, gap_days=0)
+                if df_hist is not None and not df_hist.empty:
+                    frames.append(df_hist)
+            # 今日指数数据只参与内存计算，不回写
+            df_today = self._get_index_data_network(symbol, today, today)
+            if df_today is not None and not df_today.empty:
+                df_today_raw = df_today.reset_index()
+                if 'date' not in df_today_raw.columns and 'index' in df_today_raw.columns:
+                    df_today_raw = df_today_raw.rename(columns={'index': 'date'})
+                today_dt = pd.to_datetime(df_today_raw['date']).dt.strftime('%Y%m%d')
+                df_today_raw = df_today_raw[today_dt == today]
+                if not df_today_raw.empty:
+                    frames.append(df_today_raw)
+            if frames:
+                df_raw = pd.concat(frames, ignore_index=True)
+                df_raw = df_raw.drop_duplicates(subset=['date'], keep='last')
+                df_raw = df_raw.sort_values('date').reset_index(drop=True)
+            else:
+                df_raw = pd.DataFrame()
+            return self._standardize_dataframe(df_raw)
+
+        df_raw = self._get_index_data_db_first(symbol, start_date, end_date)
+        return self._standardize_dataframe(df_raw)
+
+    def _get_index_data_db_first(self, symbol: str, start_date: str,
+                                 end_date: str, gap_days: int = 3):
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        df_db = self._read_db_kline(symbol, start_date, end_date,
+                                    asset_type='index')
+        if df_db.empty:
+            logger.info("数据库无指数 %s K线，改为网络获取并回写", symbol)
+            net = self._get_index_data_network(symbol, start_date, end_date)
+            if net is None or net.empty:
+                return pd.DataFrame()
+            raw = net.reset_index()
+            if 'date' not in raw.columns and 'index' in raw.columns:
+                raw = raw.rename(columns={'index': 'date'})
+            self._store_kline_df(symbol, raw, asset_type='index')
+            raw.attrs['source'] = 'network'
+            return raw
+
+        missing = self._find_missing_ranges(
+            df_db['date'], start_dt, end_dt, gap_days=gap_days)
+        if missing:
+            missing = [(a, b) for a, b in missing
+                       if not is_ignored_gap_range(a, b)]
+            if missing:
+                market_dates = self._read_market_trade_dates(start_date, end_date)
+                if market_dates:
+                    missing = [
+                        (a, b) for a, b in missing
+                        if any(d in market_dates for d in pd.date_range(a, b))
+                    ]
+
+        frames = [df_db]
+        filled = False
+        for a, b in missing:
+            seg_s = a.strftime('%Y%m%d')
+            seg_e = b.strftime('%Y%m%d')
+            net = self._get_index_data_network(symbol, seg_s, seg_e)
+            if net is None or net.empty:
+                continue
+            raw = net.reset_index()
+            if 'date' not in raw.columns and 'index' in raw.columns:
+                raw = raw.rename(columns={'index': 'date'})
+            self._store_kline_df(symbol, raw, asset_type='index')
+            frames.append(raw)
+            filled = True
+
+        if not filled:
+            df_db = df_db[(df_db['date'] >= start_dt)
+                          & (df_db['date'] <= end_dt)]
+            df_db = df_db.sort_values('date').reset_index(drop=True)
+            df_db.attrs['source'] = 'db'
+            return df_db
+
+        df = pd.concat(frames, ignore_index=True)
+        df = df.drop_duplicates(subset=['date'], keep='last')
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        df = df.sort_values('date').reset_index(drop=True)
+        df.attrs['source'] = 'db+network'
+        return df
+
+    def _get_index_data_network(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
         """
         获取指数历史数据
 
@@ -1569,6 +1770,51 @@ class DataFetcher:
                      symbol, start_date, end_date)
 
         raw_symbol = self._normalize_a_stock_symbol(symbol)
+
+        def _fetch_baostock_index():
+            """Baostock 指数（sh.000300 / sz.399001 等）。"""
+            try:
+                bs = self._baostock_login()
+                if bs is None:
+                    return pd.DataFrame()
+                ex = 'sz' if raw_symbol.startswith(('399', '899')) else 'sh'
+                bs_code = f'{ex}.{raw_symbol}'
+                s = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
+                e = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
+                fields = 'date,open,high,low,close,volume,amount,pctChg'
+                rs = bs.query_history_k_data_plus(
+                    bs_code, fields, start_date=s, end_date=e,
+                    frequency='d', adjustflag='3')
+                rows = []
+                if getattr(rs, 'error_code', '0') == '0':
+                    while rs.next():
+                        rows.append(rs.get_row_data())
+                if not rows:
+                    return pd.DataFrame()
+                df = pd.DataFrame(rows, columns=fields.split(','))
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                for col in ['open', 'high', 'low', 'close', 'volume',
+                            'amount', 'pctChg']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                df = df.dropna(subset=['date'])
+                if df.empty:
+                    return pd.DataFrame()
+                logger.info("Baostock 指数数据返回 %d 条记录", len(df))
+                return self._standardize_dataframe(df)
+            except Exception as e:
+                logger.warning("Baostock 获取指数数据失败: %s", str(e))
+                return pd.DataFrame()
+
+        # 首选/测速最快源为 baostock 时优先取 baostock 指数，避免其它源超时
+        _primary = get_primary_source()
+        if _primary == 'auto':
+            _primary = run_source_speed_test() or 'auto'
+        if _primary == 'baostock':
+            _df_bs = _fetch_baostock_index()
+            if _df_bs is not None and not _df_bs.empty:
+                return _df_bs
+
         # 优先使用东方财富指数接口（支持完整历史；新浪仅返回最近 1000 根）
         try:
             secid = f'0.{raw_symbol}' if raw_symbol.startswith('399') else f'1.{raw_symbol}'
@@ -1645,6 +1891,11 @@ class DataFetcher:
         except Exception as e:
             logger.error("获取指数数据失败: %s", str(e))
 
+        # 备选：Baostock 指数
+        _df_bs = _fetch_baostock_index()
+        if _df_bs is not None and not _df_bs.empty:
+            return _df_bs
+
         # 备选：AkShare 长历史指数接口
         try:
             import akshare as ak
@@ -1667,17 +1918,19 @@ class DataFetcher:
         except Exception as e:
             logger.warning("AkShare 获取指数数据失败: %s", str(e))
 
-        # 备选：yfinance
-        try:
-            import yfinance as yf
-            logger.info("尝试使用 yfinance 获取指数: %s", symbol)
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(start=start_date, end=end_date)
-            if df is not None and not df.empty:
-                df = df.reset_index()
-                return self._standardize_dataframe(df)
-        except Exception:
-            pass
+        # 备选：yfinance（仅用于非 A 股纯数字代码，避免把 000300.SH 当作 Yahoo ticker 超时）
+        raw_symbol = self._normalize_a_stock_symbol(symbol)
+        if not raw_symbol.isdigit():
+            try:
+                import yfinance as yf
+                logger.info("尝试使用 yfinance 获取指数: %s", symbol)
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(start=start_date, end=end_date)
+                if df is not None and not df.empty:
+                    df = df.reset_index()
+                    return self._standardize_dataframe(df)
+            except Exception:
+                pass
 
         return pd.DataFrame()
 

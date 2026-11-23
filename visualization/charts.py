@@ -7,6 +7,8 @@ matplotlib.use('Agg')  # 使用非交互式后端，避免GUI相关错误
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import matplotlib.ticker as mticker
+from matplotlib.collections import LineCollection, PatchCollection
+from matplotlib.patches import Rectangle
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
@@ -43,6 +45,61 @@ def _cached_breadth_adl(start_date, end_date, universe_code='ALL_A'):
     except Exception:
         return ()
     return tuple(rows)
+
+# ============================================================================
+# X 轴日期刻度
+# ============================================================================
+
+
+def _adaptive_month_ticks(index, fig_width_in=16.0, fontsize=8):
+    """生成自适应月度 x 轴刻度，标签格式为 YYMM（如 2506）。
+
+    依据图宽、字号与标签近似宽度估算可容纳的标签数量，选择能避免文字重叠的
+    最小月份间隔（1/2/3/4/6/12/24/36 个月）；并在首个刻度与第二个刻度过近时
+    去掉首个刻度。返回 (ticks, labels)，ticks 为 index 中的整数位置。
+    """
+    month_idx = []
+    prev_ym = None
+    for i, d in enumerate(index):
+        try:
+            ym = (d.year, d.month)
+        except AttributeError:
+            dt = pd.Timestamp(d)
+            ym = (dt.year, dt.month)
+        if ym != prev_ym:
+            month_idx.append(i)
+            prev_ym = ym
+    if not month_idx:
+        return [], []
+
+    # 数字字符宽度约为 0.62×字号；另预留约 1.2×字号间隙
+    label_pt = 4 * fontsize * 0.62
+    gap_pt = fontsize * 1.2
+    usable_pt = max(60.0, fig_width_in * 72.0 * 0.92)
+    max_labels = max(2, int(usable_pt / (label_pt + gap_pt)))
+
+    n_months = len(month_idx)
+    candidates = (1, 2, 3, 4, 6, 12, 24, 36)
+    step = candidates[-1]
+    for cand in candidates:
+        if (n_months + cand - 1) // cand <= max_labels:
+            step = cand
+            break
+
+    ticks = month_idx[::step]
+    labels = []
+    for i in ticks:
+        d = index[i]
+        labels.append(d.strftime('%y%m') if hasattr(d, 'strftime')
+                      else pd.Timestamp(d).strftime('%y%m'))
+
+    if len(ticks) >= 2:
+        gaps = [ticks[j + 1] - ticks[j] for j in range(len(ticks) - 1)]
+        med = float(np.median(gaps))
+        if med > 0 and (ticks[1] - ticks[0]) < 0.5 * med:
+            ticks = ticks[1:]
+            labels = labels[1:]
+    return ticks, labels
 
 # ============================================================================
 # 中文字体设置
@@ -89,11 +146,11 @@ FP_REGULAR, FP_BOLD = _setup_chinese_font()
 # 全局配色方案
 # ============================================================================
 
-# K线主图均线叠加（MA10/MA20/MA60/MA120）配色
+# K线主图均线叠加（MA5/MA10/MA20/MA60）配色
+_MA5_COLOR = '#16a085'    # 青色
 _MA10_COLOR = '#f39c12'   # 橙色
 _MA20_COLOR = '#3498db'   # 蓝色
 _MA60_COLOR = '#e74c3c'   # 红色
-_MA120_COLOR = '#9b59b6'  # 紫色
 
 # 配色方案：采用柔和的颜色搭配，保证图表美观
 COLOR_UP = '#e74c3c'        # 上涨红色
@@ -146,15 +203,32 @@ class ChartGenerator:
         return os.path.join(self.output_dir, self.prefix + filename)
 
     def _ma_price_overlays(self, df, panel=0):
-        """生成叠加在K线主图(panel)上的 MA10/MA20/MA60/MA120 曲线 addplot 列表"""
-        specs = [(10, _MA10_COLOR), (20, _MA20_COLOR), (60, _MA60_COLOR), (120, _MA120_COLOR)]
+        """生成叠加在K线主图(panel)上的 MA5/MA10/MA20/MA60 曲线 addplot 列表"""
+        specs = [(5, _MA5_COLOR), (10, _MA10_COLOR), (20, _MA20_COLOR), (60, _MA60_COLOR)]
         plots = []
         for period, color in specs:
             col = f'MA{period}'
             if col in df.columns:
                 plots.append(mpf.make_addplot(df[col], panel=panel, color=color,
-                                              width=1.0, secondary_y=False))
+                                              width=1.0, secondary_y=False,
+                                              label=f'MA{period}'))
         return plots
+
+    def _add_ma_legend(self, ax):
+        """在 K 线主图显示 MA 曲线图例。"""
+        handles, labels = [], []
+        for line in ax.get_lines():
+            lab = line.get_label()
+            if lab and lab.startswith('MA'):
+                handles.append(line)
+                labels.append(lab)
+        if handles:
+            try:
+                ax.legend(handles, labels, loc='upper left', fontsize=8,
+                          framealpha=0.7, prop=FP_REGULAR,
+                          ncol=min(4, len(labels)))
+            except Exception:
+                pass
 
     def _adl_series(self, df):
         """从 market_breadth 读取 ADL 累计线，并对齐到 df 的日期索引。"""
@@ -594,16 +668,12 @@ class ChartGenerator:
     # 策略 → 指标子图类型
     STRATEGY_INDICATOR_TYPE = {
         'ma1030': 'ma',
-        'ema1030': 'ema',
         'macd': 'macd',
         'macd1': 'macd',
-        'rsi': 'rsi',
         'boll': 'boll',
         'kdj': 'kdj',
         'sar': 'sar',
-        'ma310': 'sg1',
         'ma520': 'sg2',
-        'ema520': 'sg3',
         'momentum': 'momentum',
         'volatility': 'volatility',
         'breadth': 'volume',
@@ -626,6 +696,27 @@ class ChartGenerator:
         import re as _re
         m = _re.match(r'^(.*?)(\d+)$', key)
         return m.group(1) if m else key
+
+    def _price_signal_addplots(self, df, buy_mask, sell_mask, panel=0):
+        """在主 K 线面板标注买卖点：买入三角在低点下方，卖出三角在高点上方。"""
+        plots = []
+        if df is None or 'Low' not in df.columns or 'High' not in df.columns:
+            return plots
+        low = pd.to_numeric(df['Low'], errors='coerce')
+        high = pd.to_numeric(df['High'], errors='coerce')
+        buy_pts = (low * 0.995).where(buy_mask)
+        sell_pts = (high * 1.005).where(sell_mask)
+        if buy_pts.notna().any():
+            plots.append(mpf.make_addplot(
+                buy_pts, type='scatter', panel=panel, marker='^',
+                markersize=90, color=COLOR_UP, edgecolors=COLOR_UP,
+                linewidths=1.0, label='买', secondary_y=False))
+        if sell_pts.notna().any():
+            plots.append(mpf.make_addplot(
+                sell_pts, type='scatter', panel=panel, marker='v',
+                markersize=90, color=COLOR_DOWN, edgecolors=COLOR_DOWN,
+                linewidths=1.0, label='卖', secondary_y=False))
+        return plots
 
     def _strategy_indicator_addplots(self, df, strategy_key, panel, signals=None):
         """根据策略生成对应的技术指标 addplot 列表（绘制在 panel 面板）"""
@@ -666,27 +757,12 @@ class ChartGenerator:
                 col = f'MA{period}'
                 if col in df.columns:
                     plots.append(mpf.make_addplot(df[col], panel=panel, color=color, width=1.0, ylabel='MA', label=f'MA{period}', secondary_y=False))
-        elif ind_type == 'sg1':
-            # SG1：MA3 快线与 MA10 慢线（MA3 缺失时按 close 现算）
-            ma3 = df['MA3'] if 'MA3' in df.columns else df['Close'].rolling(3).mean() if 'Close' in df.columns else None
-            if ma3 is not None:
-                plots.append(mpf.make_addplot(ma3, panel=panel, color=COLOR_ORANGE, width=1.0, ylabel='MA', label='MA3', secondary_y=False))
-            if 'MA10' in df.columns:
-                plots.append(mpf.make_addplot(df['MA10'], panel=panel, color=COLOR_TEAL, width=1.0, label='MA10', secondary_y=False))
         elif ind_type == 'sg2':
             # SG2：MA5 快线与 MA20 慢线
             if 'MA5' in df.columns:
                 plots.append(mpf.make_addplot(df['MA5'], panel=panel, color=COLOR_ORANGE, width=1.0, ylabel='MA', label='MA5', secondary_y=False))
             if 'MA20' in df.columns:
                 plots.append(mpf.make_addplot(df['MA20'], panel=panel, color=COLOR_TEAL, width=1.0, label='MA20', secondary_y=False))
-        elif ind_type == 'sg3':
-            # SG3：EMA5 快线与 EMA20 慢线（缺失时按 Close 现算）
-            ema5 = df['EMA5'] if 'EMA5' in df.columns else df['Close'].ewm(span=5, adjust=False).mean() if 'Close' in df.columns else None
-            ema20 = df['EMA20'] if 'EMA20' in df.columns else df['Close'].ewm(span=20, adjust=False).mean() if 'Close' in df.columns else None
-            if ema5 is not None:
-                plots.append(mpf.make_addplot(ema5, panel=panel, color=COLOR_ORANGE, width=1.0, ylabel='EMA', label='EMA5', secondary_y=False))
-            if ema20 is not None:
-                plots.append(mpf.make_addplot(ema20, panel=panel, color=COLOR_TEAL, width=1.0, label='EMA20', secondary_y=False))
         elif ind_type == 'ema':
             for period, color in ((10, COLOR_ORANGE), (30, COLOR_TEAL)):
                 col = f'EMA{period}'
@@ -786,30 +862,8 @@ class ChartGenerator:
             lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
             span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
             return lo - span * 0.05, hi + span * 0.05
-        if ind_type == 'sg1':
-            cols = [c for c in ('MA3', 'MA10') if c in df.columns]
-            if not cols:
-                return None, None
-            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
-            vals = vals[~pd.isna(vals).all(axis=1)]
-            if vals.size == 0:
-                return None, None
-            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
-            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
-            return lo - span * 0.05, hi + span * 0.05
         if ind_type == 'sg2':
             cols = [c for c in ('MA5', 'MA20') if c in df.columns]
-            if not cols:
-                return None, None
-            vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
-            vals = vals[~pd.isna(vals).all(axis=1)]
-            if vals.size == 0:
-                return None, None
-            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
-            span = (hi - lo) if hi != lo else (abs(hi) or 1.0)
-            return lo - span * 0.05, hi + span * 0.05
-        if ind_type == 'sg3':
-            cols = [c for c in ('EMA5', 'EMA20') if c in df.columns]
             if not cols:
                 return None, None
             vals = pd.concat([df[c] for c in cols], axis=1).to_numpy(dtype=float)
@@ -921,7 +975,7 @@ class ChartGenerator:
     @_synchronized_plot
     def plot_signal_composite(self, df, signals, strategy_key='', title='买卖信号', save_path=None, equity_curve=None):
         """
-        K线主图（买卖点直接标注在K线上）+ 成交量 + 策略指标子图 + 权益曲线子图
+        K线主图（含 MA 曲线图例、买卖点标注）+ 策略指标子图 + 权益曲线子图（不含成交量/ADL）
 
         Parameters
         ----------
@@ -969,24 +1023,16 @@ class ChartGenerator:
                 raise ValueError(f"缺少必要列: {col}")
 
         add_plots = []
-        panel_ratios = [2, 1]  # K线(原高度2/3) + 成交量
+        panel_ratios = [3]  # 仅 K 线主图（取消成交量图）
 
-        # K线主图叠加 MA10/MA20/MA60/MA120
+        # K线主图叠加 MA5/MA10/MA20/MA60（带图例）
         add_plots.extend(self._ma_price_overlays(df, panel=0))
 
-        # 买卖点标注已移至指标子图（由 _strategy_indicator_addplots 处理），K线主图不再标注
+        # 在主 K 线价格面板标注买卖点
+        add_plots.extend(self._price_signal_addplots(df, signals > 0, signals < 0))
 
-        # ADL 子图 (panel 2，panel 1 为成交量)
-        next_panel = 2
-        adl_series = self._adl_series(df)
-        if adl_series is not None and adl_series.notna().any():
-            add_plots.append(mpf.make_addplot(adl_series, panel=next_panel, color='#16a085',
-                                              width=1.1, ylabel='ADL', label='ADL',
-                                              secondary_y=False))
-            panel_ratios.append(FACTOR_PANEL_RATIO)
-            next_panel += 1
-
-        # 指标子图
+        # 指标子图（取消 ADL 曲线）
+        next_panel = 1
         indicator_panel = next_panel
         ind_plots = self._strategy_indicator_addplots(df, strategy_key, indicator_panel, signals=signals)
         has_indicator = bool(ind_plots)
@@ -1012,11 +1058,12 @@ class ChartGenerator:
         )
 
         fig, axes = mpf.plot(
-            df, type='candle', style=s, volume=True, addplot=add_plots,
+            df, type='candle', style=s, volume=False, addplot=add_plots,
             panel_ratios=tuple(panel_ratios), figsize=(16, 6.5),
             returnfig=True, warn_too_much_data=len(df) + 1,
-            datetime_format='%Y-%m', xrotation=0
+            datetime_format='%y%m', xrotation=0
         )
+        self._add_ma_legend(axes[0])
 
         # 将指标子图上的买卖点散点重定位到靠近子图边框（买入贴近底部、卖出贴近顶部）
         if has_indicator:
@@ -1060,26 +1107,14 @@ class ChartGenerator:
                                 xytext=(-10, 8), textcoords='offset points',
                                 fontsize=9, color=COLOR_BLUE, fontproperties=FP_REGULAR)
 
-        # X轴：自适应月度刻度（yyyy-mm，标签不重叠前提下尽量密集）
-        month_idx = []
-        prev_ym = None
-        for i, d in enumerate(df.index):
-            ym = (d.year, d.month)
-            if ym != prev_ym:
-                month_idx.append(i)
-                prev_ym = ym
-        n_months = len(month_idx)
-        # 在候选间隔中选尽量小的，保证标签数不超过约 18 个（不重叠）
-        step = 12
-        for cand in (1, 2, 3, 4, 6, 12):
-            if n_months / cand <= 18:
-                step = cand
-                break
-        ticks = month_idx[::step]
-        labels = [df.index[i].strftime('%Y-%m') for i in ticks]
+        # X轴：自适应月度刻度（YYMM，自动间隔避免重叠）
         bottom_ax = axes[-2]
-        bottom_ax.set_xticks(ticks)
-        bottom_ax.set_xticklabels(labels, fontsize=8, fontproperties=FP_REGULAR)
+        ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16,
+                                              fontsize=8)
+        if ticks:
+            bottom_ax.set_xticks(ticks)
+            bottom_ax.set_xticklabels(labels, fontsize=8,
+                                      fontproperties=FP_REGULAR)
 
         fig.tight_layout(rect=[0, 0.03, 1, 1])
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
@@ -1089,7 +1124,8 @@ class ChartGenerator:
 
     @_synchronized_plot
     def plot_index_equity_with_trades(self, index_df, equity_curve, trades,
-                                      title='指数K线与权益曲线', save_path=None):
+                                      title='指数K线与权益曲线', save_path=None,
+                                      trend_states=None, index_frames=None):
         """单图叠加：指数K线 + 权益曲线（次坐标轴）+ 买卖三角标记。
 
         只使用一个 mplfinance panel，不生成成交量/指标/权益子图。
@@ -1140,10 +1176,25 @@ class ChartGenerator:
             df, type='candle', style=style, addplot=[eq_plot], volume=False,
             returnfig=True, figsize=(16, 7),
             warn_too_much_data=len(df) + 1,
-            datetime_format='%Y-%m', xrotation=0)
+            datetime_format='%y%m', xrotation=0)
 
         ax = axes[0]
         eq_ax = axes[1]
+
+        # x 轴刻度对齐到“每月首个交易日”（YYMM，自适应间隔避免重叠）
+        try:
+            from matplotlib.ticker import FixedLocator, FixedFormatter
+            tick_pos, tick_labels = _adaptive_month_ticks(
+                df.index, fig_width_in=16, fontsize=8)
+            if tick_pos:
+                ax.xaxis.set_major_locator(FixedLocator(tick_pos))
+                ax.xaxis.set_major_formatter(FixedFormatter(tick_labels))
+        except Exception:
+            pass
+
+        # 彩色（激活指数）K线置于灰色背景K线之上
+        for coll in ax.collections:
+            coll.set_zorder(3)
 
         def _pos(date):
             ts = pd.Timestamp(date).normalize()
@@ -1155,7 +1206,7 @@ class ChartGenerator:
             pos = _pos(t.get('entry_date'))
             if pos is not None and pos not in seen_buy:
                 y = float(df['Low'].iloc[pos]) * 0.995
-                ax.scatter([pos], [y], marker='^', s=90, color=COLOR_UP,
+                ax.scatter([pos], [y], marker='^', s=45, color=COLOR_UP,
                            edgecolors=COLOR_UP, zorder=6, clip_on=True)
                 ax.annotate(str(t.get('symbol') or ''), xy=(pos, y),
                             xytext=(0, -12), textcoords='offset points',
@@ -1167,7 +1218,7 @@ class ChartGenerator:
             pos = _pos(t.get('exit_date'))
             if pos is not None and pos not in seen_sell:
                 y = float(df['High'].iloc[pos]) * 1.005
-                ax.scatter([pos], [y], marker='v', s=90, color=COLOR_DOWN,
+                ax.scatter([pos], [y], marker='v', s=45, color=COLOR_DOWN,
                            edgecolors=COLOR_DOWN, zorder=6, clip_on=True)
                 seen_sell.add(pos)
 
@@ -1180,46 +1231,177 @@ class ChartGenerator:
                     buy_lows.append(float(df['Low'].iloc[pos]) * 0.995)
             px_min = float(df['Low'].min())
             px_max = float(df['High'].max())
+            if index_frames:
+                for frame in index_frames.values():
+                    if frame is None or len(frame) == 0:
+                        continue
+                    fdf = frame.copy()
+                    low_col = 'Low' if 'Low' in fdf.columns else 'low'
+                    high_col = 'High' if 'High' in fdf.columns else 'high'
+                    if low_col in fdf.columns:
+                        px_min = min(px_min, float(fdf[low_col].min()))
+                    if high_col in fdf.columns:
+                        px_max = max(px_max, float(fdf[high_col].max()))
             if buy_lows:
                 px_min = min(px_min, min(buy_lows))
             if px_max <= px_min:
                 px_max = px_min + max(abs(px_min) * 0.02, 1.0)
-            k_lo, k_hi = 0.10, 0.56
+            k_lo, k_hi = 0.12, 0.72
             k_span = (px_max - px_min) / (k_hi - k_lo)
             k_ymin = px_min - k_lo * k_span
             ax.set_ylim(k_ymin, k_ymin + k_span)
 
-            # 权益轴自动设置，并将权益曲线起点放在约 2/3 图表高度处
+            # 权益轴自动设置：曲线位于上部约 1/3 区域，允许与K线少量重叠
             eq_valid = eq.dropna()
             if len(eq_valid) > 0:
-                eq_start = float(eq_valid.iloc[0])
                 eq_min = float(eq_valid.min())
                 eq_max = float(eq_valid.max())
-                target = 2.0 / 3.0
-                span = max((eq_start - eq_min) / target,
-                           (eq_max - eq_start) / (1.0 - target))
-                span = max(span, abs(eq_start) * 0.05, 1.0) * 1.08
-                eq_lower = eq_start - target * span
+                e_lo, e_hi = 0.64, 0.97
+                span = max((eq_max - eq_min) / (e_hi - e_lo),
+                           abs(eq_min) * 0.05, 1.0) * 1.08
+                eq_lower = eq_min - e_lo * span
                 eq_ax.set_ylim(eq_lower, eq_lower + span)
             else:
                 eq_ax.set_ylim(-1_000_000, 2_000_000)
             eq_ax.yaxis.set_major_formatter(
                 mticker.FuncFormatter(lambda x, _: f'{x / 10000:,.0f}'))
+
+        # 标注权益曲线起点/终点（单位：万元，保留 2 位小数）
+            if len(eq_valid) > 0:
+                first_idx = eq.first_valid_index()
+                last_idx = eq.last_valid_index()
+                points = []
+                if first_idx is not None:
+                    points.append((first_idx, '起点', (8, 10), 'left'))
+                if last_idx is not None and last_idx != first_idx:
+                    points.append((last_idx, '终点', (-8, 10), 'right'))
+                for idx, label, offset, ha in points:
+                    try:
+                        pos = int(df.index.get_loc(idx))
+                        val = float(eq.loc[idx])
+                    except Exception:
+                        continue
+                    if pd.isna(val):
+                        continue
+                    eq_ax.annotate(
+                        f'{label} {val / 10000:.2f}',
+                        xy=(pos, val), xytext=offset, textcoords='offset points',
+                        ha=ha, va='bottom', fontsize=9, color=COLOR_BLUE,
+                        fontproperties=FP_REGULAR, zorder=8,
+                        bbox=dict(boxstyle='round,pad=0.2', fc='white',
+                                  ec='none', alpha=0.8))
         except Exception:
             pass
 
-        from matplotlib.lines import Line2D
-        handles = [
-            Line2D([0], [0], marker='^', linestyle='None',
-                   markerfacecolor=COLOR_UP, markeredgecolor=COLOR_UP,
-                   markersize=9, label='买入'),
-            Line2D([0], [0], marker='v', linestyle='None',
-                   markerfacecolor=COLOR_DOWN, markeredgecolor=COLOR_DOWN,
-                   markersize=9, label='卖出'),
-            Line2D([0], [0], color=COLOR_BLUE, lw=1.5, label='权益'),
-        ]
-        ax.legend(handles=handles, loc='upper left', fontsize=9,
-                  framealpha=0.75, prop=FP_REGULAR)
+        if index_frames:
+            try:
+                pos_map = {d: i for i, d in enumerate(df.index)}
+                wick_segments = []
+                body_patches = []
+                for frame in index_frames.values():
+                    if frame is None or len(frame) == 0:
+                        continue
+                    fdf = frame.copy()
+                    rename = {}
+                    for old, new in (('open', 'Open'), ('high', 'High'),
+                                     ('low', 'Low'), ('close', 'Close')):
+                        if old in fdf.columns and new not in fdf.columns:
+                            rename[old] = new
+                    if rename:
+                        fdf = fdf.rename(columns=rename)
+                    if not all(c in fdf.columns for c in
+                               ('Open', 'High', 'Low', 'Close')):
+                        continue
+                    for d, row in fdf.iterrows():
+                        pos = pos_map.get(d)
+                        if pos is None:
+                            continue
+                        o = float(row['Open'])
+                        h = float(row['High'])
+                        lo = float(row['Low'])
+                        c = float(row['Close'])
+                        wick_segments.append([(pos, lo), (pos, h)])
+                        body_lo = min(o, c)
+                        body_h = max(abs(c - o), (h - lo) * 0.01, 1e-9)
+                        body_patches.append(Rectangle(
+                            (pos - 0.3, body_lo), 0.6, body_h))
+                if wick_segments:
+                    ax.add_collection(LineCollection(
+                        wick_segments, colors='#9e9e9e', linewidths=0.6,
+                        zorder=2, clip_on=True))
+                if body_patches:
+                    ax.add_collection(PatchCollection(
+                        body_patches, facecolor='#9e9e9e',
+                        edgecolor='#9e9e9e', alpha=0.85,
+                        zorder=2, clip_on=True))
+            except Exception:
+                pass
+
+
+        # 在 K 线图底部与 X 轴之间绘制大盘趋势粗线（上下两部分：上=中证1000，下=沪深300）
+        trend_entries = []
+        if trend_states is not None:
+            if isinstance(trend_states, pd.Series):
+                trend_entries = [(None, trend_states)]
+            elif isinstance(trend_states, dict):
+                trend_entries = [(str(k), v) for k, v in trend_states.items()]
+            else:
+                for item in trend_states:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        trend_entries.append((item[0], item[1]))
+                    elif isinstance(item, pd.Series):
+                        trend_entries.append((None, item))
+        if trend_entries:
+            try:
+                trend_colors = {
+                    '上涨': COLOR_UP,
+                    '过热': COLOR_PURPLE,
+                    '下跌': COLOR_DOWN,
+                    '过冷': COLOR_BLUE,
+                    '震荡': COLOR_GRAY,
+                }
+                xmin, xmax = ax.get_xlim()
+                if xmax > xmin:
+                    n = len(trend_entries)
+                    base_y, dy = 0.035, 0.045
+                    for idx, (label, states) in enumerate(trend_entries):
+                        if states is None or len(states) == 0:
+                            continue
+                        y = base_y + (n - 1 - idx) * dy
+                        aligned = states.reindex(df.index, method='ffill')
+                        segments, colors = [], []
+                        start = 0
+                        prev = aligned.iloc[0]
+                        for i in range(1, len(aligned) + 1):
+                            changed = (i == len(aligned)
+                                       or aligned.iloc[i] != prev)
+                            if not changed:
+                                continue
+                            x0 = (start - 0.5 - xmin) / (xmax - xmin)
+                            x1 = (i - 0.5 - xmin) / (xmax - xmin)
+                            x0, x1 = max(0.0, x0), min(1.0, x1)
+                            if x1 > x0:
+                                segments.append([(x0, y), (x1, y)])
+                                colors.append(trend_colors.get(str(prev), COLOR_GRAY))
+                            if i < len(aligned):
+                                start = i
+                                prev = aligned.iloc[i]
+                        if segments:
+                            coll = LineCollection(
+                                segments, colors=colors, linewidths=6,
+                                transform=ax.transAxes, clip_on=False, zorder=10)
+                            coll.set_capstyle('butt')
+                            ax.add_collection(coll)
+                        if label:
+                            ax.text(0.004, y + 0.008, str(label),
+                                    transform=ax.transAxes, ha='left', va='bottom',
+                                    fontsize=7, color='#555555', zorder=11,
+                                    fontproperties=FP_REGULAR,
+                                    bbox=dict(boxstyle='round,pad=0.12',
+                                              fc='white', ec='none', alpha=0.75))
+            except Exception:
+                pass
+
         ax.set_ylabel('指数点位', fontproperties=FP_REGULAR)
         eq_ax.set_ylabel('权益(万元)', fontproperties=FP_REGULAR)
 
@@ -1227,7 +1409,15 @@ class ChartGenerator:
             for label in (a.get_xticklabels() + a.get_yticklabels()):
                 label.set_fontproperties(FP_REGULAR)
 
-        fig.suptitle(title, y=0.98, fontsize=12, fontproperties=FP_BOLD)
+        main_title, date_label = title, ''
+        if '（' in title and title.rstrip().endswith('）'):
+            main_title, tail = title.rsplit('（', 1)
+            date_label = '（' + tail
+        fig.text(0.5, 0.98, main_title, ha='center', va='top',
+                 fontsize=12, fontproperties=FP_BOLD)
+        if date_label:
+            fig.text(0.5, 0.952, date_label, ha='center', va='top',
+                     fontsize=9, fontproperties=FP_REGULAR)
         try:
             fig.subplots_adjust(left=0.06, right=0.93, top=0.91, bottom=0.14)
         except Exception:
@@ -1241,10 +1431,9 @@ class ChartGenerator:
         """
         多策略综合图表：一个K线图，含各策略指标子图 + 汇总权益子图
 
-        结构:
-        - panel 0: K线
-        - panel 1: 成交量
-        - panel 2..N: 各策略指标子图（ma1030/macd/rsi/kdj 等），买卖点标注在各自指标子图
+        结构（不含成交量/ADL 子图）:
+        - panel 0: K线（含 MA 曲线图例、买卖点标注）
+        - panel 1..N: 各策略指标子图（ma1030/macd/rsi/kdj 等），买卖点标注在各自指标子图
         - 最后一个 panel: 权益曲线汇总（每个策略一条曲线）
 
         Parameters
@@ -1290,24 +1479,13 @@ class ChartGenerator:
                 raise ValueError(f"缺少必要列: {col}")
 
         add_plots = []
-        panel_ratios = [2, 1]  # K线 + 成交量
+        panel_ratios = [3]  # 仅 K 线主图（取消成交量图）
 
-        # K线主图叠加 MA10/MA20/MA60/MA120
+        # K线主图叠加 MA5/MA10/MA20/MA60（带图例）
         add_plots.extend(self._ma_price_overlays(df, panel=0))
 
-        # ADL 子图 (panel 2，panel 1 为成交量)
-        next_panel = 2
-        adl_panel = None
-        adl_series = self._adl_series(df)
-        if adl_series is not None and adl_series.notna().any():
-            add_plots.append(mpf.make_addplot(adl_series, panel=next_panel, color='#16a085',
-                                              width=1.1, ylabel='ADL', label='ADL',
-                                              secondary_y=False))
-            panel_ratios.append(FACTOR_PANEL_RATIO)
-            adl_panel = next_panel
-            next_panel += 1
-
-        # 各策略指标子图（含各自买卖点标注）
+        # 各策略指标子图（含各自买卖点标注；取消 ADL 曲线）
+        next_panel = 1
         indicator_panels = []  # (panel, strategy_key)
         for sd in strategies_data:
             signals = sd.get('signals')
@@ -1325,6 +1503,18 @@ class ChartGenerator:
                 panel_ratios.append(FACTOR_PANEL_RATIO)
                 indicator_panels.append((next_panel, sk))
                 next_panel += 1
+
+        # 在主 K 线标注所有策略的买卖点（任一策略买入/卖出即标注）
+        buy_mask = pd.Series(False, index=df.index)
+        sell_mask = pd.Series(False, index=df.index)
+        for sd in strategies_data:
+            s = sd.get('signals')
+            if s is None or len(s) == 0:
+                continue
+            s = pd.to_numeric(s.reindex(df.index), errors='coerce').fillna(0)
+            buy_mask = buy_mask | (s > 0)
+            sell_mask = sell_mask | (s < 0)
+        add_plots.extend(self._price_signal_addplots(df, buy_mask, sell_mask))
 
         # 权益曲线汇总子图（每个策略一条曲线）
         equity_panel = next_panel
@@ -1349,13 +1539,14 @@ class ChartGenerator:
             rc={'font.sans-serif': [FP_REGULAR.get_name(), 'DejaVu Sans'], 'axes.unicode_minus': False}
         )
 
-        extra_panels = len(indicator_panels) + (1 if adl_panel is not None else 0)
+        extra_panels = len(indicator_panels)
         fig, axes = mpf.plot(
-            df, type='candle', style=s, volume=True, addplot=add_plots,
+            df, type='candle', style=s, volume=False, addplot=add_plots,
             panel_ratios=tuple(panel_ratios), figsize=(16, 6 + FACTOR_PANEL_RATIO * extra_panels),
             returnfig=True, warn_too_much_data=len(df) + 1,
-            datetime_format='%Y-%m', xrotation=0
+            datetime_format='%y%m', xrotation=0
         )
+        self._add_ma_legend(axes[0])
 
         # 各指标子图买卖点重定位到靠近子图边框
         for panel, sk in indicator_panels:
@@ -1377,37 +1568,20 @@ class ChartGenerator:
             if ind_ax.get_legend() is not None:
                 ind_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
 
-        # ADL 子图图例
-        if adl_panel is not None:
-            adl_ax = axes[adl_panel * 2]
-            if adl_ax.get_legend() is not None:
-                adl_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
-
         # 权益子图图例
         if has_equity:
             eq_ax = axes[equity_panel * 2]
             if eq_ax.get_legend() is not None:
                 eq_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
 
-        # X轴：自适应月度刻度
-        month_idx = []
-        prev_ym = None
-        for i, d in enumerate(df.index):
-            ym = (d.year, d.month)
-            if ym != prev_ym:
-                month_idx.append(i)
-                prev_ym = ym
-        n_months = len(month_idx)
-        step = 12
-        for cand in (1, 2, 3, 4, 6, 12):
-            if n_months / cand <= 18:
-                step = cand
-                break
-        ticks = month_idx[::step]
-        labels = [df.index[i].strftime('%Y-%m') for i in ticks]
+        # X轴：自适应月度刻度（YYMM，自动间隔避免重叠）
         bottom_ax = axes[-2]
-        bottom_ax.set_xticks(ticks)
-        bottom_ax.set_xticklabels(labels, fontsize=8, fontproperties=FP_REGULAR)
+        ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16,
+                                              fontsize=8)
+        if ticks:
+            bottom_ax.set_xticks(ticks)
+            bottom_ax.set_xticklabels(labels, fontsize=8,
+                                      fontproperties=FP_REGULAR)
 
         fig.tight_layout(rect=[0, 0.03, 1, 1])
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
@@ -1723,8 +1897,20 @@ class ChartGenerator:
             df, type='candle', style=s, volume=True, addplot=add_plots,
             panel_ratios=tuple(panel_ratios), figsize=(16, fig_h),
             returnfig=True, warn_too_much_data=len(df) + 1,
-            datetime_format='%Y-%m', xrotation=0,
+            datetime_format='%y%m', xrotation=0,
         )
+        # X轴：自适应月度刻度（YYMM，自动间隔避免重叠）
+        try:
+            bottom_ax = axes[-2]
+            ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16,
+                                                  fontsize=8)
+            if ticks:
+                bottom_ax.set_xticks(ticks)
+                bottom_ax.set_xticklabels(labels, fontsize=8,
+                                          fontproperties=FP_REGULAR)
+        except Exception:
+            pass
+
         fig.suptitle(title, y=1, fontsize=16)
         fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=COLOR_BG)
         plt.close(fig)

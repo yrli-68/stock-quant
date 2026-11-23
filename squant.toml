@@ -29,23 +29,26 @@ poolmgr = "poolmgr:poolmgr"
 
 [tool.stock-quant]
 position_style = "full"
-market_trend_index = "000852"
+market_trend_index = "000300.SH"
 
 [tool.stock-quant.service]
 SQ_RUN_TIME = "1445"
 SQ_STRATEGY = "boll,macd"
 
 [tool.stock-quant.thresholds]
-MAX_DRAWDWON_THRESHOLD = 35
 MAX_RSI_THRESHOLD = 85
 MIN_RSI_THRESHOLD = 65
 PE_THRESHOLD = 100
 BOLL_SQUEEZE_SCALE = 0.01
 BOLL_EXTRAWIDE_SCALE = 3
-SAR_CHECK = 0
 EMA60_CHECK = 0
 ADX_CHECK = 0
-INDEX_CHECK = 0
+
+[tool.stock-quant.limit]
+LIMIT_ST = 1
+LIMIT_PRICE = 2
+LIMIT_PE = 2
+LIMIT_CAPITAL = 40
 
 [tool.stock-quant.WEBHOOK]
 URL = "https://oapi.dingtalk.com/robot/send?access_token=f9c9cc753feb5fedb3e59bcb15e2282201f1715aeaafab90900eb7b0f2f8d205"
@@ -61,10 +64,8 @@ database = "stock_quant"
 [tool.stock-quant.composite]
 strategies = [
     "ma1030",
-    "ema1030",
     "macd",
     "kdj",
-    "rsi",
     "bollinger",
     "quality_value",
 ]
@@ -74,10 +75,8 @@ z_sell = -1.5
 
 [tool.stock-quant.composite.weights]
 ma1030 = 0.15
-ema1030 = 0.15
 macd = 0.2
 kdj = 0.15
-rsi = 0.15
 bollinger = 0.1
 quality_value = 0.1
 

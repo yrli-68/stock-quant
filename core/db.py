@@ -146,7 +146,10 @@ def infer_exchange(code: str, asset_type: str = 'stock') -> str:
 def infer_asset_type(code: str, exchange: str = None) -> str:
     """根据代码与交易所推断资产类型（A股规则）。
 
-    SH: 000/950 -> index；51/56/58 -> etf；50/52 -> fund；
+    说明：0 开头的 6 位代码视为股票（即使交易所为 SH），不作为指数；
+    指数数据由调用方显式传入 asset_type='index'（如 get_index_data），不依赖此处推断。
+
+    SH: 950 -> index；51/56/58 -> etf；50/52 -> fund；
         6/9 -> stock；1 -> bond
     SZ: 399 -> index；159 -> etf；15/16/18 -> fund；
         000/001/002/003/300/301/200 -> stock；1 -> bond
@@ -156,7 +159,7 @@ def infer_asset_type(code: str, exchange: str = None) -> str:
     c = str(code or '').strip().upper()
     ex = normalize_exchange(exchange) or infer_exchange(c)
     if ex == 'SH':
-        if c.startswith(('000', '950')):
+        if c.startswith('950'):
             return 'index'
         if c.startswith(('51', '56', '58')):
             return 'etf'
@@ -251,7 +254,7 @@ def _open_connection():
 
     conn = None
     try:
-        conn = pymysql.connect(**cfg, connect_timeout=5, read_timeout=10, write_timeout=10)
+        conn = pymysql.connect(**cfg, connect_timeout=5, read_timeout=20, write_timeout=10)
     except Exception as e:
         globals()['_DB_AVAILABLE'] = False
         logger.warning("数据库连接失败，后续数据将从网络获取: %s", e)
@@ -342,6 +345,55 @@ def get_write_connection(force: bool = False):
             yield conn
 
 
+def store_trade_calendar(dates, source: str = 'kline', force: bool = True):
+    """写入交易日历（幂等）。"""
+    import pandas as pd
+    rows = []
+    seen = set()
+    for d in dates or []:
+        try:
+            ds = pd.to_datetime(d).strftime('%Y-%m-%d')
+        except Exception:
+            continue
+        if ds not in seen:
+            seen.add(ds)
+            rows.append((ds, source))
+    if not rows:
+        return
+    try:
+        with get_write_connection(force=force) as conn:
+            if conn is None:
+                return
+            cursor = conn.cursor()
+            cursor.executemany(
+                "INSERT INTO trading_calendar (trade_date, source) VALUES (%s, %s) "
+                "ON DUPLICATE KEY UPDATE source=VALUES(source), "
+                "updated_at=CURRENT_TIMESTAMP",
+                rows)
+            conn.commit()
+    except Exception as e:
+        logger.warning("写入交易日历失败: %s", e)
+
+
+def fetch_trade_calendar(start_date: str, end_date: str,
+                         force: bool = True) -> list:
+    """读取数据库中的交易日历。"""
+    try:
+        with get_connection(force=force) as conn:
+            if conn is None:
+                return []
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT trade_date FROM trading_calendar
+                WHERE trade_date >= %s AND trade_date <= %s
+                ORDER BY trade_date
+            """, (start_date, end_date))
+            return [r[0] for r in cursor.fetchall()]
+    except Exception as e:
+        logger.warning("读取交易日历失败: %s", e)
+        return []
+
+
 def fetch_market_trade_dates(start_date: str, end_date: str,
                              asset_type: str = 'stock',
                              adjust_type: str = 'raw',
@@ -355,6 +407,36 @@ def fetch_market_trade_dates(start_date: str, end_date: str,
             if conn is None:
                 return []
             cursor = conn.cursor()
+
+            # 优先读取专用交易日历
+            try:
+                cursor.execute("""
+                    SELECT trade_date FROM trading_calendar
+                    WHERE trade_date >= %s AND trade_date <= %s
+                    ORDER BY trade_date
+                """, (start_date, end_date))
+                rows = [r[0] for r in cursor.fetchall()]
+                if rows:
+                    return rows
+            except Exception as e:
+                logger.warning("读取 trading_calendar 失败，回退其它来源: %s", e)
+
+            # 其次使用体量很小的 market_breadth 表（ALL_A）
+            try:
+                cursor.execute("""
+                    SELECT DISTINCT trade_date
+                    FROM market_breadth
+                    WHERE universe_code = 'ALL_A'
+                      AND trade_date >= %s AND trade_date <= %s
+                    ORDER BY trade_date
+                """, (start_date, end_date))
+                rows = [r[0] for r in cursor.fetchall()]
+                if rows:
+                    return rows
+            except Exception as e:
+                logger.warning("读取 market_breadth 交易日失败，回退 daily_kline: %s", e)
+
+            # market_breadth 无数据时回退 daily_kline
             cursor.execute("""
                 SELECT DISTINCT trade_date
                 FROM daily_kline
@@ -481,6 +563,22 @@ def store_kline(code: str, rows: list, exchange: str = None,
             """
             data = [(code, exchange, asset_type, *row, adjust_type) for row in rows]
             cursor.executemany(sql, data)
+            try:
+                cal_rows = []
+                seen_dates = set()
+                for row in rows:
+                    ds = str(row[0])[:10]
+                    if ds not in seen_dates:
+                        seen_dates.add(ds)
+                        cal_rows.append((ds, 'kline'))
+                if cal_rows:
+                    cursor.executemany(
+                        "INSERT INTO trading_calendar (trade_date, source) "
+                        "VALUES (%s, %s) ON DUPLICATE KEY UPDATE "
+                        "source=VALUES(source), updated_at=CURRENT_TIMESTAMP",
+                        cal_rows)
+            except Exception as e:
+                logger.debug("同步交易日历失败: %s", e)
             conn.commit()
             logger.info("写入 %d 条 K 线数据: %s %s/%s",
                         len(rows), code, exchange, asset_type)
@@ -901,8 +999,7 @@ def fetch_stock_info(code: str, exchange: str = None,
                 return None
             cursor = conn.cursor()
             cursor.execute(
-                """SELECT code, exchange, asset_type, name, market, stock_type,
-                          is_etf, listed_date
+                """SELECT code, exchange, asset_type, name, market, listed_date
                    FROM stocks
                    WHERE code = %s AND exchange = %s AND asset_type = %s""",
                 (code, exchange, asset_type)
@@ -911,9 +1008,7 @@ def fetch_stock_info(code: str, exchange: str = None,
             if row:
                 return {
                     'code': row[0], 'exchange': row[1], 'asset_type': row[2],
-                    'name': row[3], 'market': row[4],
-                    'stock_type': row[5], 'is_etf': row[6],
-                    'listed_date': row[7]
+                    'name': row[3], 'market': row[4], 'listed_date': row[5]
                 }
             return None
     except Exception as e:
@@ -922,8 +1017,8 @@ def fetch_stock_info(code: str, exchange: str = None,
 
 
 def store_stock_info(code: str, name: str, market: str = '',
-                     stock_type: str = 'dividend', is_etf: int = 0,
-                     exchange: str = None, asset_type: str = 'stock'):
+                     exchange: str = None, asset_type: str = 'stock',
+                     listed_date=None):
     """写入/更新资产基本信息"""
     code, exchange, asset_type = normalize_instrument(code, exchange, asset_type)
     try:
@@ -933,15 +1028,14 @@ def store_stock_info(code: str, name: str, market: str = '',
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO stocks
-                    (code, exchange, asset_type, name, market, stock_type, is_etf)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (code, exchange, asset_type, name, market, listed_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     name = VALUES(name),
                     market = VALUES(market),
-                    stock_type = VALUES(stock_type),
-                    is_etf = VALUES(is_etf),
+                    listed_date = COALESCE(VALUES(listed_date), listed_date),
                     updated_at = CURRENT_TIMESTAMP
-            """, (code, exchange, asset_type, name, market, stock_type, is_etf))
+            """, (code, exchange, asset_type, name, market, listed_date))
             conn.commit()
             logger.info("写入资产信息: %s %s/%s %s", code, exchange, asset_type, name)
     except Exception as e:
