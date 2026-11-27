@@ -11,9 +11,9 @@
                  省略时在 08:30 和 14:35 各执行一次；
                  周六、周日不执行
     -arg ARGs    传递给 analyze 的参数，默认
-                 "analyze -sf input/pool.txt -g boma --withdrawsell 5 --trendctl 1 --notify"
+                 "analyze -sf input/pool.txt -g boma --maxdrawdown 5 --notify"
                  到达执行时间后，先运行 analyze，再运行
-                 "scan -sf input/pool.txt -g boma --trendctl 1 --notify"
+                 "scan -sf input/pool.txt -g boma --notify"
 
 运行过程中，在终端输入 q 并回车即可退出守护进程（正在运行的子任务会被终止）。
 
@@ -48,9 +48,9 @@ PROJECT_ROOT = _resolve_project_root()
 MAIN_PATH = os.path.join(PROJECT_ROOT, 'main.py')
 DEFAULT_RUN_TIMES = ('0830', '1435')
 DEFAULT_ARGS = ('analyze -sf input/pool.txt -g boma '
-                '--withdrawsell 5 --trendctl 1 --notify')
+                '--maxdrawdown 5 --notify')
 SCAN_ARGS = ('scan', '-sf', 'input/pool.txt', '-g', 'boma',
-             '--trendctl', '1', '--notify')
+             '--notify')
 POLL_SECONDS = 20
 
 

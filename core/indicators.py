@@ -237,15 +237,15 @@ def calc_atr(df, period=14):
 
 
 def adjust_atr_stop_multiplier(multiplier, market_state):
-    """按大盘趋势调整 ATR 止损倍数：上涨+20%，下跌-20%。"""
+    """按大盘趋势调整 ATR 止损倍数：涨势+20%，跌势-20%。"""
     try:
         base = float(multiplier)
     except (TypeError, ValueError):
         base = 2.0
     state = str(market_state or '')
-    if state in ('上涨', '过热'):
+    if state == '涨势':
         return base * 1.2
-    if state in ('下跌', '过冷'):
+    if state == '跌势':
         return base * 0.8
     return base
 

@@ -6,7 +6,7 @@
 
     python3 main.py backtest --random -g all -st <yyyymmdd> -e <yyyymmdd>
 
-统计各策略（含回测自动追加的「复合策略」）在不同区间长度下的效果：
+统计各策略在不同区间长度下的效果：
     - 长期：默认 3 年
     - 短期：默认 6 个月
 每类区间重复 N 次（默认 3 次），随机生成起始日期，取各次平均值后排名。
@@ -286,11 +286,11 @@ def report_cross(results, comparison_title, ranking_title, metric=PERCENT_COLS[1
     labels = list(results)
     names = sorted(set().union(*[set(results[k]) for k in labels]))
 
-    combo = {}
+    avg_by_name = {}
     for name in names:
         vals = [results[k].get(name, {}).get(metric) for k in labels]
         vals = [v for v in vals if v is not None]
-        combo[name] = sum(vals) / len(vals) if vals else None
+        avg_by_name[name] = sum(vals) / len(vals) if vals else None
 
     print(f'\n===== {comparison_title} =====')
     hdr = f'  {"策略":<12}' + ''.join(f'{k:>16}' for k in labels) + f'{"综合年化":>12}'
@@ -298,10 +298,10 @@ def report_cross(results, comparison_title, ranking_title, metric=PERCENT_COLS[1
     print('  ' + '-' * (len(hdr) - 2))
     for name in names:
         cells = ''.join(f'{_fmt(results[k].get(name, {}).get(metric)):>16}' for k in labels)
-        print(f'  {name:<12}{cells}{_fmt(combo[name]):>12}')
+        print(f'  {name:<12}{cells}{_fmt(avg_by_name[name]):>12}')
 
     print(f'\n===== {ranking_title} =====')
-    ranked = sorted(combo.items(),
+    ranked = sorted(avg_by_name.items(),
                     key=lambda kv: (kv[1] if kv[1] is not None else -1e9), reverse=True)
     hdr2 = f'  {"排名":<4}{"策略":<12}' + ''.join(f'{k:>16}' for k in labels) + f'{"综合年化":>12}'
     print(hdr2)

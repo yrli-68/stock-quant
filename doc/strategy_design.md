@@ -22,7 +22,7 @@
 >
 > 质价融合策略会额外在 `signals.attrs` 中附加 `combined_score`（综合得分）、`z_score`（Z 分数）与 `stock_type`（标的类型）。
 >
-> **RSI 过滤已内置**：MA1030 / MACD / BOLL / MA310 / MA520 / EMA520 的买入条件统一附加
+> **RSI 过滤已内置**：MA1030 / MACD / BOLL 的买入条件统一附加
 > `RSI < MIN_RSI_THRESHOLD`（且条件），卖出条件统一附加 `或 RSI > MAX_RSI_THRESHOLD`（RSI 优先取 `RSI14`，
 > 缺失时用 `calc_rsi(df,14)` 现算）。阈值来自 `squant.toml` 的 `[tool.stock-quant.thresholds]`（见 0.4），因此独立的 RSI 策略已删除。
 >
@@ -32,19 +32,6 @@
 > **BOLL ADX 买入过滤（`ADX_CHECK`）**：`ADX_CHECK=1` 时，BOLL 的买入信号附加
 > 「当日 `ADX > 20`」条件；`ADX_CHECK=0` 时不检查 ADX。
 >
-> **信号序号与 `--seqnum/-sn`（BOLL 与 BOMA 生效）**：买入信号序号表示「自上次卖出以来第几次买入信号」
-> （首次为 1）。任何卖出信号（无论持仓还是空仓）都会重置计数；入场时刻本身也视为刚执行了一次卖出，
-> 入场后的买入信号重新从 1 计数。`N=0` 表示不过滤；`N>0` 时仅保留第 N 次买入信号，其余买入按观望处理；
-> 卖出信号不受影响、始终保留。**其它策略忽略该选项，始终按 `N=0` 处理。**
->
-> **in_pos 同步**：具备 `integrates_buy_filter` 的策略（BOLL / BOMA / MACD / SG1 / SG2 / SG3）
-> 在 `generate_signals` 内部直接应用 `-sn` 序号过滤，`in_pos` 只在买入信号
-> 实际生效后置位。被过滤的买入不会被视为已入场，因此不会抑制后续买入，也不会产生依赖未入场持仓的孤立卖出。
-> BOLL / BOMA 的序号按原始买入信号计数，以便 `-sn 2` 能选中同一卖出周期内的第 2 个买入条件。
->
-> **注意**：若一个「卖出→买入」区间内只有一个买入信号，`-sn N>1` 仍不会产生交易；只有存在多个买入条件时
-> （如 000333 BOLL 的 2026-03-24 与 2026-03-31）才能正常触发。
-
 ### 0.1.1 每日信号综合打分（`--verbose`）
 
 `analyze` / `scan` 开启 `--verbose` 时，对股票最新交易日信号额外计算 10 指标综合打分。该评分不参与买卖信号生成。
@@ -89,7 +76,7 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 
 当没有买入/卖出信号时，analyze（`--verbose`）还会额外列示观望股票中综合打分最高和最低的各 3 只；scan（`--verbose`）仍列示最高和最低的各 1 只。
 
-钉钉通知（`--notify`）在标题行之后增加大盘趋势行，如 `沪深300：跌；中证1000：涨`（上涨显示为「涨」、下跌显示为「跌」，其余状态原样显示）。
+钉钉通知（`--notify`）在标题行之后增加大盘趋势行，如 `沪深300：跌势；中证1000：涨势`（直接显示 涨势/跌势/震荡）。
 
 ### 0.2 策略分类总览
 
@@ -102,20 +89,11 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 | 技术指标类 | SAR 抛物线转向策略 | `sar` | 个股 / ETF |
 | 技术指标类 | 布林带策略 | `boll` | 个股 / ETF |
 | 技术指标类 | BOMA 策略（BOLL/MACD/DMI 组合信号） | `boma` | 个股 / ETF |
-| 技术指标类 | MA310 策略（MA3/MA10交叉·严格买入） | `ma310` | 个股 / ETF |
-| 技术指标类 | MA520 策略（MA5/MA20交叉·严格买入） | `ma520` | 个股 / ETF |
-| 技术指标类 | EMA520 策略（EMA5/EMA20交叉·严格买入） | `ema520` | 个股 / ETF |
 | 多因子类 | 质价融合策略 | `quality_value` | 个股 / ETF |
 | 基准对照 | 买入并持有策略 | `hold` | 个股 / ETF |
-| 指数专属 | 动量分层策略 | `momentum` | 指数 |
-| 指数专属 | 波动率择时策略 | `volatility` | 指数 |
-| 指数专属 | 涨跌比确认策略 | `breadth` | 指数 |
 
-> `-g all` 展开为 `ALL_SELECTION = ['macd','macd1','boll','boma','kdj','sar','ema520','hold']`，**不含 `ma1030` / `ma310` / `ma520` / `quality_value`**（`ma1030`/`ma310`/`ma520` 仍可通过 `-g` 单独指定）。ETF 模式的 `-g all` 另含 `quality_value`。
-> 全量注册表 `ALL_STRATEGIES` 仍保留 `ma1030` / `ma310` / `ma520`，供 `compare` 使用。
-> `analyze` 命令除 `-g` 所选策略外，会在**内部计算 PREV 策略**作为参考，但不再加入屏幕/HTML/通知输出（见 3.3）。
-> `backtest` 命令除 `-g` 所选策略外，还会**自动追加复合策略**（key `combo`，见 3.4）。
-> 加权投票综合策略（`composite`）已不再注册到 CLI（见第六节）。
+> `-g all` 展开为 `ALL_SELECTION = ['macd','macd1','boll','boma','kdj','sar','hold']`，**不含 `ma1030` / `quality_value`**（`ma1030` 仍可通过 `-g` 单独指定）。ETF 模式的 `-g all` 另含 `quality_value`。
+> 全量注册表 `ALL_STRATEGIES` 仍保留 `ma1030`，供 `compare` 使用。
 
 ### 0.3 数据来源（`--src`）
 
@@ -139,7 +117,7 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 - 适用于 `analyze` / `scan` / `backtest` / `compare` / `indicators`；`strategy_rank_test.py` 亦支持 `--src` 并透传给 `backtest`。
 - 数据获取起点 = 分析/回测 `start` 前推 90 自然日（`_ANALYSIS_WARMUP_DAYS`）以正确计算指标，计算后截断回 `start`。
 - **股票列表同样遵守 `--src`**：`get_stock_list()` 首选源失败时自动切换备用源；sina 走行情中心分页，
-  baostock 走最近交易日全市场快照。Baostock 不提供总市值，`--nolowcap`/市值排序在该源下不生效并给出警告。
+  baostock 走最近交易日全市场快照。Baostock 不提供总市值，市值排序在该源下不生效并给出警告。
 - 实现见 `core/data_fetcher.py`（`set_primary_source` / `_get_a_stock_data` / `get_stock_list`），数据格式详见 `doc/data_structure.md`。
 
 ### 0.4 统一阈值配置（`squant.toml` 的 `[tool.stock-quant.thresholds]`）
@@ -156,7 +134,7 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 | `EMA60_CHECK` | 0 | BOLL 买入 EMA60 过滤开关：`1`=买入需 `EMA60 < close`；`0`=不检查 |
 | `ADX_CHECK` | 0 | BOLL 买入 ADX 过滤开关：`1`=买入需 `ADX > 20`；`0`=不检查 |
 
-- 生效策略：MA1030 / MACD / BOLL / MA310 / MA520 / EMA520。
+- 生效策略：MA1030 / MACD / BOLL。
   `BOLL_SQUEEZE_SCALE` / `BOLL_EXTRAWIDE_SCALE` / `bbw_lookback` 当前不生效（BOLL 带宽过滤已停用）。
 - 构造参数显式传入时以传入值为准；ATR 动态止损可通过 `use_atr_stop=False` 禁用。
 - 加载结果在进程内缓存，修改配置后需重新启动进程生效。
@@ -173,7 +151,7 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 |------|------|------|
 | 趋势指数 | 沪深300 `000300` / 中证1000 `000852` | 个股按总市值选择：>200亿用沪深300；<200亿或无法取得市值用中证1000；AkShare 作为长历史兜底 |
 | 涨跌家数 | `market_breadth` 表 | `universe_code='ALL_A'`，读取 `advance_count` / `decline_count` |
-| RSI14 | 指数日线 | 用于过热/过冷判断 |
+| RSI14 | 指数日线 | 辅助展示（不参与涨势/跌势/震荡判定） |
 | ADR(10) | 实时计算 | `ADR10 = 近10日上涨家数之和 / 近10日下跌家数之和`；**不是** `market_breadth.adr_ma10`（后者是日 ADR 的 10 日均值） |
 | BIAS20 | 指数日线 | `BIAS20 = (close - MA20) / MA20` |
 
@@ -190,52 +168,44 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 
 | 状态 | 条件 |
 |------|------|
-| `上涨` | (`MA5>MA20` AND `slope5>0`) OR (`ADX14>=25` AND `+DI>-DI`) OR `ADR10>1.2` |
-| `下跌` | (`MA5<MA20` AND `slope5<0`) OR (`ADX14>=25` AND `+DI<-DI`) OR `ADR10<0.7` |
-| `过热` | `上涨` AND (`RSI14>70` OR `RSI顶背离`) AND `ADR10>1.5` AND `BIAS20>7%` |
-| `过冷` | `下跌` AND (`RSI14<30` OR `RSI底背离`) AND `ADR10<0.75` AND `BIAS20<-7%` |
-| `震荡` | 非上涨、非下跌、非过热、非过冷 |
-| `未知` | 有效指数指标不足（ADR 缺失时忽略 ADR 条件，不因此判为未知） |
+| `涨势` | (`close>MA5>MA60` AND `slope5>0`) OR (`ADX14>=25` AND `+DI>-DI`) OR `ADR10>1.2` |
+| `跌势` | (`close<MA5<MA60` AND `slope5<0`) OR (`ADX14>=25` AND `+DI<-DI`) OR `ADR10<0.7` |
+| `震荡` | 非涨势、非跌势 |
 
 其中：
 
 - `slope5` 为 5 日收盘价线性回归斜率；
-- `BIAS20 = (close - MA20) / MA20`；
-- `ADR10 = 10日上涨家数之和 / 10日下跌家数之和`；ADR 数据缺失时忽略该条件；
-- RSI顶背离：价格接近前高但 RSI 未创新高；RSI底背离：价格接近前低但 RSI 未创新低。
+- `ADR10 = 10日上涨家数之和 / 10日下跌家数之和`；ADR 数据缺失时按 `ADR=1` 处理。
 
 状态赋值顺序：
 
 ```text
 默认震荡
-→ 上涨条件成立：上涨
-→ 下跌条件成立：下跌
-→ 上涨 + (RSI14>70 或 RSI顶背离) + ADR10>1.5 + BIAS20>7%：过热
-→ 下跌 + (RSI14<30 或 RSI底背离) + ADR10<0.75 + BIAS20<-7%：过冷
-→ 无效数据：未知
+→ 涨势条件成立：涨势
+→ 跌势条件成立：跌势
+→ 无效数据：按震荡处理
 ```
 
-> 已取消“过渡”状态；不满足上涨/下跌/过热/过冷时统一记为“震荡”。
-> 若上涨与下跌条件同时成立，按当前赋值顺序由“下跌”覆盖“上涨”。
+> 已取消“过渡”“未知”“超涨”“超跌”状态；不满足涨势/跌势时统一记为“震荡”。
+> 若涨势与跌势条件同时成立，按当前赋值顺序由“跌势”覆盖“涨势”。
 
 #### 应用位置
 
 | 位置 | 行为 |
 |------|------|
-| 所有策略原始信号 | `过热` 日买入信号置 0；`下跌`/`过冷` 日买入信号置 0（`--trendctl 1`，默认）；`过冷` 日另将强制条件产生的卖出置 0；常规策略卖出保留 |
-| `--trendctl [N]` | 大盘趋势控制：`0`=不控制；`1`=下跌或过冷趋势禁止买入（按个股对应指数：沪深300成分股用 `000300.SH`，其它用 `000852.SH`）；默认 `1` |
+| 所有策略原始信号 | `跌势` 日买入信号置 0；常规策略卖出保留 |
+| 大盘趋势控制 | 跌势趋势禁止买入（按个股对应指数：沪深300成分股用 `000300.SH`，其它用 `000852.SH`） |
 | `analyze` / `scan` 控制台与 HTML | 同时显示沪深300与中证1000的趋势状态、日期及具体触发原因 |
-| `backtest` 单持仓买入 | 原始信号包含过热禁买；`下跌`/`过冷` 日按 `--trendctl` 禁止买入 |
-| `backtest` 单持仓卖出 | 原始信号已抑制过冷强制卖出；`--withdrawsell [ratio]` 控制 ATR 动态止损 |
-| `--withdrawsell [ratio]`（所有命令） | 启用 ATR 动态止损；缺省 ratio=2，不指定则不执行回撤止损 |
-| ATR 倍数调整 | 上涨/过热：N×1.2；下跌/过冷：N×0.8；其余：N |
-| 期末处理 | 期末仍按最后一个交易日收盘强制平仓，不受过热/过冷状态影响 |
+| `backtest` 单持仓买入 | `跌势` 日禁止买入 |
+| `backtest` 单持仓卖出 | `--maxdrawdown [ratio]` 控制 ATR 动态止损 |
+| `--maxdrawdown [ratio]`（所有命令） | ATR 动态止损倍数；默认 ratio=2，始终启用 |
+| ATR 倍数调整 | 涨势：N×1.2；跌势：N×0.8；其余：N |
+| 期末处理 | 期末仍按最后一个交易日收盘强制平仓 |
 
 说明：
 
-- 过热/过冷/下跌在 `_generate_effective_signals()` 中统一作用于策略原始信号，覆盖 `analyze`、`scan` 和 `backtest` 单持仓流程；
-- `--trendctl 1`（默认）时，个股对应指数趋势为「下跌」或「过冷」则其买入信号置 0；`--trendctl 0` 关闭该控制；
-- 最大回撤来自策略内部，最大持股天数来自 `--maxholddays`；过冷时两者产生的卖出均被抑制；
+- `跌势` 在 `_generate_effective_signals()` 中统一作用于策略原始信号，覆盖 `analyze`、`scan` 和 `backtest` 单持仓流程；
+- 个股对应指数趋势为「跌势」时其买入信号置 0；
 - `market_trend_states()` 供回测按日取状态，`analyze_market_trend()` 供界面显示最新状态；
 - 两个函数均使用 `lru_cache`，数据库刷新后需重启进程或清理缓存才能立即生效。
 
@@ -250,10 +220,54 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 | 最新趋势分析 | `core/market_trend.py:analyze_market_trend()` |
 | 涨跌家数读取 | `core/db.py:fetch_market_breadth_counts()` |
 | 屏幕/HTML 显示 | `main.py:_format_market_trend()` / `_print_market_trend()` / `_market_trend_html()` |
-| 下跌趋势买入 | `main.py:_apply_market_regime_to_signals()`（不再屏蔽） |
-| `--withdrawsell` | `main.py:_set_withdrawsell()` / `_build_strategy_instance()` |
+| 大盘趋势买卖控制 | `main.py:_apply_market_regime_to_signals()`（跌势禁买） |
+| `--maxdrawdown` | `main.py:_set_maxdrawdown()` / `_build_strategy_instance()` |
 | onestock 买卖行为 | `main.py:_run_onestock_backtest()` |
 | 趋势指数配置 | `squant.toml` → `market_trend_index` |
+
+#### 个股趋势（analyze）
+
+- 函数：`core.market_trend.analyze_stock_trend(df, end_date=None)`、`classify_stock_trend_series(df)`。
+- 数据源：传入的个股日线 DataFrame（需含 MA5/MA20/MA60、ADX14、RSI14 等；缺失时自动补算指标）。
+- 规则：与大盘趋势相同，但**不使用 ADR**；因此：
+  - `涨势`：`(close>MA5>MA60 AND slope5>0) OR (ADX14>=25 AND +DI>-DI)`；
+  - `跌势`：`(close<MA5<MA60 AND slope5<0) OR (ADX14>=25 AND +DI<-DI)`；
+  - 其余为 `震荡`。
+- 展示：HTML 汇总报告的“最新信号表”增加 `个股趋势` 栏；单只股票 HTML 报告头部也会显示。
+
+---
+
+### 0.6 买卖相关命令行选项
+
+以下选项直接影响买入/卖出信号的生成、过滤、持仓与风控；未列出的数据源/日期/输出选项见对应命令帮助。
+
+| 选项 | 适用命令 | 作用 | 默认/说明 |
+|------|----------|------|-----------|
+| `-g, --strategy` | analyze / scan / backtest | 选择策略（逗号分隔，`all` 展开为内置选择集） | 默认 `boma` |
+| `--maxdrawdown [ratio]` | analyze / scan / backtest / compare | ATR 动态止损：`stop=max(前一日stop, close-ratio*ATR14)` | 默认 `2`，始终启用；倍数按大盘状态调整：涨势 ×1.2、跌势 ×0.8、震荡 ×1.0 |
+| `--limit` | analyze / scan / backtest | 限制买入：ST、当前价≥一年前价×`LIMIT_PRICE`、当前 PE<0 或≥一年前正 PE×`LIMIT_PE`、总市值<`LIMIT_CAPITAL` 亿元 | 默认关闭；阈值见 `[tool.stock-quant.limit]` |
+| `-n, --num-positions` | backtest | 同时持有的最大股票数 N | 默认 `1` |
+| `--fixcapital` | backtest | 每笔买入金额固定为 `初始资金/N`；现金不足仍买入，现金可为负 | 默认关闭 |
+| `-c, --capital` | analyze / scan / backtest / compare | 初始资金（万元） | 默认 `100` |
+| `-i, --index` | analyze | 指数分析模式（使用通用策略） | 默认关闭 |
+
+**配置开关**
+
+- `[tool.stock-quant.boma]`：为 BOMA 的每个买卖信号单独设置开关（`1` 启用、`0` 忽略）；未配置默认启用。
+- `[tool.stock-quant.limit]`：`LIMIT_ST`（1/0）、`LIMIT_PRICE`、`LIMIT_PE`、`LIMIT_CAPITAL`（亿元）。
+- `[tool.stock-quant.thresholds]`：RSI/PE/ADX 等策略阈值。
+
+**组合关系**
+
+- 买入侧：`-g` 选策略 → BOMA 配置开关筛选信号 → 跌势禁买 → `--limit` 个股禁买 → 资金/持仓规则（`-n`、`--fixcapital`、`-c`）。
+- 卖出侧：策略自身卖出信号 + `--maxdrawdown` 的 ATR 动态止损。
+
+**backtest 选股顺序**
+
+- 先按 `-g` 的策略顺序；
+- 同一策略内，对当日有买入信号的股票按“综合打分”从高到低排序，优先买入最高分；
+- 综合打分相同则按股票池顺序（`-sf` 文件顺序 / `-s` 顺序 / `--random` 随机顺序）；
+- 当日卖出后空出的仓位可立即再次买入符合条件的股票。
 
 ---
 
@@ -322,7 +336,7 @@ analyze 最新信号表后会附备注 `综合打分排位：DMI|MACD|OBV|BIAS| 
 | `signal` | 9 | DEA 信号线周期 |
 | `rsi_buy_max` | 配置 `MIN_RSI_THRESHOLD` | 买入附加条件 `RSI < MIN_RSI_THRESHOLD`（`None` 不启用） |
 | `rsi_sell_min` | 配置 `MAX_RSI_THRESHOLD` | 卖出附加条件 `RSI > MAX_RSI_THRESHOLD`（`None` 不启用） |
-| `use_atr_stop` | 由 --withdrawsell 控制 | 启用 ATR 动态止损：`stop=max(前一日stop, close-N*ATR14)`，`close<=stop` 时卖出 |
+| `use_atr_stop` | 始终启用（倍数由 --maxdrawdown 提供） | ATR 动态止损：`stop=max(前一日stop, close-N*ATR14)`，`close<=stop` 时卖出 |
 
 **设计要点：** 金叉时 `DIF > DEA` 恒成立，故 `MACD柱 > 0` 为冗余条件已省略；买卖附加 RSI 过滤（`RSI<MIN_RSI_THRESHOLD` / `RSI>MAX_RSI_THRESHOLD`）以抑制过热追高与提前离场。RSI 已并入金叉/死叉定义。买入后逐日更新 ATR 动态止损价，`close <= stop` 时优先卖出。
 
@@ -400,7 +414,7 @@ ETF 专用模式下 `macd1` 同样使用该默认参数。
 | `period` | 20 | 中轨周期 |
 | `std` | 2 | 标准差倍数 |
 | `bbw_lookback` | 10 | 带宽过滤统计回看窗口（当前过滤已停用） |
-| `use_atr_stop` | 由 --withdrawsell 控制 | 启用 ATR 动态止损：`stop=max(前一日stop, close-N*ATR14)`，`close<=stop` 时卖出 |
+| `use_atr_stop` | 始终启用（倍数由 --maxdrawdown 提供） | ATR 动态止损：`stop=max(前一日stop, close-N*ATR14)`，`close<=stop` 时卖出 |
 | `BOLL_SQUEEZE_SCALE` | 配置（默认 0.2） | 挤压判定比例因子（当前过滤已停用） |
 | `BOLL_EXTRAWIDE_SCALE` | 配置（默认 1.2） | 极端宽判定比例因子（当前过滤已停用） |
 | `EMA60_CHECK` | 配置（默认 0） | 1=买入要求 `EMA60 < close`；0=不检查 |
@@ -421,19 +435,38 @@ ETF 专用模式下 `macd1` 同样使用该默认参数。
 | 信号 | 条件 |
 |:---:|---|
 | 买入信号BOLL | BOLL 下轨反弹 AND (`MACD红柱` OR `绿柱缩短1根`) AND `RSI6>RSI12` AND `close>MA5` |
-| 买入信号MACD | MACD 金叉 AND `close < BOLL_MIDDLE` AND `RSI6>RSI12` AND `close>MA5` |
+| 买入信号MACD1 | `MACD金叉` AND `DIF>=0` AND `大盘涨势` AND `ADX14>20` AND `+DI>-DI` |
+| 买入信号MACD2 | `MACD金叉` AND `DIF<0` AND `RSI14<30` AND `BIAS20<0` AND `ADX14>20` |
 | 买入信号ADX | `ADX14>25` AND `+DI上穿-DI` AND `ADXR>ADX` AND `close>MA5` |
-| 买入 `1` | 买入信号BOLL OR 买入信号MACD OR 买入信号ADX |
-| 卖出信号BOLL | BOLL 上轨回落 AND (`DIF拐头向下` OR `MACD红柱缩短`) |
-| 卖出信号MACD | MACD 死叉 AND `close < BOLL_MIDDLE` AND `+DI向下 AND -DI向上 AND ADX14>=20` |
-| 卖出信号ATR | `close < 移动止损价` |
-| 卖出 `-1` | 卖出信号BOLL OR 卖出信号MACD OR 卖出信号ATR |
+| 买入 `1` | 买入信号BOLL OR 买入信号MACD1 OR 买入信号MACD2 OR 买入信号ADX |
+| 卖出信号BOLL1 | `个股趋势=涨势` AND `跌破布林中轨` AND `ADX回落` |
+| 卖出信号BOLL2 | `个股非涨势` AND `BOLL上轨回落` AND `DIF斜率<0` |
+| 卖出信号MACD1 | `个股趋势∈{涨势,震荡}` AND `MACD死叉` AND `close < BOLL_MIDDLE` AND `+DI向下` AND `-DI向上` AND `ADX14>=20` |
+| 卖出信号MACD2 | `个股趋势=跌势` AND `MACD死叉` |
+| 卖出信号ATR | `close < 移动止损价` AND `close > BOLL下轨` |
+| 卖出 `-1` | 卖出信号BOLL1 OR 卖出信号BOLL2 OR 卖出信号MACD1 OR 卖出信号MACD2 OR 卖出信号ATR |
 | 观望 `0` | 其余 |
+
+**趋势覆盖规则（始终生效，优先于个股原始信号）**
+
+| 大盘趋势 | 个股趋势 | 处理 |
+|:---:|:---:|---|
+| 跌势 | 跌势 | **强制卖出**（忽略个股原始卖出信号），原因记为 `趋势共振卖出` |
+| 涨势 | 涨势 | **忽略个股卖出信号**（持有/观望） |
+| 任一为跌势 | — | **忽略个股买入信号**（观望） |
+
 
 指标定义：
 
+- `大盘涨势`：取自 `df.attrs['market_states']`（个股对应指数的每日趋势状态）；
+- `个股趋势`：取自 `classify_stock_trend_series(df)`（同大盘规则但不含 ADR）；包含 涨势/跌势/震荡；
+- `BIAS20`：`(close - MA20) / MA20`，`BIAS20<0` 为负乖离；
 - `BOLL下轨反弹`：`close.shift(1) <= lower.shift(1)` 且 `close > lower`；
 - `BOLL上轨回落`：`close.shift(1) >= upper.shift(1)` 且 `close < upper`；
+- `跌破布林中轨`：`close.shift(1) >= middle.shift(1)` 且 `close < middle`；
+- `ADX回落`：`ADX14 < ADX14.shift(1)`；
+- `DIF斜率<0`：`DIF < DIF.shift(1)`；
+- `个股非涨势`：`个股趋势 ∈ {震荡, 跌势}`；
 - `MACD红柱`：`MACD_BAR > 0`；
 - `绿柱缩短1根`：当前和上一根均为绿柱，且 `MACD_BAR > MACD_BAR.shift(1)`；
 - `RSI6>RSI12`：短期 RSI 高于中期 RSI；
@@ -442,57 +475,29 @@ ETF 专用模式下 `macd1` 同样使用该默认参数。
 - `-DI向上`：`-DI > -DI.shift(1)`；
 - `+DI上穿-DI`：`+DI.shift(1) <= -DI.shift(1)` 且 `+DI > -DI`；
 - `ADXR`：`(ADX14 + ADX14.shift(14)) / 2`。
-- `DIF拐头向下`：`DIF.shift(1) > DIF.shift(2)` 且 `DIF < DIF.shift(1)`；
-- `MACD红柱缩短`：当前和上一根均为红柱，且 `BAR < BAR.shift(1)`；
-- `移动止损价`：`stop=max(前一日stop, close-N*ATR14)`，`close < stop` 时卖出；N 由 `--withdrawsell` 提供。
+- `移动止损价`：`stop=max(前一日stop, close-N*ATR14)`，`close < stop` 且 `close > BOLL下轨` 时卖出；N 由 `--maxdrawdown` 提供。
 
 **参数：** `boll_period=20`、`boll_std=2`、`macd_fast=12`、`macd_slow=26`、`macd_signal=9`。
 
-**条件筛选：** `--critera b1,s2` 控制启用哪些信号，`b1/b2/b3` 对应买入信号BOLL/MACD/ADX，`s1/s2/s3` 对应卖出信号BOLL/MACD/ATR；缺省全部启用。
+**配置开关：** `squant.toml` 的 `[tool.stock-quant.boma]` 可为每个信号单独设置开关（键需加引号），`1`=启用、`0`=关闭，缺省启用：
+```toml
+[tool.stock-quant.boma]
+"买入信号BOLL" = 1
+"买入信号MACD1" = 1
+"买入信号MACD2" = 1
+"买入信号ADX" = 1
+"卖出信号BOLL1" = 1
+"卖出信号BOLL2" = 1
+"卖出信号MACD1" = 1
+"卖出信号MACD2" = 1
+"卖出信号ATR" = 1
+```
+各信号仅由对应配置开关控制：`1` 启用、`0` 忽略；未配置默认启用。
 
 > 说明：当前不再使用 RSI 过滤；卖出信号ATR 使用 ATR 移动止损。买入仍统一应用全局涨幅/SAR/指数/序号过滤。
-> 回测 HTML 的退出原因显示为“卖出信号BOLL/MACD/ATR”，多个条件同时满足时用“/”连接。
+> 回测 HTML 的退出原因显示为“卖出信号BOLL1/BOLL2/MACD1/MACD2/ATR”或“趋势共振卖出”，多个条件同时满足时用“/”连接。
 
-### 1.6 MA310 策略 (SG1Strategy)
-
-**定位：** 双均线交叉趋势策略（3 日均线 × 10 日均线），含 ATR 动态止损保护；**仅输出 买/卖（±1）**。
-
-| 信号 | 条件 |
-|:---:|---|
-| 买 `1` | MA3 上穿 MA10（金叉）**且** 当日收盘价 > 前一日收盘价 × 99% **且** `RSI < MIN_RSI_THRESHOLD` |
-| 卖 `-1` | MA3 下穿 MA10（死叉）**或** `RSI > MAX_RSI_THRESHOLD`，或**ATR动态止损**：`close <= max(前一日stop, close-N*ATR14)`（优先于死叉） |
-
-**参数：** `fast_period=3`、`slow_period=10`、`use_atr_stop=由 --withdrawsell 控制`、`rsi_buy_max=配置 MIN_RSI_THRESHOLD`、`rsi_sell_min=配置 MAX_RSI_THRESHOLD`。
-
----
-
-### 1.7 MA520 策略 (SG2Strategy)
-
-**定位：** 与 MA310 逻辑一致，仅均线周期不同（**MA5 × MA20**）；仅输出 买/卖（±1）。
-
-| 信号 | 条件 |
-|:---:|---|
-| 买 `1` | MA5 上穿 MA20（金叉）**且** 当日收盘价 > 前一日收盘价 × 99% **且** `RSI < MIN_RSI_THRESHOLD` |
-| 卖 `-1` | MA5 下穿 MA20（死叉）**或** `RSI > MAX_RSI_THRESHOLD`，或**ATR动态止损**：`close <= max(前一日stop, close-N*ATR14)`（优先于死叉） |
-
-**参数：** `fast_period=5`、`slow_period=20`、`use_atr_stop=由 --withdrawsell 控制`、`rsi_buy_max=配置 MIN_RSI_THRESHOLD`、`rsi_sell_min=配置 MAX_RSI_THRESHOLD`。
-
----
-
-### 1.8 EMA520 策略 (SG3Strategy)
-
-**定位：** 与 MA520 逻辑一致，仅均线改用**指数移动平均（EMA5 × EMA20）**；仅输出 买/卖（±1）。
-
-| 信号 | 条件 |
-|:---:|---|
-| 买 `1` | EMA5 上穿 EMA20（金叉）**且** 当日收盘价 > 前一日收盘价 × 99% **且** `RSI < MIN_RSI_THRESHOLD` |
-| 卖 `-1` | EMA5 下穿 EMA20（死叉）**或** `RSI > MAX_RSI_THRESHOLD`，或**ATR动态止损**：`close <= max(前一日stop, close-N*ATR14)`（优先于死叉） |
-
-**参数：** `fast_period=5`、`slow_period=20`、`use_atr_stop=由 --withdrawsell 控制`、`use_ema=True`、`rsi_buy_max=配置 MIN_RSI_THRESHOLD`、`rsi_sell_min=配置 MAX_RSI_THRESHOLD`。
-
----
-
-### 1.9 SAR 策略 (SARStrategy)
+### 1.6 SAR 策略 (SARStrategy)
 
 **定位：** 抛物线转向指标（Parabolic SAR），通过 SAR 与收盘价的位置切换判断趋势反转。
 
@@ -521,7 +526,7 @@ ETF 专用模式下 `macd1` 同样使用该默认参数。
 
 ### 2.1 质价融合策略 (QualityValueFactorStrategy)
 
-**定位：** 融合估值、质量、筹码、增减持、波动率五个维度，加权生成综合投资价值评分并转换为买卖信号。是唯一依赖基本面/另类数据的多因子策略（详见 `doc/factor_design.md`）。
+**定位：** 融合估值、质量、筹码、增减持、波动率五个维度，加权生成综合投资价值评分并转换为买卖信号。是唯一依赖基本面/另类数据的多因子策略。
 
 **因子选择（五个维度）**
 
@@ -578,15 +583,7 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 
 ## 三、组合类策略
 
-### 3.1 综合策略（已取消注册）
-
-综合策略（`composite`）已从 CLI 注册表移除：`-g composite` 不可用，`ALL_STRATEGIES` 不再包含它，
-`analyze` 的 DB/综合构建分支一并删除。源码 `strategies/composite_strategy.py` 保留供参考与历史脚本使用，
-`squant.toml` 的 `[tool.stock-quant.composite]` 配置段不再被 CLI 读取。
-
----
-
-### 3.2 买入并持有策略 (HoldStrategy)
+### 3.1 买入并持有策略 (HoldStrategy)
 
 **定位：** 基准对照策略，用于衡量其它策略相对"买入持有"的超额收益。
 
@@ -596,151 +593,7 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 
 ---
 
-### 3.3 PREV 策略（analyze 内部计算，不参与输出）
-
-**定位：** 对 `-g` 所选策略**上一交易日**的信号做多数表决，作为"隔日确认"的合成信号。
-
-**规则：** 对每个交易日 `t`，统计所选策略（排除 `hold`，也不考虑前一日 PREV 自身）在 `t-1` 日的信号：
-
-| 情形 | PREV 信号 |
-|:---:|:---:|
-| 买入信号数 > 卖出信号数 | 买 `1` |
-| 买入信号数 = 卖出信号数 | 观望 `0` |
-| 买入信号数 < 卖出信号数 | 卖 `-1` |
-
-- 首个交易日无前一交易日，记为观望 `0`。
-- 信号实现为：将各所选策略信号按日期 `shift(1)`，逐日比较 `>0`（买）与 `<0`（卖）的数量。
-- 显示名 `PREV`（key `prev`）；`analyze` 会对其照常做回测，但不再纳入策略对比排名、最新信号表、HTML 报告与钉钉通知。
-- 仅 `analyze` 命令自动追加；`scan`/`backtest`/`compare` 不含。
-
----
-
-### 3.4 复合策略（backtest 自动追加，首个买入策略跟随）
-
-**定位：** `backtest` 命令在 `-g` 所选策略之外自动追加的"复合策略"（key `combo`，显示名 `复合策略`），
-"跟随首个买入策略"的组合效果。**注意**：与已移除的加权投票综合策略（`composite`）不同。
-
-**规则（逐日状态机）：**
-
-| 状态 | 条件 | 复合策略信号 |
-|:---:|:---:|:---:|
-| 空仓 | 所选策略中**任一**当日出现买入(`>0`) | 买 `1` → 转为持仓，并**记住**该买入策略 |
-| 持仓 | **仅当被记住的那个策略**当日出现卖出(`<0`) | 卖 `-1` → 转为空仓 |
-| 其它 | — | 观望 `0` |
-
-- 空仓时同一天多只策略买入，按所选顺序记住**第一个**买入的策略。
-- 持仓期间其它策略的卖出信号不影响复合策略（只等被记住策略的卖出）。
-- 不考虑 PREV 与 Hold 策略的信号（`hold` 被排除）。
-- 无有效来源策略时，复合策略不追加。
-- 仅 `backtest` 命令自动追加（单股多策略与批量回测均适用）；`analyze` 内部计算 PREV 但不输出，`scan`/`compare` 不含合成策略。
-
----
-
-## 四、指数专属策略
-
-> 通过 `-i/--index` 参数启用，适用于大盘指数分析。
-
-### 4.1 动量分层策略 (MomentumTieredStrategy)
-
-**定位：** 指数动量效应显著（强者恒强），采用"动量 + 趋势"双因子共振。
-
-**因子（指标）选择**
-
-| 指标 | 周期 | 说明 |
-|------|:---:|------|
-| 动量收益 | 60 日 | 过去 60 日累计收益率，正值表示向上动量 |
-| MA20 | 20 | 快速均线（趋势确认） |
-| MA60 | 60 | 慢速均线（趋势确认） |
-
-**买卖信号生成**
-
-| 信号 | 条件 | 说明 |
-|:---:|---|---|
-| 买入 `1` | `momentum > 0` 且 `MA20 > MA60` | 动量 + 趋势共振（多头排列） |
-| 卖出 `-1` | `momentum < 0` | 动量转负（趋势衰竭，无论均线） |
-| 观望 `0` | 其余 | 含"有反弹动能但趋势未转多"的抄底陷阱 |
-
-**参数**
-
-| 参数 | 默认 | 说明 |
-|------|:---:|------|
-| `momentum_period` | 60 | 动量回看周期 |
-| `ma_fast` | 20 | 快速均线 |
-| `ma_slow` | 60 | 慢速均线 |
-
----
-
-### 4.2 波动率择时策略 (VolatilityTimingStrategy)
-
-**定位：** 利用指数波动率均值回归特性：低波动突破胜率高，高波动下跌风险大。
-
-**因子（指标）选择**
-
-| 指标 | 周期/阈值 | 说明 |
-|------|:---:|------|
-| 年化历史波动率 HV | 20 日 | 低波动 < 15%，高波动 > 30% |
-| 布林上轨 | 20 日 / 1.5σ | 窄带（适配指数，窄于个股 2.0） |
-| MA20 | 20 | 卖出防线 |
-
-**买卖信号生成**
-
-| 信号 | 条件 | 说明 |
-|:---:|---|---|
-| 买入 `1` | `HV.shift(1) < 0.15` 且 `HV < 0.15` 且 `close > 布林上轨` | 持续低波动 + 向上突破 |
-| 卖出 `-1` | `HV > 0.30` 且 `close < MA20` | 高波动 + 跌破均线 |
-| 观望 `0` | 其余 | — |
-
-**参数**
-
-| 参数 | 默认 | 说明 |
-|------|:---:|------|
-| `vol_period` | 20 | 波动率周期 |
-| `vol_low` | 0.15 | 低波动阈值（年化） |
-| `vol_high` | 0.30 | 高波动阈值（年化） |
-| `bb_period` | 20 | 布林带周期 |
-| `bb_std` | 1.5 | 布林带标准差倍数 |
-| `ma_period` | 20 | 卖出均线周期 |
-
-**设计要点：** 买入用 `HV.shift(1)` 与 `HV` 双期同时 < 阈值，确认低波动是"持续状态"而非"刚进入"，避免单日波动率骤降的误判。
-
----
-
-### 4.3 涨跌比确认策略 (BreadthConfirmationStrategy)
-
-**定位：** 市场宽度（涨跌家数比）是市场健康的"体检报告"，比指数更早转向；涨跌比与价格趋势共振时出信号。
-
-**因子（指标）选择**
-
-| 模式 | 因子 | 阈值 | 说明 |
-|------|------|:---:|------|
-| 主模式 | 涨跌比（上涨家数/下跌家数） | >2.0 / <0.5 | 市场宽度 |
-| 主模式 | MA5 | — | 价格确认 |
-| 降级模式 | 量比（当日量/5日均量） | >1.5 / <0.6 | 参与度代理 |
-
-**买卖信号生成**
-
-| 信号 | 模式 | 条件 |
-|:---:|---|---|
-| 买入 `1` | 主 | 涨跌比 > 2.0 且 `close > MA5` |
-| 卖出 `-1` | 主 | 涨跌比 < 0.5 且 `close < MA5` |
-| 买入 `1` | 降级 | 量比 > 1.5 且 `close > MA5`（放量上涨） |
-| 卖出 `-1` | 降级 | 量比 < 0.6 且 `close < MA5`（缩量下跌） |
-| 观望 `0` | 任一 | 其余 |
-
-**参数**
-
-| 参数 | 默认 | 说明 |
-|------|:---:|------|
-| `breadth_high` | 2.0 | 涨跌比买入阈值 |
-| `breadth_low` | 0.5 | 涨跌比卖出阈值 |
-| `ma_period` | 5 | 价格确认均线周期 |
-| `vol_ratio_threshold` | 1.5 | 量比阈值（降级模式） |
-
-**设计要点：** `generate_signals(df, breadth_data=None)` 接收可选的涨跌比序列；无涨跌比数据时自动降级为成交量比模式，保证策略始终可运行。
-
----
-
-## 五、信号生成方式汇总对比
+## 四、信号生成方式汇总对比
 
 | 策略 | 信号类型 | 因子类别 | 频度 | 反转/趋势 |
 |------|:---:|------|------|------|
@@ -749,31 +602,19 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 | KDJ | 交叉边沿 | K/D + MA60 过滤 | 日频 | 均值回归 |
 | SAR | 穿越边沿 | SAR 与收盘价位置切换 | 日频 | 趋势跟踪 |
 | 布林带 | 轨道穿越边沿 | 布林带 + RSI 过滤（带宽过滤已停用） | 日频 | 均值回归 |
-| MA310 | 交叉边沿 | MA3/MA10（严格买入 + RSI 过滤） | 日频 | 趋势跟踪 |
-| MA520 | 交叉边沿 | MA5/MA20（严格买入 + RSI 过滤） | 日频 | 趋势跟踪 |
-| EMA520 | 交叉边沿 | EMA5/EMA20（严格买入 + RSI 过滤） | 日频 | 趋势跟踪 |
 | 质价融合 | Z 值阈值（平滑+滚动标准化） | 五维基本面/另类 | 估值/波动日频，其余低频 ffill | 价值回归 |
-| PREV | 前一交易日所选策略信号多数表决 | 合成信号 | 日频 | 隔日确认 |
-| 复合策略 | 首个买入策略跟随（持有到该策略卖出） | 合成信号 | 日频 | 混合 |
-| 动量分层 | 因子状态 | 动量 + 双均线 | 日频 | 趋势跟踪 |
-| 波动率择时 | 因子状态 | 波动率 + 布林/均线 | 日频 | 择时 |
-| 涨跌比确认 | 因子状态 | 宽度 + 量比 + MA5 | 日频 | 择时 |
 | 买入并持有 | 固定信号 | 无（基准对照） | 一次性买入后持有 | 趋势跟踪 |
-
-**次日信号预测（`--forecast`）：**
-
-当日信号为观望时，用二分法（±10% 区间、5 次递归）模拟次日收盘价，求出触发买入/卖出的**涨跌百分比阈值**，如 `卖≤1.9`（次日较今日收盘下跌 ≤1.9% 触发卖出）、`买≥6.3`。
 
 **共通约定：**
 
 1. 所有技术指标类策略用 `shift(1)` 检测"交叉/穿越边沿"，仅在触发当日出信号，其余为观望。
 2. 所有策略信号序列索引与行情 `df.index` 严格对齐，值为 `1/-1/0`。
-3. 除质价融合与涨跌比确认外，其余策略仅依赖 `close`（及可选 `volume`），无外部数据依赖；RSI 过滤优先取 `RSI14`，缺失时按 `close` 用 `calc_rsi` 现算。
+3. 除质价融合外，其余策略仅依赖 `close`（及可选 `volume`），无外部数据依赖；RSI 过滤优先取 `RSI14`，缺失时按 `close` 用 `calc_rsi` 现算。
 4. 全局买入过滤：`EMA60_CHECK=1` 时 BOLL 另加「当日 EMA60 < close」买入条件；`ADX_CHECK=1` 时 BOLL 另加「当日 ADX > 20」买入条件。
 
 ---
 
-## 六、遗留策略说明
+## 五、遗留策略说明
 
 以下文件为历史版本，**未注册**（未出现在 `STRATEGY_MAP` 等注册表中），保留仅供参考：
 
@@ -781,6 +622,5 @@ z_t = (combined_smooth,t - μ_window) / σ_window
 |------|------|
 | `strategies/value_factor.py` | 早期估值因子策略（PE/PB/PS/PCF），功能并入质价融合策略的估值维度 |
 | `strategies/quality_factor.py` | 早期质量因子策略（ROE/现金流/净利率等），功能并入质价融合策略的质量维度 |
-| `strategies/composite_strategy.py` | 综合策略，已取消注册（CLI 不再读取 `composite` 配置） |
 | `strategies/enhanced_macd.py` | 已移除（不再注册） |
 | `strategies/enhanced_rsi.py` | 已移除（不再注册） |

@@ -75,7 +75,6 @@ flowchart LR
 [tool.stock-quant.thresholds] # 策略阈值
 [tool.stock-quant.service]    # 服务运行时间/策略
 [tool.stock-quant.WEBHOOK]    # 钉钉通知
-[tool.stock-quant.composite]  # 综合因子权重
 ```
 
 数据库未配置或连接失败时，相关读写会退化为空结果/跳过写库，不阻断主流程。
@@ -177,7 +176,7 @@ flowchart LR
 
 | 数据 | 获取方式 | 用途 |
 |------|----------|------|
-| 指数数据 | `get_index_data()` | 指数分析、指数专属策略 |
+| 指数数据 | `get_index_data()` | 指数分析（通用策略） |
 | 热门股票 | `get_hot_stocks()` | `analyze -h N` |
 | 股票列表 | `get_stock_list()` | `scan`、`backtest --random` |
 | 全量代码 | `get_all_stock_codes()` | `-s` 通配符展开 |
@@ -400,13 +399,12 @@ market_breadth
 5. add_all_indicators()
 6. 截断预热期（只保留 start 之后）
 7. 按资产类型选择策略集：
-   - 指数：mom/volatility/breadth
+   - 指数：通用策略
    - ETF：ETF 参数变体
    - 个股：通用策略
 8. 逐策略生成信号 → 信号过滤 → 回测 → 风险指标
-9. 内部计算 PREV（上一交易日信号多数表决，不输出）
-10. 生成 K 线/信号/权益图（ADL 从 market_breadth 读取）
-11. 输出控制台表格 + HTML 报告 + 可选钉钉通知
+9. 生成 K 线/信号/权益图（ADL 从 market_breadth 读取）
+10. 输出控制台表格 + HTML 报告 + 可选钉钉通知
 ```
 
 ### 7.2 指标计算
@@ -438,7 +436,6 @@ MOM60
 
 - 策略通过 `Strategy.generate_signals(df)` 输出 `1/0/-1` 序列；
 - BOLL/MACD/SG 系列在策略内部集成部分过滤；
-- `PREV`：内部计算，对所选策略上一交易日信号做多数表决（不展示）；
 - `COMPO`（部分回测场景）：任一策略买入即持有，直到该策略卖出。
 
 ### 7.4 回测与风险

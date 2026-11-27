@@ -114,7 +114,7 @@ def align_columns_for_charts(df):
 def create_strategy(strategy_key):
     """创建策略实例"""
     if strategy_key == 'composite':
-        # 复合策略需要子策略
+        # 综合策略需要子策略
         sub_strategies = [
             MACrossStrategy(),
             MACDStrategy(),

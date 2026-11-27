@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from core.data_fetcher import DataFetcher
-from core.indicators import add_all_indicators, calc_rsi_divergence
+from core.indicators import add_all_indicators
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +19,6 @@ ADR_WINDOW = 10
 ADR_BULL_THRESHOLD = 1.2
 ADR_BEAR_THRESHOLD = 0.7
 ADX_TREND_THRESHOLD = 25
-ADR_OVERHEAT_THRESHOLD = 1.5
-ADR_OVERCOLD_THRESHOLD = 0.75
-BIAS20_OVERHEAT_THRESHOLD = 0.07
-BIAS20_OVERCOLD_THRESHOLD = -0.07
-RSI_OVERHEAT_THRESHOLD = 70.0
-RSI_OVERCOLD_THRESHOLD = 30.0
 
 INDEX_NAMES = {
     '000300': '沪深300',
@@ -96,79 +90,67 @@ def _fetch_adr_series(start_date, end_date):
 
 def _align_adr(adr, index):
     if adr is None or len(adr) == 0:
-        return pd.Series(np.nan, index=index, dtype=float)
+        return pd.Series(1.0, index=index, dtype=float)
     series = pd.to_numeric(adr, errors='coerce').sort_index()
-    return series.reindex(index, method='ffill')
+    return series.reindex(index, method='ffill').fillna(1.0)
 
 
-def classify_market_trend_series(df, adr=None):
-    """逐日判断趋势，返回与 df 索引对齐的状态 Series。"""
+def _classify_trend_series(df, adr=None, use_adr=True):
+    """通用趋势判定：use_adr=True 为大盘；False 为个股（忽略 ADR）。"""
     if df is None or len(df) == 0:
         return pd.Series(dtype=object)
 
-    if adr is None:
-        adr = _fetch_adr_series(df.index[0], df.index[-1])
-    adr_series = _align_adr(adr, df.index)
+    adr_series = None
+    if use_adr:
+        if adr is None:
+            adr = _fetch_adr_series(df.index[0], df.index[-1])
+        adr_series = _align_adr(adr, df.index)
 
     ma5 = pd.to_numeric(df.get('MA5'), errors='coerce') if 'MA5' in df.columns else None
-    ma20 = pd.to_numeric(df.get('MA20'), errors='coerce') if 'MA20' in df.columns else None
+    ma60 = pd.to_numeric(df.get('MA60'), errors='coerce') if 'MA60' in df.columns else None
     adx = pd.to_numeric(df.get('ADX14'), errors='coerce') if 'ADX14' in df.columns else None
     plus_di = pd.to_numeric(df.get('PLUS_DI'), errors='coerce') if 'PLUS_DI' in df.columns else None
     minus_di = pd.to_numeric(df.get('MINUS_DI'), errors='coerce') if 'MINUS_DI' in df.columns else None
-    dif = pd.to_numeric(df.get('MACD_DIF'), errors='coerce') if 'MACD_DIF' in df.columns else None
     close = pd.to_numeric(df.get('close'), errors='coerce') if 'close' in df.columns else None
-    rsi = pd.to_numeric(df.get('RSI14'), errors='coerce') if 'RSI14' in df.columns else None
-    if any(v is None for v in (ma5, ma20, adx, plus_di, minus_di,
-                               dif, close, rsi)):
-        return pd.Series('未知', index=df.index, dtype=object)
+    if any(v is None for v in (ma5, ma60, adx, plus_di, minus_di, close)):
+        return pd.Series('震荡', index=df.index, dtype=object)
 
     slope5 = close.rolling(5).apply(
         lambda y: float(np.polyfit(np.arange(len(y)), y, 1)[0]), raw=True)
-    bias20 = (close - ma20) / ma20.where(ma20 != 0)
 
-    bull = (((ma5 > ma20) & (slope5 > 0))
-            | ((adx >= ADX_TREND_THRESHOLD) & (plus_di > minus_di))
-            | (adr_series > ADR_BULL_THRESHOLD))
-    bear = (((ma5 < ma20) & (slope5 < 0))
-            | ((adx >= ADX_TREND_THRESHOLD) & (plus_di < minus_di))
-            | (adr_series < ADR_BEAR_THRESHOLD))
-
-    div = calc_rsi_divergence(df)
-    rsi_top_div = div['bearish_divergence'].astype(bool)
-    rsi_bottom_div = div['bullish_divergence'].astype(bool)
-
-    overheat = (bull
-                & ((rsi > RSI_OVERHEAT_THRESHOLD) | rsi_top_div)
-                & (adr_series > ADR_OVERHEAT_THRESHOLD)
-                & (bias20 > BIAS20_OVERHEAT_THRESHOLD))
-    overcold = (bear
-                & ((rsi < RSI_OVERCOLD_THRESHOLD) | rsi_bottom_div)
-                & (adr_series < ADR_OVERCOLD_THRESHOLD)
-                & (bias20 < BIAS20_OVERCOLD_THRESHOLD))
+    bull = (((close > ma5) & (ma5 > ma60) & (slope5 > 0))
+            | ((adx >= ADX_TREND_THRESHOLD) & (plus_di > minus_di)))
+    bear = (((close < ma5) & (ma5 < ma60) & (slope5 < 0))
+            | ((adx >= ADX_TREND_THRESHOLD) & (plus_di < minus_di)))
+    if adr_series is not None:
+        bull = bull | (adr_series > ADR_BULL_THRESHOLD)
+        bear = bear | (adr_series < ADR_BEAR_THRESHOLD)
 
     states = pd.Series('震荡', index=df.index, dtype=object)
-    states[bull] = '上涨'
-    states[bear] = '下跌'
-    states[overheat] = '过热'
-    states[overcold] = '过冷'
-
-    valid = (ma5.notna() & ma20.notna() & adx.notna()
-             & plus_di.notna() & minus_di.notna() & dif.notna()
-             & close.notna() & rsi.notna() & slope5.notna()
-             & bias20.notna())
-    states[~valid] = '未知'
+    states[bull] = '涨势'
+    states[bear] = '跌势'
     return states
+
+
+def classify_market_trend_series(df, adr=None):
+    """逐日判断大盘趋势，返回与 df 索引对齐的状态 Series。"""
+    return _classify_trend_series(df, adr=adr, use_adr=True)
+
+
+def classify_stock_trend_series(df):
+    """逐日判断个股趋势：同大盘规则，但不使用 ADR。"""
+    return _classify_trend_series(df, adr=None, use_adr=False)
 
 
 def classify_market_trend(df, adr=None):
     """根据沪深300/中证1000日线指标判断最新趋势。"""
     if df is None or len(df) < 60:
-        return '未知'
+        return '震荡'
     if adr is None:
         adr = _fetch_adr_series(df.index[0], df.index[-1])
     states = classify_market_trend_series(df, adr=adr)
     if states.empty:
-        return '未知'
+        return '震荡'
     return str(states.iloc[-1])
 
 
@@ -199,22 +181,26 @@ def format_market_trend_reason(trend):
     """根据趋势结果字典生成具体触发原因。"""
     if not trend:
         return '数据不足'
-    state = str(trend.get('state') or '未知')
-    if state == '未知':
-        return trend.get('error') or '有效指标不足'
-    ma5, ma20 = trend.get('ma5'), trend.get('ma20')
+    if trend.get('error'):
+        return str(trend.get('error'))
+    state = str(trend.get('state') or '震荡')
+    ma5 = trend.get('ma5')
+    ma60 = trend.get('ma60')
+    close_val = trend.get('close')
     slope5 = trend.get('slope5')
     adx, pdi, mdi = trend.get('adx'), trend.get('plus_di'), trend.get('minus_di')
-    adr, rsi, bias = trend.get('adr'), trend.get('rsi'), trend.get('bias20')
-    ma_up = ma5 is not None and ma20 is not None and ma5 > ma20
-    ma_down = ma5 is not None and ma20 is not None and ma5 < ma20
+    adr = trend.get('adr')
+    ma_up = (close_val is not None and ma5 is not None and ma60 is not None
+             and close_val > ma5 > ma60)
+    ma_down = (close_val is not None and ma5 is not None and ma60 is not None
+               and close_val < ma5 < ma60)
     dmi_up = adx is not None and pdi is not None and mdi is not None and adx >= 25 and pdi > mdi
     dmi_down = adx is not None and pdi is not None and mdi is not None and adx >= 25 and pdi < mdi
     adr_up = adr is not None and adr > ADR_BULL_THRESHOLD
     adr_down = adr is not None and adr < ADR_BEAR_THRESHOLD
     up_parts, down_parts = [], []
     if ma_up:
-        up_parts.append('MA5>MA20')
+        up_parts.append('close>MA5>MA60')
     if slope5 is not None and slope5 > 0:
         up_parts.append('slope5>0')
     if dmi_up:
@@ -222,7 +208,7 @@ def format_market_trend_reason(trend):
     if adr_up:
         up_parts.append('ADR10>1.2')
     if ma_down:
-        down_parts.append('MA5<MA20')
+        down_parts.append('close<MA5<MA60')
     if slope5 is not None and slope5 < 0:
         down_parts.append('slope5<0')
     if dmi_down:
@@ -230,38 +216,89 @@ def format_market_trend_reason(trend):
     if adr_down:
         down_parts.append('ADR10<0.7')
 
-    if state == '上涨':
-        return '；'.join(up_parts) or '指数上涨条件成立'
-    if state == '下跌':
-        return '；'.join(down_parts) or '指数下跌条件成立'
-    if state == '过热':
-        extra = up_parts[:]
-        if rsi is not None and rsi > RSI_OVERHEAT_THRESHOLD:
-            extra.append(f'RSI14={rsi:.1f}>70')
-        elif trend.get('rsi_top_divergence'):
-            extra.append('RSI顶背离')
-        if adr is not None and adr > ADR_OVERHEAT_THRESHOLD:
-            extra.append('ADR10>1.5')
-        if bias is not None and bias > BIAS20_OVERHEAT_THRESHOLD:
-            extra.append(f'BIAS20={bias*100:.2f}%>7%')
-        return '；'.join(extra) or '过热条件成立'
-    if state == '过冷':
-        extra = down_parts[:]
-        if rsi is not None and rsi < RSI_OVERCOLD_THRESHOLD:
-            extra.append(f'RSI14={rsi:.1f}<30')
-        elif trend.get('rsi_bottom_divergence'):
-            extra.append('RSI底背离')
-        if adr is not None and adr < ADR_OVERCOLD_THRESHOLD:
-            extra.append('ADR10<0.75')
-        if bias is not None and bias < BIAS20_OVERCOLD_THRESHOLD:
-            extra.append(f'BIAS20={bias*100:.2f}%<-7%')
-        return '；'.join(extra) or '过冷条件成立'
+    if state == '涨势':
+        return '；'.join(up_parts) or '指数涨势条件成立'
+    if state == '跌势':
+        return '；'.join(down_parts) or '指数跌势条件成立'
     if state == '震荡':
         pieces = []
         if adx is not None:
             pieces.append(f'ADX14={adx:.1f}')
-        return '未满足上涨/下跌条件；' + '；'.join(pieces)
+        return '未满足涨势/跌势条件；' + '；'.join(pieces)
     return '状态条件成立'
+
+
+
+def analyze_stock_trend(df, end_date=None):
+    """基于个股日线判断最新趋势（同大盘规则，不含 ADR）。
+
+    与大盘趋势的区别：
+      - 不使用 ADR(涨跌家数) 条件；
+      - 数据源为传入的个股日线 DataFrame（需含 MA5/MA60/ADX14/RSI14 等指标，
+        缺失时自动调用 add_all_indicators）。
+    """
+    if df is None or len(df) == 0:
+        return {'state': '震荡', 'date': end_date, 'error': '个股数据为空'}
+
+    d = df
+    if end_date is not None:
+        try:
+            d = d[d.index <= pd.Timestamp(end_date)]
+        except Exception:
+            d = df
+    if d is None or len(d) == 0:
+        return {'state': '震荡', 'date': end_date, 'error': '个股数据为空'}
+
+    try:
+        need = {'MA5', 'MA20', 'MA60', 'ADX14', 'PLUS_DI', 'MINUS_DI',
+                'MACD_DIF', 'RSI14'}
+        if not need.issubset(set(d.columns)):
+            d = add_all_indicators(d)
+
+        states = classify_stock_trend_series(d)
+        state = str(states.iloc[-1]) if len(states) else '震荡'
+        row = d.iloc[-1]
+        close_val = _value(row, 'close')
+        ma20_val = _value(row, 'MA20')
+        bias20_val = ((close_val - ma20_val) / ma20_val
+                      if close_val is not None and ma20_val not in (None, 0)
+                      else None)
+        slope5_val = None
+        try:
+            cs = pd.to_numeric(d['close'], errors='coerce')
+            slope5_val = float(cs.rolling(5).apply(
+                lambda y: float(np.polyfit(np.arange(len(y)), y, 1)[0]),
+                raw=True).iloc[-1])
+        except Exception:
+            pass
+
+        result = {
+            'state': state,
+            'date': d.index[-1].strftime('%Y-%m-%d'),
+            'close': close_val,
+            'ma5': _value(row, 'MA5'),
+            'ma10': _value(row, 'MA10'),
+            'ma20': ma20_val,
+            'ma30': _value(row, 'MA30'),
+            'ma60': _value(row, 'MA60'),
+            'ma120': _value(row, 'MA120'),
+            'adx': _value(row, 'ADX14'),
+            'plus_di': _value(row, 'PLUS_DI'),
+            'minus_di': _value(row, 'MINUS_DI'),
+            'dif': _value(row, 'MACD_DIF'),
+            'rsi': _value(row, 'RSI14'),
+            'bias20': bias20_val,
+            'slope5': slope5_val,
+            'error': None,
+        }
+        result['reason'] = format_market_trend_reason(result)
+        return result
+    except Exception as exc:
+        logger.warning("个股趋势计算失败: %s", exc)
+        err = str(exc)
+        code = str((getattr(df, 'attrs', {}) or {}).get('symbol') or '')
+        return {'state': '震荡', 'date': end_date, 'symbol': code,
+                'error': err, 'reason': err}
 
 
 @lru_cache(maxsize=16)
@@ -279,18 +316,19 @@ def analyze_market_trend(end_date=None, index_code=None):
         df = fetcher.get_index_data(code, start_date, end_date)
     except Exception as exc:
         logger.warning("获取%s指数数据失败: %s", index_name, exc)
-        return {'state': '未知', 'date': end_date, 'index_code': code,
-                'index_name': index_name, 'error': str(exc)}
+        err = str(exc)
+        return {'state': '震荡', 'date': end_date, 'index_code': code,
+                'index_name': index_name, 'error': err, 'reason': err}
 
     if df is None or df.empty:
-        return {'state': '未知', 'date': end_date, 'index_code': code,
-                'index_name': index_name, 'error': f'{index_name}指数数据为空'}
+        err = f'{index_name}指数数据为空'
+        return {'state': '震荡', 'date': end_date, 'index_code': code,
+                'index_name': index_name, 'error': err, 'reason': err}
 
     try:
         df = add_all_indicators(df)
         adr_series = _fetch_adr_series(df.index[0], df.index[-1])
         adr_aligned = _align_adr(adr_series, df.index)
-        div = calc_rsi_divergence(df)
         state = classify_market_trend(df, adr=adr_series)
         row = df.iloc[-1]
         adr_val = adr_aligned.iloc[-1]
@@ -316,15 +354,14 @@ def analyze_market_trend(end_date=None, index_code=None):
             'ma10': _value(row, 'MA10'),
             'ma20': _value(row, 'MA20'),
             'ma30': _value(row, 'MA30'),
+            'ma60': _value(row, 'MA60'),
             'ma120': _value(row, 'MA120'),
             'adx': _value(row, 'ADX14'),
             'plus_di': _value(row, 'PLUS_DI'),
             'minus_di': _value(row, 'MINUS_DI'),
             'dif': _value(row, 'MACD_DIF'),
             'rsi': _value(row, 'RSI14'),
-            'rsi_top_divergence': bool(div['bearish_divergence'].iloc[-1]),
-            'rsi_bottom_divergence': bool(div['bullish_divergence'].iloc[-1]),
-            'adr': None if pd.isna(adr_val) else float(adr_val),
+            'adr': 1.0 if pd.isna(adr_val) else float(adr_val),
             'adr_window': ADR_WINDOW,
             'bias20': bias20_val,
             'slope5': slope5_val,
@@ -334,5 +371,6 @@ def analyze_market_trend(end_date=None, index_code=None):
         return result
     except Exception as exc:
         logger.warning("%s趋势计算失败: %s", index_name, exc)
-        return {'state': '未知', 'date': end_date, 'index_code': code,
-                'index_name': index_name, 'error': str(exc)}
+        err = str(exc)
+        return {'state': '震荡', 'date': end_date, 'index_code': code,
+                'index_name': index_name, 'error': err, 'reason': err}

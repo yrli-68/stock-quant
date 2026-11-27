@@ -55,7 +55,7 @@ database "MySQL: stock_quant" as DB {
 package "指标与信号" {
   component "add_all_indicators\nMA/EMA/MACD/RSI/BOLL/KDJ/..." as Indicators
   component "Strategy.generate_signals" as Strategy
-  component "信号过滤\n涨幅/SAR/指数/PREV" as Filters
+  component "信号过滤\n涨幅/SAR/指数" as Filters
 }
 
 package "回测与风险" {

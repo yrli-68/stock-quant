@@ -3,7 +3,7 @@
 """INDEX_CHECK 年度回测对比测试
 
 15 个用例 = 5 个年度（2021~2025）× 3 个 INDEX_CHECK 取值（0/1/2）。
-每个用例运行 -g boll,macd，并追加由两者合成的「复合策略」，
+每个用例运行 -g boll,macd，
 股票池来自 input/random1.txt，数据源 eastmoney。
 
 最终输出：
@@ -38,7 +38,7 @@ from core.indicators import add_all_indicators
 YEARS = [2021, 2022, 2023, 2024, 2025]
 MODES = [0, 1, 2]
 BASE_STRATEGIES = ['boll', 'macd']
-STRATEGIES = BASE_STRATEGIES + ['combo']
+STRATEGIES = list(BASE_STRATEGIES)
 def _read_symbols(path):
     with open(path, 'r', encoding='utf-8') as f:
         text = f.read()
@@ -120,16 +120,6 @@ def _run_cases(symbols, capital, limit=None):
                     tr = result.get('total_return')
                     if tr is not None:
                         rets[sk].append(float(tr))
-                try:
-                    combo_sig = sq._build_combo_signals(sub, sig_map)
-                    if combo_sig is not None:
-                        combo_res = sq._run_signals_backtest(
-                            sub, combo_sig, capital, sq._COMBO_TOKEN, sq._COMBO_NAME)
-                        tr = combo_res.get('total_return')
-                        if tr is not None:
-                            rets['combo'].append(float(tr))
-                except Exception as exc:
-                    print(f'    {sym} 复合策略回测失败: {exc}')
             for sk in STRATEGIES:
                 year_returns[(sk, mode, year)] = (
                     sum(rets[sk]) / len(rets[sk]) if rets[sk] else None)
@@ -222,7 +212,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 </div>
 <p class="note">年度收益率为当年股票等权平均总收益率；年度收益率合计为 5 年算术和；
 5 年累计总收益率为年度收益率的复利累乘；年化总收益率 = (1 + 5年累计总收益率)<sup>1/5</sup> - 1。<br>
-「复合策略」由 BOLL 与 MACD 的买入信号合成：任一策略买入即持有，直到被记录策略出现卖出。</p>
+</p>
 {_table_html(by_cum, '按 5 年累计总收益率排序')}
 {_table_html(by_annual, '按年化总收益率排序')}
 </body></html>'''

@@ -36,10 +36,7 @@ class BollingerStrategy(Strategy):
         use_atr_stop (bool): 是否启用 ATR 动态止损
     """
 
-    # 由 generate_signals 内部同步 -sn 过滤（in_pos 仅对实际入场生效）
     integrates_buy_filter = True
-    # -sn 仅对 BOLL 生效
-    supports_seqnum = True
 
     def __init__(self, period=20, std=2, name='Bollinger', bbw_lookback=10,
                  use_atr_stop=False):
@@ -60,7 +57,7 @@ class BollingerStrategy(Strategy):
         self.use_atr_stop = bool(use_atr_stop)
         self.atr_stop_multiplier = 2.0
 
-    def generate_signals(self, df, seqnum=0):
+    def generate_signals(self, df):
         """
         生成布林带交易信号
 
@@ -77,8 +74,6 @@ class BollingerStrategy(Strategy):
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
-            seqnum (int): 买入信号序号阈值（0=不过滤）；内部据此同步 in_pos，
-                使被过滤的买入不会被视为已入场
 
         Returns:
             pd.Series: 交易信号序列，索引与 df 对齐
@@ -139,8 +134,6 @@ class BollingerStrategy(Strategy):
                 market_states = market_states.reindex(df.index, method='ffill')
             except Exception:
                 market_states = None
-        seq_target = seqnum if seqnum and seqnum > 0 else 1
-        buy_count = 0
         in_pos = False
         stop_price = None
         for i in range(len(df)):
@@ -148,25 +141,14 @@ class BollingerStrategy(Strategy):
             state = market_states.iloc[i] if market_states is not None else None
             atr_mult = adjust_atr_stop_multiplier(self.atr_stop_multiplier, state)
             if not in_pos:
-                # 空仓期间的卖出信号同样重置买入计数
-                if bool(sell_signal.iloc[i]):
-                    buy_count = 0
                 if bool(buy_signal.iloc[i]):
-                    if seqnum and seqnum > 0:
-                        # 序号按原始买入信号计数（包含被过滤的买入）
-                        buy_count += 1
-                        allow = (buy_count == seq_target)
-                    else:
-                        allow = True
-                    allow = (allow
-                             and (ema60_ok is None or bool(ema60_ok.iloc[i]))
+                    allow = ((ema60_ok is None or bool(ema60_ok.iloc[i]))
                              and (adx_ok is None or bool(adx_ok.iloc[i])))
                     if allow:
                         signals.iloc[i] = self.signal_value(1)
                         in_pos = True
                         stop_price = update_atr_trailing_stop(
                             c, atr.iloc[i], multiplier=atr_mult)
-                        buy_count = 0
             else:
                 if self.use_atr_stop:
                     stop_price = update_atr_trailing_stop(
@@ -175,12 +157,10 @@ class BollingerStrategy(Strategy):
                         signals.iloc[i] = self.signal_value(-1)
                         in_pos = False
                         stop_price = None
-                        buy_count = 0
                         continue
                 if bool(sell_signal.iloc[i]):
                     signals.iloc[i] = self.signal_value(-1)
                     in_pos = False
                     stop_price = None
-                    buy_count = 0
 
         return signals

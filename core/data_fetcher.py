@@ -371,6 +371,39 @@ def _cached_market_trade_dates(db_start: str, db_end: str) -> frozenset:
     return frozenset(pd.to_datetime(rows))
 
 
+_BAOSTOCK_SOCKET_TIMEOUT = 15.0
+
+
+@contextlib.contextmanager
+def _baostock_socket_timeout(bs, timeout=_BAOSTOCK_SOCKET_TIMEOUT):
+    """临时为 Baostock 连接设置 socket 超时，退出时恢复原值。"""
+    old_default = socket.getdefaulttimeout()
+    sock = None
+    old_sock_timeout = None
+    try:
+        from baostock.common import context as _bs_context
+        sock = getattr(_bs_context, 'default_socket', None)
+        if sock is not None:
+            old_sock_timeout = sock.gettimeout()
+    except Exception:
+        sock = None
+    socket.setdefaulttimeout(timeout)
+    if sock is not None:
+        try:
+            sock.settimeout(timeout)
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(old_default)
+        if sock is not None:
+            try:
+                sock.settimeout(old_sock_timeout)
+            except Exception:
+                pass
+
+
 class DataFetcher:
     """
     股票数据获取器
@@ -398,6 +431,8 @@ class DataFetcher:
         self._session = requests.Session()
         self._session.headers.update(HEADERS)
         self._listed_date_cache = {}
+        self._bs_module = None
+        self._bs_unavailable = False
         self._check_dependencies()
 
     def _setup_logging(self, log_level: int) -> None:
@@ -1003,60 +1038,60 @@ class DataFetcher:
         使用 baostock.query_history_k_data_plus，固定 adjustflag='3'（不复权），
         复权在读取后于内存中完成。
 
-        登录在 DataFetcher 实例内复用（同一批量任务仅登录一次）。
-        未安装 baostock 或获取失败时返回空 DataFrame。
+        登录在 DataFetcher 实例内复用；查询异常时自动 logout 并重登录一次，
+        连续失败则本次运行禁用 Baostock。未安装 baostock 或获取失败时返回空 DataFrame。
 
         Returns:
             pd.DataFrame: 列 [date, open, high, low, close, volume, amount, change_pct, turnover_rate]
         """
-        bs = self._baostock_login()
-        if bs is None:
-            return pd.DataFrame()
-
         # 新浪前缀 sh600036 -> Baostock 代码 sh.600036
         sina_code = self._get_sina_prefix(symbol)
         bs_code = f'{sina_code[:2]}.{sina_code[2:]}'
 
         s = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
         e = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
-        adjustflag = '3'
 
-        try:
-            fields = 'date,open,high,low,close,volume,amount,turn,pctChg'
-            rs = bs.query_history_k_data_plus(
-                bs_code, fields, start_date=s, end_date=e,
-                frequency='d', adjustflag=adjustflag)
-            if getattr(rs, 'error_code', '0') != '0':
-                logger.error("Baostock 查询失败(%s): %s", symbol, getattr(rs, 'error_msg', ''))
-                return pd.DataFrame()
+        def _do(bs):
+            return self._query_baostock_kline(symbol, bs_code, s, e, bs)
 
-            rows = []
-            while rs.next():
-                rows.append(rs.get_row_data())
-            if not rows:
-                logger.warning("Baostock 返回空数据: %s", symbol)
-                return pd.DataFrame()
+        df = self._baostock_execute(symbol, _do)
+        return df if df is not None else pd.DataFrame()
 
-            df = pd.DataFrame(rows, columns=fields.split(','))
-            df = df.rename(columns={'pctChg': 'change_pct', 'turn': 'turnover_rate'})
-            df['date'] = pd.to_datetime(df['date'], errors='coerce')
-            for col in ['open', 'high', 'low', 'close', 'volume', 'amount',
-                        'change_pct', 'turnover_rate']:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            df = df.dropna(subset=['date'])
-
-            start_dt = pd.to_datetime(s)
-            end_dt = pd.to_datetime(e)
-            df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-            df = df.sort_values('date').reset_index(drop=True)
-            logger.info("Baostock 获取 %s 共 %d 条记录 (adjustflag=%s)",
-                        symbol, len(df), adjustflag)
-            return df
-
-        except Exception as ex:
-            logger.error("Baostock 获取 %s 数据失败: %s", symbol, ex)
+    def _query_baostock_kline(self, symbol, bs_code, s, e, bs,
+                              adjustflag='3'):
+        """执行单只股票 Baostock K 线查询与解析（异常向上抛给重试逻辑）。"""
+        fields = 'date,open,high,low,close,volume,amount,turn,pctChg'
+        rs = bs.query_history_k_data_plus(
+            bs_code, fields, start_date=s, end_date=e,
+            frequency='d', adjustflag=adjustflag)
+        if getattr(rs, 'error_code', '0') != '0':
+            logger.error("Baostock 查询失败(%s): %s", symbol,
+                         getattr(rs, 'error_msg', ''))
             return pd.DataFrame()
+
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+        if not rows:
+            logger.warning("Baostock 返回空数据: %s", symbol)
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=fields.split(','))
+        df = df.rename(columns={'pctChg': 'change_pct', 'turn': 'turnover_rate'})
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        for col in ['open', 'high', 'low', 'close', 'volume', 'amount',
+                    'change_pct', 'turnover_rate']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['date'])
+
+        start_dt = pd.to_datetime(s)
+        end_dt = pd.to_datetime(e)
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        df = df.sort_values('date').reset_index(drop=True)
+        logger.info("Baostock 获取 %s 共 %d 条记录 (adjustflag=%s)",
+                    symbol, len(df), adjustflag)
+        return df
 
     def _get_a_stock_data_eastmoney(
         self,
@@ -1211,6 +1246,48 @@ class DataFetcher:
             return None
         finally:
             socket.setdefaulttimeout(old_timeout)
+
+    def _baostock_reset(self, mark_unavailable: bool = False) -> None:
+        """关闭并清空 Baostock 会话；mark_unavailable=True 时本次运行禁用该源。"""
+        bs = getattr(self, '_bs_module', None)
+        if bs is not None:
+            try:
+                import io
+                with contextlib.redirect_stdout(io.StringIO()):
+                    bs.logout()
+            except Exception:
+                pass
+        self._bs_module = None
+        if mark_unavailable:
+            self._bs_unavailable = True
+
+    def _baostock_execute(self, label, fn):
+        """执行 Baostock 查询：带 socket 超时，异常时重置并重登录一次。
+
+        - 第一次异常：logout、清空会话后重新登录并重试；
+        - 再次异常：标记 Baostock 本次运行不可用，后续调用直接跳过。
+        """
+        for attempt in (1, 2):
+            bs = self._baostock_login()
+            if bs is None:
+                return None
+            try:
+                with _baostock_socket_timeout(bs):
+                    try:
+                        return fn(bs)
+                    except Exception:
+                        # 在超时保护内关闭会话，避免 logout 因坏 socket 长时间阻塞
+                        self._baostock_reset()
+                        raise
+            except Exception as exc:
+                logger.warning("Baostock 查询异常(%s, 第%d次): %s",
+                               label, attempt, exc)
+                if attempt == 1:
+                    continue
+                logger.error("Baostock 连续失败(%s)，本次运行禁用该数据源", label)
+                self._bs_unavailable = True
+                return None
+        return None
 
     def _get_us_stock_data(
         self,
@@ -1773,10 +1850,7 @@ class DataFetcher:
 
         def _fetch_baostock_index():
             """Baostock 指数（sh.000300 / sz.399001 等）。"""
-            try:
-                bs = self._baostock_login()
-                if bs is None:
-                    return pd.DataFrame()
+            def _do(bs):
                 ex = 'sz' if raw_symbol.startswith(('399', '899')) else 'sh'
                 bs_code = f'{ex}.{raw_symbol}'
                 s = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
@@ -1802,9 +1876,9 @@ class DataFetcher:
                     return pd.DataFrame()
                 logger.info("Baostock 指数数据返回 %d 条记录", len(df))
                 return self._standardize_dataframe(df)
-            except Exception as e:
-                logger.warning("Baostock 获取指数数据失败: %s", str(e))
-                return pd.DataFrame()
+
+            df = self._baostock_execute(f'index {raw_symbol}', _do)
+            return df if df is not None else pd.DataFrame()
 
         # 首选/测速最快源为 baostock 时优先取 baostock 指数，避免其它源超时
         _primary = get_primary_source()

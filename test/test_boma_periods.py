@@ -8,7 +8,7 @@
     python test/test_boma_periods.py -sf input/pool.txt -g boma,macd
 
 等价 CLI 参数：
-    backtest -g <strategy> -sf <file> --withdrawsell 2 \
+    backtest -g <strategy> -sf <file> --maxdrawdown 2 \
              --verbose --fixcapital -st <start> -e <end>
 
 统计：
@@ -129,16 +129,15 @@ def main_test():
         raise RuntimeError(f'股票池为空或不存在: {pool_path}')
 
     main.set_primary_source('auto')
-    main._set_seqnum(0)
     main._set_max_hold_days(None)
     main._set_fix_capital(True)
-    main._set_withdrawsell(2.0)
+    main._set_maxdrawdown(2.0)
     main._ensure_symbol_cap_map(symbols)
 
     strat_tag = '_'.join(strat_keys)
     print(f'股票池: {pool_path}（{len(symbols)} 只）')
     print(f'策略: {", ".join(main._strat_label(k) for k in strat_keys)}')
-    print('参数: --withdrawsell 2 --verbose --fixcapital')
+    print('参数: --maxdrawdown 2 --verbose --fixcapital')
 
     for label, start, end in PERIODS:
         print(f'\n正在回测 {label}: {start} ~ {end} ...')

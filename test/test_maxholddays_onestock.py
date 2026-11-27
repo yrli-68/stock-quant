@@ -98,7 +98,6 @@ def _capture_table(headers, rows, tablefmt='grid'):
 
 def _run_case(symbols, start_date, end_date, max_hold_days, label):
     main.set_primary_source('auto')
-    main._set_seqnum(0)
     main._set_fix_capital(False)
     main._set_max_hold_days(max_hold_days)
 

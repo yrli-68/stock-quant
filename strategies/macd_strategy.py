@@ -66,7 +66,7 @@ class MACDStrategy(Strategy):
         self.use_atr_stop = bool(use_atr_stop)
         self.atr_stop_multiplier = 2.0
 
-    def generate_signals(self, df, seqnum=0):
+    def generate_signals(self, df):
         """
         生成 MACD 交易信号
 
@@ -78,7 +78,6 @@ class MACDStrategy(Strategy):
 
         Args:
             df (pd.DataFrame): 行情数据，必须包含 'close' 列
-            seqnum (int): 兼容接口，MACD 不使用买入序号过滤
 
         Returns:
             pd.Series: 交易信号序列（1/0/-1），索引与 df 对齐

@@ -4,11 +4,16 @@
 
 买入 = 买入1 OR 买入2
     买入1 = BOLL 下轨反弹 AND (MACD红柱 OR 绿柱变短)
-    买入2 = MACD金叉 AND 收盘价在 BOLL 中线之下
+    买入2 = 买入信号MACD1 OR 买入信号MACD2
+        买入信号MACD1 = MACD金叉 AND DIF>=0 AND 大盘涨势 AND ADX>20 AND +DI>-DI
+        买入信号MACD2 = MACD金叉 AND DIF<0 AND RSI14<30 AND BIAS负乖离 AND ADX>20
 
 卖出 = 卖出1 OR 卖出2
     卖出1 = BOLL 上轨回落 AND (DIF拐头向下 OR MACD红柱连续2根缩短)
-    卖出2 = MACD死叉 AND 收盘价跌破 BOLL 中线
+    卖出2 = 卖出信号MACD1 OR 卖出信号MACD2
+        卖出信号MACD1 = 个股趋势∈{涨势,震荡} AND MACD死叉 AND close<BOLL_MIDDLE
+                        AND +DI向下 AND -DI向上 AND ADX14>=20
+        卖出信号MACD2 = 个股趋势=跌势 AND MACD死叉
 """
 
 import numpy as np
@@ -19,24 +24,74 @@ from core.indicators import (calc_adx, calc_adxr, calc_atr, calc_bollinger,
                              calc_macd, calc_rsi, update_atr_trailing_stop,
                              adjust_atr_stop_multiplier)
 
-_ACTIVE_CRITERIA = None
+_SIGNAL_SWITCHES = None
+
+# squant.toml 中 [tool.stock-quant.boma] 的开关名称
+SIGNAL_BOLL_BUY = '买入信号BOLL'
+SIGNAL_MACD1_BUY = '买入信号MACD1'
+SIGNAL_MACD2_BUY = '买入信号MACD2'
+SIGNAL_ADX_BUY = '买入信号ADX'
+SIGNAL_BOLL1_SELL = '卖出信号BOLL1'
+SIGNAL_BOLL2_SELL = '卖出信号BOLL2'
+SIGNAL_MACD_SELL = '卖出信号MACD'  # 兼容旧配置：作为 MACD1/MACD2 的总开关
+SIGNAL_MACD1_SELL = '卖出信号MACD1'
+SIGNAL_MACD2_SELL = '卖出信号MACD2'
+SIGNAL_ATR_SELL = '卖出信号ATR'
 
 
-def set_active_criteria(criteria) -> None:
-    """设置 BOMA 生效条件；None 表示全部生效。"""
-    global _ACTIVE_CRITERIA
-    _ACTIVE_CRITERIA = set(criteria) if criteria else None
+def set_signal_switches(switches) -> None:
+    """设置各买卖信号的独立开关（来自 squant.toml 的 [tool.stock-quant.boma]）。"""
+    global _SIGNAL_SWITCHES
+    _SIGNAL_SWITCHES = dict(switches) if switches else None
 
 
-def _enabled(name: str) -> bool:
-    return _ACTIVE_CRITERIA is None or name in _ACTIVE_CRITERIA
+def _load_signal_switches():
+    global _SIGNAL_SWITCHES
+    if _SIGNAL_SWITCHES is None:
+        try:
+            from core.config import load_config
+            _SIGNAL_SWITCHES = dict((load_config() or {}).get('boma') or {})
+        except Exception:
+            _SIGNAL_SWITCHES = {}
+    return _SIGNAL_SWITCHES
+
+
+def _sw_enabled(name: str) -> bool:
+    """配置开关：缺省为启用；0/false/off/空串表示关闭。"""
+    switches = _load_signal_switches()
+    if not switches or name not in switches:
+        return True
+    value = switches.get(name)
+    if isinstance(value, bool):
+        return value
+    try:
+        return float(value) != 0
+    except (TypeError, ValueError):
+        return str(value).strip().lower() not in ('0', 'false', 'off', 'no', '')
+
+
+
+def _get_stock_states(df):
+    """个股趋势状态序列（优先复用 df.attrs 缓存）。"""
+    states = df.attrs.get('stock_trend_states')
+    if states is not None and len(states) > 0:
+        try:
+            return states.reindex(df.index, method='ffill')
+        except Exception:
+            return None
+    try:
+        from core.market_trend import classify_stock_trend_series
+        states = classify_stock_trend_series(df)
+        df.attrs['stock_trend_states'] = states
+        return states.reindex(df.index, method='ffill')
+    except Exception:
+        return None
 
 
 class BOMAStrategy(Strategy):
     """BOLL 与 MACD 组合策略。"""
 
     integrates_buy_filter = True
-    supports_seqnum = True
 
     def __init__(self, boll_period=20, boll_std=2, macd_fast=12,
                  macd_slow=26, macd_signal=9, name='BOMA',
@@ -71,6 +126,24 @@ class BOMAStrategy(Strategy):
             ma5 = df['MA5'] if 'MA5' in df.columns else close.rolling(5).mean()
             rsi_order = rsi6.iloc[pos] > rsi12.iloc[pos]
             price_above_ma5 = c > float(ma5.iloc[pos])
+            rsi14 = calc_rsi(df, 14)
+            ma20 = df['MA20'] if 'MA20' in df.columns else close.rolling(20).mean()
+            ma20_val = float(ma20.iloc[pos])
+            bias_negative = ((c - ma20_val) / ma20_val < 0) if ma20_val != 0 else False
+            market_states = df.attrs.get('market_states')
+            if market_states is not None and len(market_states) > 0:
+                try:
+                    market_states = market_states.reindex(df.index, method='ffill')
+                except Exception:
+                    market_states = None
+            state = (market_states.iloc[pos] if market_states is not None else None)
+            mkt_bull = state == '涨势'
+            st_states = _get_stock_states(df)
+            stk_state = (st_states.iloc[pos]
+                         if st_states is not None and len(st_states) > pos
+                         else None)
+            if value < 0 and state == '跌势' and stk_state == '跌势':
+                return ['趋势共振卖出']
 
             reasons = []
             if value > 0:
@@ -89,38 +162,59 @@ class BOMAStrategy(Strategy):
                 adxr = calc_adxr(df)
                 cross_up = (pdi.iloc[pos - 1] <= mdi.iloc[pos - 1]
                             and pdi.iloc[pos] > mdi.iloc[pos])
-                if _enabled('b1') and lower_rebound and bar_ok and rsi_order and price_above_ma5:
+                if (_sw_enabled(SIGNAL_BOLL_BUY)
+                        and lower_rebound and bar_ok and rsi_order
+                        and price_above_ma5):
                     reasons.append('买入信号BOLL')
-                if (_enabled('b2') and golden
-                        and c < float(middle.iloc[pos])
-                        and rsi_order and price_above_ma5):
-                    reasons.append('买入信号MACD')
-                if (_enabled('b3') and adx.iloc[pos] > 25 and cross_up
+                macd1 = (golden and dif.iloc[pos] >= 0 and mkt_bull
+                         and adx.iloc[pos] > 20
+                         and pdi.iloc[pos] > mdi.iloc[pos])
+                macd2 = (golden and dif.iloc[pos] < 0
+                         and rsi14.iloc[pos] < 30 and bias_negative
+                         and adx.iloc[pos] > 20)
+                if _sw_enabled(SIGNAL_MACD1_BUY) and macd1:
+                    reasons.append('买入信号MACD1')
+                if _sw_enabled(SIGNAL_MACD2_BUY) and macd2:
+                    reasons.append('买入信号MACD2')
+                if (_sw_enabled(SIGNAL_ADX_BUY)
+                        and adx.iloc[pos] > 25 and cross_up
                         and adxr.iloc[pos] > adx.iloc[pos]
                         and price_above_ma5):
                     reasons.append('买入信号ADX')
             else:
-                upper_pullback = (close.iloc[pos - 1] >= upper.iloc[pos - 1]
-                                  and c < float(upper.iloc[pos]))
-                dif_turn = (dif.iloc[pos - 1] > dif.iloc[pos - 2]
-                            and dif.iloc[pos] < dif.iloc[pos - 1])
-                red_shrink = (bar.iloc[pos] > 0 and bar.iloc[pos - 1] > 0
-                              and bar.iloc[pos] < bar.iloc[pos - 1])
-                if _enabled('s1') and upper_pullback and (dif_turn or red_shrink):
-                    reasons.append('卖出信号BOLL')
                 adx = (df['ADX14'] if 'ADX14' in df.columns
                        else calc_adx(df)['ADX'])
                 pdi = df['PLUS_DI'] if 'PLUS_DI' in df.columns else calc_adx(df)['PLUS_DI']
                 mdi = df['MINUS_DI'] if 'MINUS_DI' in df.columns else calc_adx(df)['MINUS_DI']
+                upper_pullback = (pos > 0
+                                  and close.iloc[pos - 1] >= upper.iloc[pos - 1]
+                                  and c < float(upper.iloc[pos]))
+                break_mid = (pos > 0
+                             and close.iloc[pos - 1] >= middle.iloc[pos - 1]
+                             and c < float(middle.iloc[pos]))
+                adx_falling = pos > 0 and adx.iloc[pos] < adx.iloc[pos - 1]
+                dif_falling = pos > 0 and dif.iloc[pos] < dif.iloc[pos - 1]
+                is_bull = stk_state == '涨势'
+                is_nonbull = stk_state in ('震荡', '跌势')
+                if (_sw_enabled(SIGNAL_BOLL1_SELL)
+                        and is_bull and break_mid and adx_falling):
+                    reasons.append('卖出信号BOLL1')
+                if (_sw_enabled(SIGNAL_BOLL2_SELL)
+                        and is_nonbull and upper_pullback and dif_falling):
+                    reasons.append('卖出信号BOLL2')
                 death = (dif.iloc[pos - 1] >= dea.iloc[pos - 1]
                          and dif.iloc[pos] < dea.iloc[pos])
                 di_bearish = (pdi.iloc[pos] < pdi.iloc[pos - 1]
                               and mdi.iloc[pos] > mdi.iloc[pos - 1]
                               and adx.iloc[pos] >= 20)
-                if (_enabled('s2') and death
-                        and c < float(middle.iloc[pos]) and di_bearish):
-                    reasons.append('卖出信号MACD')
-                if self.use_atr_stop and _enabled('s3'):
+                if (_sw_enabled(SIGNAL_MACD_SELL) and _sw_enabled(SIGNAL_MACD1_SELL)
+                        and stk_state in ('涨势', '震荡')
+                        and death and c < float(middle.iloc[pos]) and di_bearish):
+                    reasons.append('卖出信号MACD1')
+                if (_sw_enabled(SIGNAL_MACD_SELL) and _sw_enabled(SIGNAL_MACD2_SELL)
+                        and stk_state == '跌势' and death):
+                    reasons.append('卖出信号MACD2')
+                if (self.use_atr_stop and _sw_enabled(SIGNAL_ATR_SELL)):
                     last_sell = None
                     for j in range(pos - 1, -1, -1):
                         if float(signals.iloc[j]) < 0:
@@ -149,13 +243,14 @@ class BOMAStrategy(Strategy):
                             stop_price = update_atr_trailing_stop(
                                 close.iloc[j], atr.iloc[j], stop_price,
                                 multiplier=mult)
-                        if stop_price is not None and c < stop_price:
+                        if (stop_price is not None and c < stop_price
+                                and c > float(lower.iloc[pos])):
                             reasons.append('卖出信号ATR')
             return reasons
         except Exception:
             return []
 
-    def generate_signals(self, df, seqnum=0):
+    def generate_signals(self, df):
         """生成 BOMA 买入/卖出信号。"""
         close = df['close']
         bb = calc_bollinger(df, period=self.boll_period, std=self.boll_std)
@@ -166,6 +261,7 @@ class BOMAStrategy(Strategy):
         dif, dea, bar = macd_df['DIF'], macd_df['DEA'], macd_df['MACD']
         rsi6 = calc_rsi(df, 6)
         rsi12 = calc_rsi(df, 12)
+        rsi14 = calc_rsi(df, 14)
         adx = df['ADX14'] if 'ADX14' in df.columns else calc_adx(df)['ADX']
         adxr = calc_adxr(df)
         plus_di = df['PLUS_DI'] if 'PLUS_DI' in df.columns else calc_adx(df)['PLUS_DI']
@@ -173,6 +269,24 @@ class BOMAStrategy(Strategy):
         rsi_order = rsi6 > rsi12
         ma5 = df['MA5'] if 'MA5' in df.columns else close.rolling(5).mean()
         price_above_ma5 = close > ma5
+        ma20 = df['MA20'] if 'MA20' in df.columns else close.rolling(20).mean()
+        bias20 = (close - ma20) / ma20.where(ma20 != 0)
+        bias_negative = bias20 < 0
+        adx_gt20 = adx > 20
+        pdi_gt_mdi = plus_di > minus_di
+
+        market_states = df.attrs.get('market_states')
+        if market_states is not None and len(market_states) > 0:
+            try:
+                market_states = market_states.reindex(df.index, method='ffill')
+            except Exception:
+                market_states = None
+        else:
+            market_states = None
+        if market_states is not None:
+            mkt_bull = market_states == '涨势'
+        else:
+            mkt_bull = pd.Series(False, index=df.index)
 
         lower_rebound = ((close.shift(1) <= lower.shift(1))
                          & (close > lower))
@@ -192,78 +306,97 @@ class BOMAStrategy(Strategy):
         di_cross_down = ((plus_di.shift(1) >= minus_di.shift(1))
                          & (plus_di < minus_di))
 
-        dif_turn_down = ((dif.shift(1) > dif.shift(2))
-                         & (dif < dif.shift(1)))
-        red_shrink_1 = (red_bar & (bar.shift(1) > 0)
-                        & (bar < bar.shift(1)))
-
         buy1 = (lower_rebound & bar_ok & rsi_order & price_above_ma5
-                if _enabled('b1') else pd.Series(False, index=df.index))
-        buy2 = ((golden_cross & (close < middle) & rsi_order
-                 & price_above_ma5) if _enabled('b2')
+                if _sw_enabled(SIGNAL_BOLL_BUY)
                 else pd.Series(False, index=df.index))
+        buy2_bull = (golden_cross & (dif >= 0) & mkt_bull
+                     & adx_gt20 & pdi_gt_mdi)
+        buy2_overcold = (golden_cross & (dif < 0)
+                         & (rsi14 < 30) & bias_negative & adx_gt20)
+        if not _sw_enabled(SIGNAL_MACD1_BUY):
+            buy2_bull = pd.Series(False, index=df.index)
+        if not _sw_enabled(SIGNAL_MACD2_BUY):
+            buy2_overcold = pd.Series(False, index=df.index)
+        buy2 = buy2_bull | buy2_overcold
         buy3 = (((adx > 25) & di_cross_up & (adxr > adx)
-                 & price_above_ma5) if _enabled('b3')
+                 & price_above_ma5)
+                if _sw_enabled(SIGNAL_ADX_BUY)
                 else pd.Series(False, index=df.index))
         buy_signal = buy1 | buy2 | buy3
 
-        sell1 = (upper_pullback & (dif_turn_down | red_shrink_1)
-                 if _enabled('s1') else pd.Series(False, index=df.index))
+        st_states = _get_stock_states(df)
+        if st_states is not None:
+            st_bull_mid = st_states.isin(['涨势', '震荡'])
+            st_bear_high = st_states.isin(['跌势'])
+            is_bull = st_states == '涨势'
+            is_nonbull = st_states.isin(['震荡', '跌势'])
+        else:
+            st_bull_mid = pd.Series(False, index=df.index)
+            st_bear_high = pd.Series(False, index=df.index)
+            is_bull = pd.Series(False, index=df.index)
+            is_nonbull = pd.Series(False, index=df.index)
+        break_mid = ((close.shift(1) >= middle.shift(1))
+                     & (close < middle))
+        adx_falling = adx < adx.shift(1)
+        dif_falling = dif < dif.shift(1)
+        sell1_boll1 = (is_bull & break_mid & adx_falling
+                       if _sw_enabled(SIGNAL_BOLL1_SELL)
+                       else pd.Series(False, index=df.index))
+        sell1_boll2 = (is_nonbull & upper_pullback & dif_falling
+                       if _sw_enabled(SIGNAL_BOLL2_SELL)
+                       else pd.Series(False, index=df.index))
+        sell1 = sell1_boll1 | sell1_boll2
         di_bearish = ((plus_di < plus_di.shift(1))
                       & (minus_di > minus_di.shift(1))
                       & (adx >= 20))
-        sell2 = ((death_cross & (close < middle) & di_bearish)
-                 if _enabled('s2') else pd.Series(False, index=df.index))
+        macd1_on = (_sw_enabled(SIGNAL_MACD_SELL)
+                    and _sw_enabled(SIGNAL_MACD1_SELL))
+        macd2_on = (_sw_enabled(SIGNAL_MACD_SELL)
+                    and _sw_enabled(SIGNAL_MACD2_SELL))
+        sell2_macd1 = (st_bull_mid & death_cross & (close < middle) & di_bearish
+                       if macd1_on else pd.Series(False, index=df.index))
+        sell2_macd2 = (st_bear_high & death_cross
+                       if macd2_on else pd.Series(False, index=df.index))
+        sell2 = sell2_macd1 | sell2_macd2
         sell_signal = sell1 | sell2
 
-        market_states = df.attrs.get('market_states')
-        if market_states is not None and len(market_states) > 0:
-            try:
-                market_states = market_states.reindex(df.index, method='ffill')
-            except Exception:
-                market_states = None
-        else:
-            market_states = None
         atr = df['ATR14'] if 'ATR14' in df.columns else calc_atr(df)
 
         signals = pd.Series(0.0, index=df.index, dtype=float)
-        seq_target = seqnum if seqnum and seqnum > 0 else 1
-        buy_count = 0
         in_pos = False
         stop_price = None
 
         for i in range(len(df)):
             state = (market_states.iloc[i]
                      if market_states is not None else None)
+            stk_state = (st_states.iloc[i]
+                         if st_states is not None else None)
+            both_down = (state == '跌势' and stk_state == '跌势')
+            both_up = (state == '涨势' and stk_state == '涨势')
+            either_down = (state == '跌势' or stk_state == '跌势')
             atr_mult = adjust_atr_stop_multiplier(
                 self.atr_stop_multiplier, state)
             if not in_pos:
-                if bool(sell_signal.iloc[i]):
-                    buy_count = 0
-                if bool(buy_signal.iloc[i]):
-                    if seqnum and seqnum > 0:
-                        buy_count += 1
-                        allow = (buy_count == seq_target)
-                    else:
-                        allow = True
-                    if allow:
-                        signals.iloc[i] = self.signal_value(1)
-                        in_pos = True
-                        stop_price = update_atr_trailing_stop(
-                            float(close.iloc[i]), atr.iloc[i],
-                            multiplier=atr_mult)
-                        buy_count = 0
+                if (not either_down) and bool(buy_signal.iloc[i]):
+                    signals.iloc[i] = self.signal_value(1)
+                    in_pos = True
+                    stop_price = update_atr_trailing_stop(
+                        float(close.iloc[i]), atr.iloc[i],
+                        multiplier=atr_mult)
             else:
                 stop_price = update_atr_trailing_stop(
                     float(close.iloc[i]), atr.iloc[i], stop_price,
                     multiplier=atr_mult)
-                sell3 = (self.use_atr_stop and _enabled('s3')
+                sell3 = (self.use_atr_stop and _sw_enabled(SIGNAL_ATR_SELL)
                          and stop_price is not None
-                         and float(close.iloc[i]) < stop_price)
-                if bool(sell_signal.iloc[i]) or sell3:
+                         and float(close.iloc[i]) < stop_price
+                         and float(close.iloc[i]) > float(lower.iloc[i]))
+                force_sell = both_down
+                suppress_sell = both_up
+                if force_sell or ((not suppress_sell)
+                                  and (bool(sell_signal.iloc[i]) or sell3)):
                     signals.iloc[i] = self.signal_value(-1)
                     in_pos = False
                     stop_price = None
-                    buy_count = 0
 
         return signals

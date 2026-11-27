@@ -751,7 +751,7 @@ dist/squant/squant
 |------|------|
 | `deploy/service_runner.py` | 常驻进程，每天到达指定时刻后运行一次 `analyze` |
 | `deploy/stock-quant.service` | 用户级 systemd unit 示例 |
-| `daemon.py` | 另一种轻量定时循环，可直接运行；默认 08:30、14:35 各执行一次，周六/周日跳过；`-t 0830,1430` 可指定多个时间；每次先 analyze，再 scan --random --nost --notify |
+| `daemon.py` | 另一种轻量定时循环，可直接运行；默认 08:30、14:35 各执行一次，周六/周日跳过；`-t 0830,1430` 可指定多个时间；每次先 analyze，再 scan --random --notify |
 
 ### 8.1 使用 `service_runner.py`
 

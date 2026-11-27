@@ -51,8 +51,8 @@ def _cached_breadth_adl(start_date, end_date, universe_code='ALL_A'):
 # ============================================================================
 
 
-def _adaptive_month_ticks(index, fig_width_in=16.0, fontsize=8):
-    """生成自适应月度 x 轴刻度，标签格式为 YYMM（如 2506）。
+def _adaptive_month_ticks(index, fig_width_in=16.0, fontsize=10):
+    """生成自适应月度 x 轴刻度，标签格式为 YY-MM（如 25-06）。
 
     依据图宽、字号与标签近似宽度估算可容纳的标签数量，选择能避免文字重叠的
     最小月份间隔（1/2/3/4/6/12/24/36 个月）；并在首个刻度与第二个刻度过近时
@@ -72,10 +72,11 @@ def _adaptive_month_ticks(index, fig_width_in=16.0, fontsize=8):
     if not month_idx:
         return [], []
 
-    # 数字字符宽度约为 0.62×字号；另预留约 1.2×字号间隙
-    label_pt = 4 * fontsize * 0.62
-    gap_pt = fontsize * 1.2
-    usable_pt = max(60.0, fig_width_in * 72.0 * 0.92)
+    # 数字字符宽度约为 0.62×字号；另预留约 1.4×字号间隙。
+    # mplfinance 会占用较多左右留白，实际绘图区约图宽的 65%，据此保守估算。
+    label_pt = 5 * fontsize * 0.62
+    gap_pt = fontsize * 1.4
+    usable_pt = max(60.0, fig_width_in * 72.0 * 0.65)
     max_labels = max(2, int(usable_pt / (label_pt + gap_pt)))
 
     n_months = len(month_idx)
@@ -90,8 +91,8 @@ def _adaptive_month_ticks(index, fig_width_in=16.0, fontsize=8):
     labels = []
     for i in ticks:
         d = index[i]
-        labels.append(d.strftime('%y%m') if hasattr(d, 'strftime')
-                      else pd.Timestamp(d).strftime('%y%m'))
+        labels.append(d.strftime('%y-%m') if hasattr(d, 'strftime')
+                      else pd.Timestamp(d).strftime('%y-%m'))
 
     if len(ticks) >= 2:
         gaps = [ticks[j + 1] - ticks[j] for j in range(len(ticks) - 1)]
@@ -673,12 +674,7 @@ class ChartGenerator:
         'boll': 'boll',
         'kdj': 'kdj',
         'sar': 'sar',
-        'ma520': 'sg2',
-        'momentum': 'momentum',
-        'volatility': 'volatility',
-        'breadth': 'volume',
         'quality_value': 'quality_value',
-        'composite': 'composite',
     }
 
     def _indicator_base_key(self, key):
@@ -1061,7 +1057,7 @@ class ChartGenerator:
             df, type='candle', style=s, volume=False, addplot=add_plots,
             panel_ratios=tuple(panel_ratios), figsize=(16, 6.5),
             returnfig=True, warn_too_much_data=len(df) + 1,
-            datetime_format='%y%m', xrotation=0
+            datetime_format='%y-%m', xrotation=0
         )
         self._add_ma_legend(axes[0])
 
@@ -1107,10 +1103,9 @@ class ChartGenerator:
                                 xytext=(-10, 8), textcoords='offset points',
                                 fontsize=9, color=COLOR_BLUE, fontproperties=FP_REGULAR)
 
-        # X轴：自适应月度刻度（YYMM，自动间隔避免重叠）
+        # X轴：自适应月度刻度（YY-MM，自动间隔避免重叠）
         bottom_ax = axes[-2]
-        ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16,
-                                              fontsize=8)
+        ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16, fontsize=10)
         if ticks:
             bottom_ax.set_xticks(ticks)
             bottom_ax.set_xticklabels(labels, fontsize=8,
@@ -1176,16 +1171,15 @@ class ChartGenerator:
             df, type='candle', style=style, addplot=[eq_plot], volume=False,
             returnfig=True, figsize=(16, 7),
             warn_too_much_data=len(df) + 1,
-            datetime_format='%y%m', xrotation=0)
+            datetime_format='%y-%m', xrotation=0)
 
         ax = axes[0]
         eq_ax = axes[1]
 
-        # x 轴刻度对齐到“每月首个交易日”（YYMM，自适应间隔避免重叠）
+        # x 轴刻度对齐到“每月首个交易日”（YY-MM，自适应间隔避免重叠）
         try:
             from matplotlib.ticker import FixedLocator, FixedFormatter
-            tick_pos, tick_labels = _adaptive_month_ticks(
-                df.index, fig_width_in=16, fontsize=8)
+            tick_pos, tick_labels = _adaptive_month_ticks(df.index, fig_width_in=16, fontsize=10)
             if tick_pos:
                 ax.xaxis.set_major_locator(FixedLocator(tick_pos))
                 ax.xaxis.set_major_formatter(FixedFormatter(tick_labels))
@@ -1220,6 +1214,13 @@ class ChartGenerator:
                 y = float(df['High'].iloc[pos]) * 1.005
                 ax.scatter([pos], [y], marker='v', s=45, color=COLOR_DOWN,
                            edgecolors=COLOR_DOWN, zorder=6, clip_on=True)
+                ax.annotate(str(t.get('symbol') or ''), xy=(pos, y),
+                            xytext=(0, 10), textcoords='offset points',
+                            ha='center', va='bottom', fontsize=8,
+                            color=COLOR_DOWN, fontproperties=FP_REGULAR,
+                            zorder=7,
+                            bbox=dict(boxstyle='round,pad=0.15', fc='white',
+                                      ec='none', alpha=0.75))
                 seen_sell.add(pos)
 
         # 分区显示：指数K线放在下方，权益曲线放在上方，避免二者交叉。
@@ -1354,10 +1355,8 @@ class ChartGenerator:
         if trend_entries:
             try:
                 trend_colors = {
-                    '上涨': COLOR_UP,
-                    '过热': COLOR_PURPLE,
-                    '下跌': COLOR_DOWN,
-                    '过冷': COLOR_BLUE,
+                    '涨势': COLOR_UP,
+                    '跌势': COLOR_DOWN,
                     '震荡': COLOR_GRAY,
                 }
                 xmin, xmax = ax.get_xlim()
@@ -1544,7 +1543,7 @@ class ChartGenerator:
             df, type='candle', style=s, volume=False, addplot=add_plots,
             panel_ratios=tuple(panel_ratios), figsize=(16, 6 + FACTOR_PANEL_RATIO * extra_panels),
             returnfig=True, warn_too_much_data=len(df) + 1,
-            datetime_format='%y%m', xrotation=0
+            datetime_format='%y-%m', xrotation=0
         )
         self._add_ma_legend(axes[0])
 
@@ -1574,10 +1573,9 @@ class ChartGenerator:
             if eq_ax.get_legend() is not None:
                 eq_ax.legend(loc='upper left', fontsize=8, framealpha=0.7, prop=FP_REGULAR)
 
-        # X轴：自适应月度刻度（YYMM，自动间隔避免重叠）
+        # X轴：自适应月度刻度（YY-MM，自动间隔避免重叠）
         bottom_ax = axes[-2]
-        ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16,
-                                              fontsize=8)
+        ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16, fontsize=10)
         if ticks:
             bottom_ax.set_xticks(ticks)
             bottom_ax.set_xticklabels(labels, fontsize=8,
@@ -1897,13 +1895,12 @@ class ChartGenerator:
             df, type='candle', style=s, volume=True, addplot=add_plots,
             panel_ratios=tuple(panel_ratios), figsize=(16, fig_h),
             returnfig=True, warn_too_much_data=len(df) + 1,
-            datetime_format='%y%m', xrotation=0,
+            datetime_format='%y-%m', xrotation=0,
         )
-        # X轴：自适应月度刻度（YYMM，自动间隔避免重叠）
+        # X轴：自适应月度刻度（YY-MM，自动间隔避免重叠）
         try:
             bottom_ax = axes[-2]
-            ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16,
-                                                  fontsize=8)
+            ticks, labels = _adaptive_month_ticks(df.index, fig_width_in=16, fontsize=10)
             if ticks:
                 bottom_ax.set_xticks(ticks)
                 bottom_ax.set_xticklabels(labels, fontsize=8,

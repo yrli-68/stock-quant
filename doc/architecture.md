@@ -23,12 +23,12 @@ stock-quant/
 ├── strategies/            # 策略实现层（继承 Strategy 基类）
 │   ├── ma_cross.py        # 双均线交叉
 │   ├── macd_strategy.py   # MACD
-│   ├── rsi_strategy.py    # RSI
 │   ├── bollinger_strategy.py # 布林带
-│   ├── composite_strategy.py # 复合策略（加权投票）
-│   ├── momentum_tiered.py # 动量分层（指数）
-│   ├── volatility_timing.py # 波动率择时（指数）
-│   └── breadth_confirmation.py # 涨跌比确认（指数）
+│   ├── boma_strategy.py   # BOMA（BOLL+MACD+DMI）
+│   ├── kdj_strategy.py    # KDJ
+│   ├── sar_strategy.py    # SAR
+│   ├── quality_value_factor.py # 质价融合
+│   └── hold_strategy.py   # 买入持有（基准）
 ├── visualization/
 │   └── charts.py          # 图表生成（K线/资金曲线/多策略对比）
 ├── main.py                # CLI 交互主入口
@@ -57,8 +57,7 @@ stock-quant/
 
 ### 3. 策略层 `core/strategy.py` + `strategies/`
 - `Strategy` 抽象基类定义 `generate_signals()`（抽象）和 `calculate_position()`（持仓转换）。
-- **5 个个股策略** + **3 个指数策略**。
-- `CompositeStrategy` 通过**加权投票**融合多个子策略信号，降低单一策略噪声。
+- 个股/ETF 通用策略 + 质价融合 + 买入持有基准；指数模式复用通用策略。
 
 ### 4. 回测层 `core/backtest.py`
 - `BacktestEngine` 支持**全仓**和**按比例**两种持仓模式。
@@ -142,7 +141,6 @@ flowchart LR
 - ✅ 分层清晰，`core` 与 `strategies` 解耦，易于扩展新策略。
 - ✅ 数据源自动切换（A股/美股），代码标准化处理。
 - ✅ 回测考虑交易成本（佣金+滑点），结果更贴近真实。
-- ✅ 复合策略加权投票机制，提升信号稳健性。
 
 ### 注意事项
 - ⚠️ 部分脚本硬编码了数据路径 `/workspace/stock_quant/data/`，与当前工作目录 `/home/abc/myproj/stock-quant` 不一致，运行前需确认数据文件位置。

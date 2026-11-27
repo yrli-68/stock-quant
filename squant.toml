@@ -44,10 +44,21 @@ BOLL_EXTRAWIDE_SCALE = 3
 EMA60_CHECK = 0
 ADX_CHECK = 0
 
+[tool.stock-quant.boma]
+"买入信号BOLL" = 1
+"买入信号MACD1" = 1
+"买入信号MACD2" = 1
+"买入信号ADX" = 1
+"卖出信号BOLL1" = 1
+"卖出信号BOLL2" = 1
+"卖出信号MACD1" = 1
+"卖出信号MACD2" = 1
+"卖出信号ATR" = 1
+
 [tool.stock-quant.limit]
 LIMIT_ST = 1
-LIMIT_PRICE = 2
-LIMIT_PE = 2
+LIMIT_PRICE = 2.5
+LIMIT_PE = 3
 LIMIT_CAPITAL = 40
 
 [tool.stock-quant.WEBHOOK]
@@ -60,25 +71,6 @@ port = 3306
 user = "smit"
 password = "smit2024"
 database = "stock_quant"
-
-[tool.stock-quant.composite]
-strategies = [
-    "ma1030",
-    "macd",
-    "kdj",
-    "bollinger",
-    "quality_value",
-]
-window = 20
-z_buy = 1.5
-z_sell = -1.5
-
-[tool.stock-quant.composite.weights]
-ma1030 = 0.15
-macd = 0.2
-kdj = 0.15
-bollinger = 0.1
-quality_value = 0.1
 
 [tool.setuptools]
 py-modules = ["main", "poolmgr", "_version"]
